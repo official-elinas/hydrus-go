@@ -31,21 +31,22 @@ Last updated: 2026-04-16
   - transparency/EXIF/human-readable/ICC metadata booleans
   - `include_milliseconds=true` support for the implemented full-mode timestamps
 - explicitly rejects `include_notes=true` and `detailed_url_information=true` in the current full-mode slice
+- added an internal writable Hydrus bundle mode with a serialized `BEGIN IMMEDIATE` transaction runner
 - added DB and app-wiring tests using a copied minimal SQLite fixture bundle
 - added tests for config validation, HTTP/auth behavior, and shutdown lifecycle
 - documented the daemon-first migration direction and current bootstrap limits
 
 ## In Progress
 
-- database/schema reconnaissance for the first writable Hydrus-compatible import path
-- defining transaction, locking, and managed-store rules needed to move from read-only access to controlled writes
+- characterizing the Python write-set for the first Hydrus-compatible local file import
+- defining managed-store placement and the first minimal import API slice on top of the serialized write foundation
 
 ### Active reconnaissance notes
 
 - the Hydrus client DB is an attached SQLite bundle, not a single file database
 - the Python client uses a dedicated DB worker model with one long-lived connection
 - transaction behavior is centered around `BEGIN IMMEDIATE` and savepoints
-- the first Go DB milestone stays read-only and consumes existing derived caches where possible
+- the current daemon runtime still stays read-only while the internal write foundation is proven with fixtures
 
 ## Next
 
@@ -59,7 +60,7 @@ Last updated: 2026-04-16
 
 - [ ] characterize the Python Hydrus write-set for a single local file import
 - [ ] design the first Hydrus-compatible writable import transaction flow
-- [ ] implement a serialized write model for the daemon's SQLite bundle access
+- [x] implement a serialized write model for the daemon's SQLite bundle access
 - [ ] implement managed-store path resolution and file placement in `client_files`
 - [ ] add the first DB-backed local file import path/API
 - [ ] verify round-trip behavior from import to `GET /get_files/file_metadata`
@@ -133,3 +134,10 @@ Last updated: 2026-04-16
 - added `include_milliseconds=true` support for the implemented full-mode timestamps
 - kept unsupported full-mode behaviors explicit by rejecting `include_notes=true` and `detailed_url_information=true`
 - verified with `go test ./...`
+
+### 2026-04-16 — Milestone 4: serialized writable transaction foundation
+
+- added a separate internal writable bundle open path alongside the existing read-only daemon path
+- added a serialized `BEGIN IMMEDIATE` transaction runner for future Hydrus-compatible writes
+- verified commit, rollback, read-only rejection, context-aware write queuing, and post-failure reuse with fixture-backed tests
+- kept the daemon runtime itself read-only while import and `client_files` write behavior are still being designed

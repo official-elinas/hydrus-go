@@ -4,10 +4,12 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/official-elinas/hydrus-go/internal/core/filemetadata"
 	"github.com/official-elinas/hydrus-go/internal/core/services"
@@ -496,6 +498,254 @@ func TestBundleMetadata(t *testing.T) {
 		)
 		if err == nil {
 			t.Fatal("ExecContext() error = nil, want read-only failure")
+		}
+	})
+}
+
+func TestBundleWriteTransactions(t *testing.T) {
+	t.Run("read-only bundles reject immediate transactions", func(t *testing.T) {
+		dir, _ := createTestBundle(t)
+
+		bundle, err := Open(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("Open() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		ran := false
+		err = bundle.WithImmediateTx(context.Background(), func(tx *ImmediateTx) error {
+			ran = true
+			_, execErr := tx.ExecContext(
+				context.Background(),
+				`INSERT INTO file_inbox (hash_id) VALUES (?)`,
+				1,
+			)
+			return execErr
+		})
+		if err == nil {
+			t.Fatal("WithImmediateTx() error = nil, want error")
+		}
+
+		if ran {
+			t.Fatal("write callback ran for read-only bundle")
+		}
+	})
+
+	t.Run("writable bundles commit controlled mutations", func(t *testing.T) {
+		dir, _ := createTestBundle(t)
+
+		bundle, err := OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		err = bundle.WithImmediateTx(context.Background(), func(tx *ImmediateTx) error {
+			_, execErr := tx.ExecContext(
+				context.Background(),
+				`INSERT INTO archive_timestamps (hash_id, archived_timestamp_ms) VALUES (?, ?)`,
+				2,
+				900123,
+			)
+			return execErr
+		})
+		if err != nil {
+			t.Fatalf("WithImmediateTx() error = %v", err)
+		}
+
+		db := openSQLiteForTest(t, filepath.Join(dir, "client.db"))
+		defer db.Close()
+
+		var archivedTimestampMS int64
+		if err := db.QueryRow(
+			`SELECT archived_timestamp_ms FROM archive_timestamps WHERE hash_id = ?`,
+			2,
+		).Scan(&archivedTimestampMS); err != nil {
+			t.Fatalf("Scan() error = %v", err)
+		}
+
+		if archivedTimestampMS != 900123 {
+			t.Fatalf("archivedTimestampMS = %d, want 900123", archivedTimestampMS)
+		}
+	})
+
+	t.Run("writable bundles roll back on callback error", func(t *testing.T) {
+		dir, _ := createTestBundle(t)
+
+		bundle, err := OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		expectedErr := errors.New("force rollback")
+		err = bundle.WithImmediateTx(context.Background(), func(tx *ImmediateTx) error {
+			if _, execErr := tx.ExecContext(
+				context.Background(),
+				`INSERT INTO file_inbox (hash_id) VALUES (?)`,
+				1,
+			); execErr != nil {
+				return execErr
+			}
+
+			return expectedErr
+		})
+		if !errors.Is(err, expectedErr) {
+			t.Fatalf("WithImmediateTx() error = %v, want %v", err, expectedErr)
+		}
+
+		db := openSQLiteForTest(t, filepath.Join(dir, "client.db"))
+		defer db.Close()
+
+		var count int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM file_inbox WHERE hash_id = ?`,
+			1,
+		).Scan(&count); err != nil {
+			t.Fatalf("Scan() error = %v", err)
+		}
+
+		if count != 0 {
+			t.Fatalf("file_inbox count = %d, want 0 after rollback", count)
+		}
+	})
+
+	t.Run("writable bundles serialize concurrent write callbacks", func(t *testing.T) {
+		dir, _ := createTestBundle(t)
+
+		db := openSQLiteForTest(t, filepath.Join(dir, "client.db"))
+		mustExec(t, db, `CREATE TABLE tx_log (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT);`)
+		if err := db.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+
+		bundle, err := OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		firstEntered := make(chan struct{})
+		releaseFirst := make(chan struct{})
+		firstDone := make(chan error, 1)
+		secondEntered := make(chan struct{})
+		secondDone := make(chan error, 1)
+
+		go func() {
+			firstDone <- bundle.WithImmediateTx(context.Background(), func(tx *ImmediateTx) error {
+				if _, execErr := tx.ExecContext(
+					context.Background(),
+					`INSERT INTO tx_log (label) VALUES (?)`,
+					"first-start",
+				); execErr != nil {
+					return execErr
+				}
+
+				close(firstEntered)
+				<-releaseFirst
+
+				_, execErr := tx.ExecContext(
+					context.Background(),
+					`INSERT INTO tx_log (label) VALUES (?)`,
+					"first-end",
+				)
+				return execErr
+			})
+		}()
+
+		<-firstEntered
+
+		secondCtx, cancelSecond := context.WithTimeout(
+			context.Background(),
+			100*time.Millisecond,
+		)
+		defer cancelSecond()
+
+		go func() {
+			secondDone <- bundle.WithImmediateTx(secondCtx, func(tx *ImmediateTx) error {
+				close(secondEntered)
+				_, execErr := tx.ExecContext(
+					context.Background(),
+					`INSERT INTO tx_log (label) VALUES (?)`,
+					"second",
+				)
+				return execErr
+			})
+		}()
+
+		if err := <-secondDone; !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("second WithImmediateTx() error = %v, want context deadline exceeded", err)
+		}
+
+		select {
+		case <-secondEntered:
+			t.Fatal("second write callback entered while first transaction held the write gate")
+		default:
+		}
+
+		close(releaseFirst)
+
+		if err := <-firstDone; err != nil {
+			t.Fatalf("first WithImmediateTx() error = %v", err)
+		}
+
+		err = bundle.WithImmediateTx(context.Background(), func(tx *ImmediateTx) error {
+			_, execErr := tx.ExecContext(
+				context.Background(),
+				`INSERT INTO tx_log (label) VALUES (?)`,
+				"third",
+			)
+			return execErr
+		})
+		if err != nil {
+			t.Fatalf("third WithImmediateTx() error = %v", err)
+		}
+
+		db = openSQLiteForTest(t, filepath.Join(dir, "client.db"))
+		defer db.Close()
+
+		rows, err := db.Query(`SELECT label FROM tx_log ORDER BY id ASC`)
+		if err != nil {
+			t.Fatalf("Query() error = %v", err)
+		}
+		defer rows.Close()
+
+		labels := []string{}
+		for rows.Next() {
+			var label string
+			if err := rows.Scan(&label); err != nil {
+				t.Fatalf("Scan() error = %v", err)
+			}
+
+			labels = append(labels, label)
+		}
+
+		if err := rows.Err(); err != nil {
+			t.Fatalf("rows.Err() = %v", err)
+		}
+
+		if len(labels) != 3 {
+			t.Fatalf("len(labels) = %d, want 3", len(labels))
+		}
+
+		if labels[0] != "first-start" || labels[1] != "first-end" || labels[2] != "third" {
+			t.Fatalf("labels = %v, want [first-start first-end third]", labels)
 		}
 	})
 }

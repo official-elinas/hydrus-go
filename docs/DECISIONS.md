@@ -77,11 +77,12 @@ explicit opt-in.
 
 ---
 
-## 2026-04-16 — legacy Hydrus Server is not an early migration target
+## 2026-04-16 — legacy Hydrus Server is not a migration target
 
 **Decision**
 
-Do not prioritize a direct reimplementation of the old Hydrus Server.
+Do not treat a direct reimplementation of the old Hydrus Server as part of this
+migration roadmap.
 
 **Why**
 
@@ -91,8 +92,8 @@ Do not prioritize a direct reimplementation of the old Hydrus Server.
 
 **Consequence**
 
-If server-like behavior returns, it should emerge from the same headless backend
-architecture rather than as a separate legacy-compatible port.
+The migration stays focused on daemon ownership of the client library backend
+rather than on legacy server parity.
 
 ---
 
@@ -156,3 +157,25 @@ with a DB-backed non-tag subset instead of waiting for total Hydrus parity.
 The endpoint now returns a documented default/full non-tag subset while deeper
 parity work for tags, ratings, notes, detailed URLs, and viewing statistics
 continues in later slices.
+
+---
+
+## 2026-04-16 — Hydrus bundle writes go through one serialized `BEGIN IMMEDIATE` runner
+
+**Decision**
+
+Add writable Hydrus bundle support behind an internal serialized transaction
+runner, and require future DB mutations to go through that single path.
+
+**Why**
+
+- Hydrus's Python client already centers write behavior around a serialized DB worker model
+- attached SQLite bundle aliases are tied to one connection, so uncontrolled pooled writes are risky
+- local import, managed file placement, and later PTR sync all need a safe mutation primitive before public write APIs exist
+- this creates a narrow, testable write foundation without prematurely exposing writable HTTP surfaces
+
+**Consequence**
+
+The project can begin Phase 4 safely with fixture-backed writable DB primitives,
+while the daemon runtime and public APIs remain read-only until import behavior
+and `client_files` ownership are fully designed.

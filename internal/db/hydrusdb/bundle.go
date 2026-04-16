@@ -1,5 +1,5 @@
-// Package hydrusdb opens the Hydrus client SQLite bundle read-only and exposes
-// the first DB-backed query surfaces used by hydrus-go.
+// Package hydrusdb opens the Hydrus client SQLite bundle and exposes the first
+// DB-backed surfaces used by hydrus-go.
 package hydrusdb
 
 import (
@@ -22,13 +22,22 @@ type attachment struct {
 	path  string
 }
 
-// Bundle is a read-only Hydrus client DB bundle opened on a single dedicated
-// SQLite connection so ATTACH aliases remain stable.
+type openMode string
+
+const (
+	modeReadOnly  openMode = "ro"
+	modeReadWrite openMode = "rw"
+)
+
+// Bundle is a Hydrus client DB bundle opened on a single dedicated SQLite
+// connection so ATTACH aliases remain stable.
 type Bundle struct {
 	db   *sql.DB
 	conn *sql.Conn
 
-	paths bundlePaths
+	mode      openMode
+	writeGate chan struct{}
+	paths     bundlePaths
 }
 
 type bundlePaths struct {
@@ -42,12 +51,23 @@ type bundlePaths struct {
 
 // Open opens a Hydrus client DB bundle read-only.
 func Open(ctx context.Context, dir string) (*Bundle, error) {
+	return openBundle(ctx, dir, modeReadOnly)
+}
+
+// OpenWritable opens a Hydrus client DB bundle read-write for internal daemon
+// mutation workflows. Public HTTP surfaces should not use this until the write
+// path is fully designed and documented.
+func OpenWritable(ctx context.Context, dir string) (*Bundle, error) {
+	return openBundle(ctx, dir, modeReadWrite)
+}
+
+func openBundle(ctx context.Context, dir string, mode openMode) (*Bundle, error) {
 	paths, err := resolveBundlePaths(dir)
 	if err != nil {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite", sqliteReadOnlyURI(paths.main))
+	db, err := sql.Open("sqlite", sqliteModeURI(paths.main, mode))
 	if err != nil {
 		return nil, fmt.Errorf("open main sqlite database: %w", err)
 	}
@@ -75,23 +95,30 @@ func Open(ctx context.Context, dir string) (*Bundle, error) {
 	}
 
 	for _, attachment := range attachments {
-		if err := attachReadOnlyDatabase(ctx, conn, attachment); err != nil {
+		if err := attachDatabase(ctx, conn, attachment, mode); err != nil {
 			_ = conn.Close()
 			_ = db.Close()
 			return nil, err
 		}
 	}
 
-	if _, err := conn.ExecContext(ctx, "PRAGMA query_only = ON"); err != nil {
-		_ = conn.Close()
-		_ = db.Close()
-		return nil, fmt.Errorf("enable sqlite query_only mode: %w", err)
+	if mode == modeReadOnly {
+		if _, err := conn.ExecContext(ctx, "PRAGMA query_only = ON"); err != nil {
+			_ = conn.Close()
+			_ = db.Close()
+			return nil, fmt.Errorf("enable sqlite query_only mode: %w", err)
+		}
 	}
 
+	writeGate := make(chan struct{}, 1)
+	writeGate <- struct{}{}
+
 	return &Bundle{
-		db:    db,
-		conn:  conn,
-		paths: paths,
+		db:        db,
+		conn:      conn,
+		mode:      mode,
+		writeGate: writeGate,
+		paths:     paths,
 	}, nil
 }
 
@@ -292,23 +319,24 @@ func requireFile(path string) error {
 	return nil
 }
 
-func attachReadOnlyDatabase(
+func attachDatabase(
 	ctx context.Context,
 	conn *sql.Conn,
 	attachment attachment,
+	mode openMode,
 ) error {
 	query := fmt.Sprintf("ATTACH DATABASE ? AS %s", attachment.alias)
-	if _, err := conn.ExecContext(ctx, query, sqliteReadOnlyURI(attachment.path)); err != nil {
+	if _, err := conn.ExecContext(ctx, query, sqliteModeURI(attachment.path, mode)); err != nil {
 		return fmt.Errorf("attach %s: %w", attachment.alias, err)
 	}
 
 	return nil
 }
 
-func sqliteReadOnlyURI(path string) string {
+func sqliteModeURI(path string, mode openMode) string {
 	uri := url.URL{Scheme: "file", Path: path}
 	query := uri.Query()
-	query.Set("mode", "ro")
+	query.Set("mode", string(mode))
 	uri.RawQuery = query.Encode()
 	return uri.String()
 }

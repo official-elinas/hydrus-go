@@ -123,7 +123,8 @@ This is still an early migration milestone, not feature parity.
 
 Important current limitations:
 
-- DB-backed mode is read-only only
+- DB-backed daemon/runtime mode is still read-only only
+- an internal serialized writable transaction foundation now exists, but there is not yet a public import/write API
 - `GET /get_files/file_metadata` currently supports:
   - `only_return_identifiers=true`
   - `only_return_basic_information=true`
@@ -166,8 +167,7 @@ Instead:
 - clients talk to the daemon through APIs
 - local-only remains the default security posture
 - LAN access is an explicit supported direction
-- the legacy Hydrus Server is not a migration target unless a useful headless
-  daemon capability emerges from the same backend architecture
+- the legacy Hydrus Server is not a migration target
 
 ## Scope direction
 
@@ -176,7 +176,7 @@ The migration direction is:
 - headless local daemon first
 - Client API compatibility where it helps real tools and clients
 - preserve Hydrus's internal managed file store model
-- skip the legacy Hydrus Server unless a useful headless daemon model emerges
+- skip the legacy Hydrus Server
 
 ## Running locally
 
@@ -230,8 +230,8 @@ This bootstrap currently targets the Go toolchain declared in `go.mod`
 
 ## Immediate next milestones
 
+- writable import foundation and managed `client_files` ownership
+- PTR integration so imported files can participate in repository tag/update flows
 - broader default/full metadata parity for `GET /get_files/file_metadata`
-- file store primitives and hashing
-- metadata and import pipeline foundations
-- search/tagging model
+- search/tagging model on top of imported and PTR-synced data
 - broader Client API compatibility

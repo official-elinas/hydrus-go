@@ -45,11 +45,10 @@ Over time, the daemon is expected to absorb:
 ## What is not a primary target
 
 - a direct port of the legacy Hydrus desktop UI
-- a reimplementation of the old Hydrus Server as a separate product
+- legacy Hydrus Server parity
 
-If anything server-like returns, it should come from the same daemon-first
-architecture so that real clients can connect to a single backend that owns the
-library state.
+The migration is centered on daemon ownership of a local library backend, not a
+separate reimplementation of legacy server behavior.
 
 ## Current implementation reality
 
@@ -57,6 +56,13 @@ Today, the daemon has two concrete layers:
 
 1. a bootstrap runtime layer for config, auth, logging, lifecycle, and HTTP routing
 2. a first read-only DB-backed layer for selected Hydrus Client API parity
+
+The `hydrusdb` package now also includes the first internal write foundation:
+
+- an explicit writable bundle open path for future import/mutation work
+- a serialized `BEGIN IMMEDIATE` transaction runner
+- fixture-backed proof of commit, rollback, and queued-write behavior
+- no public write API yet; the daemon runtime still opens the bundle read-only today
 
 The DB-backed layer currently:
 
@@ -84,6 +90,6 @@ The deeper Hydrus client-core behaviors are still pending:
 
 - full media-result metadata parity, especially tags/ratings/viewing stats/notes/detailed URL info
 - managed file-store ownership and file serving
-- imports and hashing
+- imports, hashing, and managed `client_files` writes on top of the new transaction foundation
 - search/tagging engine behavior
 - richer stateful background processing
