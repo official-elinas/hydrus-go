@@ -3,7 +3,6 @@ package httpapi
 import (
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,28 +11,32 @@ import (
 	"time"
 
 	"github.com/official-elinas/hydrus-go/internal/buildinfo"
+	"github.com/official-elinas/hydrus-go/internal/core/filemetadata"
 	"github.com/official-elinas/hydrus-go/internal/core/services"
 )
 
 type Server struct {
-	logger     *slog.Logger
-	access     *AccessControl
-	catalog    services.Catalog
-	enableCORS bool
+	logger        *slog.Logger
+	access        *AccessControl
+	services      services.Provider
+	metadataStore filemetadata.Store
+	enableCORS    bool
 }
 
 // NewHandler constructs the bootstrap hydrus-go HTTP API handler.
 func NewHandler(
 	logger *slog.Logger,
 	access *AccessControl,
-	catalog services.Catalog,
+	serviceProvider services.Provider,
+	metadataStore filemetadata.Store,
 	enableCORS bool,
 ) http.Handler {
 	server := &Server{
-		logger:     logger,
-		access:     access,
-		catalog:    catalog,
-		enableCORS: enableCORS,
+		logger:        logger,
+		access:        access,
+		services:      serviceProvider,
+		metadataStore: metadataStore,
+		enableCORS:    enableCORS,
 	}
 
 	mux := http.NewServeMux()
@@ -44,6 +47,10 @@ func NewHandler(
 	mux.Handle("/session_key", server.get("/session_key", server.handleSessionKey))
 	mux.Handle("/get_services", server.get("/get_services", server.handleGetServices))
 	mux.Handle("/get_service", server.get("/get_service", server.handleGetService))
+	mux.Handle(
+		"/get_files/file_metadata",
+		server.get("/get_files/file_metadata", server.handleGetFileMetadata),
+	)
 
 	return server.withGlobalMiddleware(mux)
 }
@@ -166,12 +173,18 @@ func (s *Server) handleGetServices(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	body := map[string]any{
-		"services":    s.catalog.LegacyMap(),
-		"services_v2": s.catalog,
+	catalog, err := s.services.List(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "could not load services")
+		return
 	}
 
-	for category, list := range s.catalog.Grouped() {
+	body := map[string]any{
+		"services":    catalog.LegacyMap(),
+		"services_v2": catalog,
+	}
+
+	for category, list := range catalog.Grouped() {
 		body[category] = list
 	}
 
@@ -194,48 +207,77 @@ func (s *Server) handleGetService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	service, err := s.lookupService(r)
+	service, statusCode, err := s.lookupService(r)
 	if err != nil {
-		var notFoundError *notFound
-		if errors.As(err, &notFoundError) {
-			writeError(w, http.StatusNotFound, err.Error())
-			return
-		}
-
-		writeError(w, http.StatusBadRequest, err.Error())
+		writeError(w, statusCode, err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]any{"service": service})
+	if !services.IsDiscoveryAllowed(service.Type) {
+		writeError(
+			w,
+			http.StatusBadRequest,
+			"service exists but is not available through this endpoint",
+		)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"service": map[string]any{
+			"name":        service.Name,
+			"service_key": service.ServiceKey,
+			"type":        service.Type,
+			"type_pretty": service.TypePretty,
+		},
+	})
 }
 
-func (s *Server) lookupService(r *http.Request) (services.Service, error) {
+func (s *Server) lookupService(r *http.Request) (services.Service, int, error) {
 	serviceKey := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("service_key")))
 	serviceName := strings.TrimSpace(r.URL.Query().Get("service_name"))
 
 	if serviceKey == "" && serviceName == "" {
-		return services.Service{}, errors.New("service_key or service_name is required")
+		return services.Service{}, http.StatusBadRequest, fmt.Errorf(
+			"service_key or service_name is required",
+		)
 	}
 
 	if serviceKey != "" {
 		if _, err := hex.DecodeString(serviceKey); err != nil {
-			return services.Service{}, fmt.Errorf("invalid service_key: %w", err)
+			return services.Service{}, http.StatusBadRequest, fmt.Errorf(
+				"invalid service_key: %w",
+				err,
+			)
 		}
 
-		service, ok := s.catalog.ByKey(serviceKey)
+		service, ok, err := s.services.ByKey(r.Context(), serviceKey)
+		if err != nil {
+			return services.Service{}, http.StatusInternalServerError, fmt.Errorf(
+				"load service by key: %w",
+				err,
+			)
+		}
+
 		if !ok {
-			return services.Service{}, &notFound{message: "service not found"}
+			return services.Service{}, http.StatusNotFound, fmt.Errorf("service not found")
 		}
 
-		return service, nil
+		return service, http.StatusOK, nil
 	}
 
-	service, ok := s.catalog.ByName(serviceName)
+	service, ok, err := s.services.ByName(r.Context(), serviceName)
+	if err != nil {
+		return services.Service{}, http.StatusInternalServerError, fmt.Errorf(
+			"load service by name: %w",
+			err,
+		)
+	}
+
 	if !ok {
-		return services.Service{}, &notFound{message: "service not found"}
+		return services.Service{}, http.StatusNotFound, fmt.Errorf("service not found")
 	}
 
-	return service, nil
+	return service, http.StatusOK, nil
 }
 
 func writeJSON(w http.ResponseWriter, statusCode int, body map[string]any) {
@@ -294,12 +336,4 @@ type statusRecorder struct {
 func (r *statusRecorder) WriteHeader(statusCode int) {
 	r.statusCode = statusCode
 	r.ResponseWriter.WriteHeader(statusCode)
-}
-
-type notFound struct {
-	message string
-}
-
-func (e *notFound) Error() string {
-	return e.message
 }

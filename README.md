@@ -13,15 +13,17 @@ over the LAN, with broader remote access considered later.
 
 ## Current status
 
-This repository currently provides the first bootstrap slice:
+This repository currently provides two early slices:
 
 - standalone Go module and daemon entrypoint
 - environment-based configuration
 - structured logging
 - graceful shutdown
 - initial local HTTP API
+- DB-backed read-only Hydrus client bundle opening
 - Hydrus-compatible service catalog foundation
 - access key and session key flow for the initial compatibility endpoints
+- initial DB-backed file metadata compatibility, including a first full/default non-tag slice
 
 Project notes live in:
 
@@ -40,6 +42,7 @@ Project notes live in:
   - `GET /session_key`
   - `GET /get_services`
   - `GET /get_service`
+  - `GET /get_files/file_metadata`
 
 Protected endpoints accept either of these credentials:
 
@@ -49,9 +52,36 @@ Protected endpoints accept either of these credentials:
 For the currently implemented GET endpoints, the same names may also be sent as
 query parameters.
 
-These endpoints are the first compatibility-oriented slice of the Hydrus Client
+These endpoints are the first compatibility-oriented slices of the Hydrus Client
 API. They are intentionally narrow and are meant to establish a stable daemon
-foundation before database, import, storage, and search behavior are added.
+foundation before broader database, import, storage, and search behavior are
+added.
+
+## Read-only DB-backed mode
+
+If `HYDRUS_GO_DB_DIR` points at an existing Hydrus client database directory,
+the daemon will open the client bundle read-only and switch these endpoints to
+live DB-backed behavior:
+
+- `GET /get_services`
+- `GET /get_service`
+- `GET /get_files/file_metadata`
+
+Expected bundle files today:
+
+- `client.db`
+- `client.master.db`
+- `client.caches.db`
+- `client.mappings.db`
+- optional: `client.temp.db`
+
+Implementation notes for this first slice:
+
+- uses `modernc.org/sqlite`
+- forces a single SQLite connection so attached DB aliases remain stable
+- opens the bundle read-only and enables `PRAGMA query_only = ON`
+- does not write new file identifiers or mutate the Hydrus DB
+- expands `GET /get_files/file_metadata` in safe read-only vertical slices rather than attempting full parity at once
 
 ## Bootstrap auth flow
 
@@ -89,20 +119,41 @@ Current session behavior:
 
 ## Current milestone limits
 
-This is a bootstrap milestone, not feature parity.
+This is still an early migration milestone, not feature parity.
 
 Important current limitations:
 
-- `/get_services` and `/get_service` use a fixed in-memory bootstrap catalog,
-  not a real Hydrus database yet
-- no SQLite integration yet
+- DB-backed mode is read-only only
+- `GET /get_files/file_metadata` currently supports:
+  - `only_return_identifiers=true`
+  - `only_return_basic_information=true`
+  - optional `include_blurhash=true` in basic mode
+  - default/full read-only non-tag metadata for:
+    - `file_services`
+    - `time_modified` and `time_modified_details`
+    - `time_archived`
+    - `is_inbox`, `is_local`, `is_trashed`, `is_deleted`
+    - `known_urls`
+    - `pixel_hash`
+    - `ipfs_multihashes`
+    - `has_transparency`, `has_exif`, `has_human_readable_embedded_metadata`, `has_icc_profile`
+  - `include_milliseconds=true` for the implemented full-mode timestamp fields
+  - optional `include_services_object=false`
+- full/default `GET /get_files/file_metadata` parity is still incomplete; this slice does not yet implement:
+  - `tags`
+  - `ratings`
+  - `file_viewing_statistics`
+  - `include_notes=true`
+  - `detailed_url_information=true`
+  - exact thumbnail-dimension parity
+- `create_new_file_ids=true` is intentionally rejected in read-only mode
 - no managed file storage yet
 - no import pipeline yet
 - no search/tagging engine yet
 - no downloader/subscription/parsing system yet
 
-The point of this slice is to lock down daemon startup, auth, and early API
-contracts before the deeper Hydrus client core is ported.
+The point of this slice is to lock down daemon startup, auth, DB bundle access,
+and early API contracts before the deeper Hydrus client core is ported.
 
 ## Backend model
 
@@ -139,6 +190,12 @@ port.
 If no API access key is configured, one will be generated on startup and written
 to the daemon logs.
 
+To run in DB-backed read-only mode, also set:
+
+```bash
+export HYDRUS_GO_DB_DIR=/path/to/hydrus/db
+```
+
 ## Developer loop
 
 ```bash
@@ -154,6 +211,7 @@ This bootstrap currently targets the Go toolchain declared in `go.mod`
 ## Environment variables
 
 - `HYDRUS_GO_LISTEN_ADDR` (default: `127.0.0.1:45869`)
+- `HYDRUS_GO_DB_DIR` (optional path to a Hydrus client DB directory)
 - `HYDRUS_GO_ACCESS_KEY` (optional 64-char hex access key)
 - `HYDRUS_GO_ACCESS_NAME` (default: `hydrus-go`)
 - `HYDRUS_GO_LOG_LEVEL` (default: `info`)
@@ -172,7 +230,7 @@ This bootstrap currently targets the Go toolchain declared in `go.mod`
 
 ## Immediate next milestones
 
-- SQLite bootstrap and schema reconnaissance
+- broader default/full metadata parity for `GET /get_files/file_metadata`
 - file store primitives and hashing
 - metadata and import pipeline foundations
 - search/tagging model

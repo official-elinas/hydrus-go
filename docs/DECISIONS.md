@@ -93,3 +93,66 @@ Do not prioritize a direct reimplementation of the old Hydrus Server.
 
 If server-like behavior returns, it should emerge from the same headless backend
 architecture rather than as a separate legacy-compatible port.
+
+---
+
+## 2026-04-16 — first DB-backed slice is read-only and single-connection
+
+**Decision**
+
+Open the Hydrus client SQLite bundle read-only on a single dedicated connection
+for the first DB-backed migration slice.
+
+**Why**
+
+- Hydrus uses attached SQLite databases rather than a single file
+- attached DB aliases are connection-local, so a pooled multi-connection design
+  would be error-prone too early
+- the first parity target only needs query behavior, not writes
+- this keeps the early Go daemon aligned with Hydrus's serialized DB access model
+
+**Consequence**
+
+The daemon can safely serve early DB-backed read APIs, but it does not yet
+support DB mutations or concurrent write-oriented workflows.
+
+---
+
+## 2026-04-16 — first DB driver is `modernc.org/sqlite`
+
+**Decision**
+
+Use `modernc.org/sqlite` for the first Hydrus DB integration slice.
+
+**Why**
+
+- it works with the current Go 1.22 toolchain in this repo
+- it avoids requiring CGO for the first portable backend milestone
+- it is sufficient for read-only attached-bundle access and test fixtures
+
+**Consequence**
+
+The driver choice should stay narrow behind the DB bundle package so it can be
+revisited later if write-path, locking, or performance needs change.
+
+---
+
+## 2026-04-16 — default `file_metadata` parity ships in explicit non-tag slices first
+
+**Decision**
+
+Implement default/full `GET /get_files/file_metadata` incrementally, beginning
+with a DB-backed non-tag subset instead of waiting for total Hydrus parity.
+
+**Why**
+
+- keeps the migration moving with small, testable vertical slices
+- lets the daemon reuse existing derived DB state before porting the full media-result stack
+- avoids fabricating partially correct tag/rating/viewing behavior just to remove a `501`
+- makes unsupported behaviors explicit when the backing semantics are not ready yet
+
+**Consequence**
+
+The endpoint now returns a documented default/full non-tag subset while deeper
+parity work for tags, ratings, notes, detailed URLs, and viewing statistics
+continues in later slices.

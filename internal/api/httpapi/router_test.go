@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -10,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/official-elinas/hydrus-go/internal/buildinfo"
+	"github.com/official-elinas/hydrus-go/internal/core/filemetadata"
 	"github.com/official-elinas/hydrus-go/internal/core/services"
 )
 
@@ -217,6 +219,263 @@ func TestProtectedEndpoints(t *testing.T) {
 			t.Fatalf("service.name = %v, want repository updates", service["name"])
 		}
 	})
+
+	t.Run("file metadata requires DB-backed store", func(t *testing.T) {
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/get_files/file_metadata?hashes=%5B%22"+strings.Repeat("a", 64)+"%22%5D&only_return_identifiers=true",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", access.AccessKey())
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotImplemented)
+		}
+	})
+}
+
+func TestGetFileMetadata(t *testing.T) {
+	provider := services.NewStaticProvider(services.DefaultCatalog())
+	store := &fakeMetadataStore{
+		rows: []filemetadata.Row{
+			{
+				"file_id":         int64(1),
+				"hash":            strings.Repeat("a", 64),
+				"size":            int64(123),
+				"mime":            "image/jpeg",
+				"filetype_human":  "jpeg",
+				"filetype_enum":   1,
+				"ext":             ".jpg",
+				"width":           int64(640),
+				"height":          int64(480),
+				"duration":        nil,
+				"num_frames":      nil,
+				"num_words":       nil,
+				"has_audio":       false,
+				"filetype_forced": false,
+				"original_mime":   nil,
+				"blurhash":        "LKO2?U%2Tw=w]~RBVZRi};RPxuwH",
+			},
+			filemetadata.MissingHashRow(strings.Repeat("b", 64)),
+		},
+	}
+
+	handler := newHandlerWithDeps(t, provider, store, false)
+	accessKey := strings.Repeat("b", 64)
+
+	t.Run("returns metadata with services objects by default", func(t *testing.T) {
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/get_files/file_metadata?hashes=%5B%22"+strings.Repeat("a", 64)+"%22%2C%22"+strings.Repeat("b", 64)+"%22%5D&only_return_basic_information=true&include_blurhash=true",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", accessKey)
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		metadata, ok := payload["metadata"].([]any)
+		if !ok {
+			t.Fatalf("metadata type = %T, want []any", payload["metadata"])
+		}
+
+		if len(metadata) != 2 {
+			t.Fatalf("len(metadata) = %d, want 2", len(metadata))
+		}
+
+		if _, ok := payload["services"]; !ok {
+			t.Fatal("services missing from response")
+		}
+
+		if _, ok := payload["services_v2"]; !ok {
+			t.Fatal("services_v2 missing from response")
+		}
+	})
+
+	t.Run("can suppress services objects", func(t *testing.T) {
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/get_files/file_metadata?file_ids=%5B1%5D&only_return_identifiers=true&include_services_object=false",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", accessKey)
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		if _, ok := payload["services"]; ok {
+			t.Fatal("services unexpectedly present")
+		}
+
+		if _, ok := payload["services_v2"]; ok {
+			t.Fatal("services_v2 unexpectedly present")
+		}
+	})
+
+	t.Run("invalid hash is rejected", func(t *testing.T) {
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/get_files/file_metadata?hashes=%5B%22deadbeef%22%5D&only_return_identifiers=true",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", accessKey)
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("parses full mode flags", func(t *testing.T) {
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/get_files/file_metadata?file_ids=%5B1%5D&include_milliseconds=true&include_notes=true&detailed_url_information=true&include_services_object=false",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", accessKey)
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		if store.lastRequest == nil {
+			t.Fatal("lastRequest = nil, want parsed request")
+		}
+
+		if store.lastRequest.OnlyReturnIdentifiers {
+			t.Fatal("OnlyReturnIdentifiers = true, want false")
+		}
+
+		if store.lastRequest.OnlyReturnBasicInformation {
+			t.Fatal("OnlyReturnBasicInformation = true, want false")
+		}
+
+		if !store.lastRequest.IncludeMilliseconds {
+			t.Fatal("IncludeMilliseconds = false, want true")
+		}
+
+		if !store.lastRequest.IncludeNotes {
+			t.Fatal("IncludeNotes = false, want true")
+		}
+
+		if !store.lastRequest.DetailedURLInformation {
+			t.Fatal("DetailedURLInformation = false, want true")
+		}
+
+		if store.lastRequest.IncludeServicesObject {
+			t.Fatal("IncludeServicesObject = true, want false")
+		}
+	})
+
+	t.Run("unsupported full mode flags return not implemented", func(t *testing.T) {
+		rejectingStore := &fakeMetadataStore{
+			handle: func(request filemetadata.Request) ([]filemetadata.Row, error) {
+				switch {
+				case request.IncludeNotes:
+					return nil, &filemetadata.UnsupportedError{Message: "include_notes=true is not implemented yet"}
+				case request.DetailedURLInformation:
+					return nil, &filemetadata.UnsupportedError{Message: "detailed_url_information=true is not implemented yet"}
+				default:
+					return []filemetadata.Row{}, nil
+				}
+			},
+		}
+		handler := newHandlerWithDeps(t, provider, rejectingStore, false)
+
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/get_files/file_metadata?file_ids=%5B1%5D&include_notes=true",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", accessKey)
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotImplemented)
+		}
+
+		req = httptest.NewRequest(
+			http.MethodGet,
+			"/get_files/file_metadata?file_ids=%5B1%5D&detailed_url_information=true",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", accessKey)
+		rr = httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotImplemented)
+		}
+	})
+
+	t.Run("typed store errors map to HTTP status codes", func(t *testing.T) {
+		handler := newHandlerWithDeps(
+			t,
+			provider,
+			&fakeMetadataStore{err: &filemetadata.NotFoundError{Message: "missing"}},
+			false,
+		)
+
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/get_files/file_metadata?file_ids=%5B1%5D&only_return_identifiers=true",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", accessKey)
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotFound)
+		}
+
+		handler = newHandlerWithDeps(
+			t,
+			provider,
+			&fakeMetadataStore{err: io.ErrUnexpectedEOF},
+			false,
+		)
+
+		req = httptest.NewRequest(
+			http.MethodGet,
+			"/get_files/file_metadata?file_ids=%5B1%5D&only_return_identifiers=true",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", accessKey)
+		rr = httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusInternalServerError)
+		}
+	})
 }
 
 func TestOptionsRequest(t *testing.T) {
@@ -316,7 +575,8 @@ func newTestHandler(t *testing.T) http.Handler {
 	return NewHandler(
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		access,
-		services.DefaultCatalog(),
+		services.DefaultProvider(),
+		nil,
 		false,
 	)
 }
@@ -336,7 +596,8 @@ func newAccessControlledHandler(t *testing.T) (*AccessControl, http.Handler) {
 	handler := NewHandler(
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		access,
-		services.DefaultCatalog(),
+		services.DefaultProvider(),
+		nil,
 		false,
 	)
 
@@ -358,9 +619,55 @@ func newCORSEnabledHandler(t *testing.T) http.Handler {
 	return NewHandler(
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		access,
-		services.DefaultCatalog(),
+		services.DefaultProvider(),
+		nil,
 		true,
 	)
+}
+
+func newHandlerWithDeps(
+	t *testing.T,
+	provider services.Provider,
+	store filemetadata.Store,
+	enableCORS bool,
+) http.Handler {
+	t.Helper()
+
+	access, err := NewAccessControl(
+		strings.Repeat("b", 64),
+		"test-client",
+		[]Permission{PermissionSearchAndFetchFiles},
+	)
+	if err != nil {
+		t.Fatalf("NewAccessControl() error = %v", err)
+	}
+
+	return NewHandler(
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		access,
+		provider,
+		store,
+		enableCORS,
+	)
+}
+
+type fakeMetadataStore struct {
+	rows        []filemetadata.Row
+	err         error
+	handle      func(filemetadata.Request) ([]filemetadata.Row, error)
+	lastRequest *filemetadata.Request
+}
+
+func (s *fakeMetadataStore) GetMetadata(
+	_ context.Context,
+	request filemetadata.Request,
+) ([]filemetadata.Row, error) {
+	copy := request
+	s.lastRequest = &copy
+	if s.handle != nil {
+		return s.handle(request)
+	}
+	return s.rows, s.err
 }
 
 func decodeJSON(t *testing.T, raw []byte, target any) {

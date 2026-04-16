@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -21,6 +22,7 @@ const (
 // Config holds the bootstrap hydrus-go daemon configuration.
 type Config struct {
 	ListenAddr               string
+	DBDir                    string
 	AccessKey                string
 	AccessName               string
 	LogLevel                 string
@@ -33,12 +35,17 @@ type Config struct {
 func LoadFromEnv() (Config, error) {
 	cfg := Config{
 		ListenAddr:               getEnv("HYDRUS_GO_LISTEN_ADDR", defaultListenAddr),
+		DBDir:                    strings.TrimSpace(os.Getenv("HYDRUS_GO_DB_DIR")),
 		AccessKey:                strings.TrimSpace(os.Getenv("HYDRUS_GO_ACCESS_KEY")),
 		AccessName:               getEnv("HYDRUS_GO_ACCESS_NAME", defaultAccessName),
 		LogLevel:                 getEnv("HYDRUS_GO_LOG_LEVEL", defaultLogLevel),
 		ShutdownTimeout:          defaultShutdownTimeout,
 		AllowNonLocalConnections: false,
 		EnableCORS:               false,
+	}
+
+	if cfg.DBDir != "" {
+		cfg.DBDir = filepath.Clean(cfg.DBDir)
 	}
 
 	allowNonLocal, err := getEnvBool(
@@ -85,6 +92,17 @@ func (c Config) validate() error {
 
 	if c.ShutdownTimeout <= 0 {
 		return fmt.Errorf("shutdown timeout must be greater than zero")
+	}
+
+	if c.DBDir != "" {
+		info, err := os.Stat(c.DBDir)
+		if err != nil {
+			return fmt.Errorf("stat HYDRUS_GO_DB_DIR: %w", err)
+		}
+
+		if !info.IsDir() {
+			return fmt.Errorf("HYDRUS_GO_DB_DIR must be a directory")
+		}
 	}
 
 	host, _, err := net.SplitHostPort(c.ListenAddr)

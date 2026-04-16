@@ -8,6 +8,7 @@ import (
 
 func TestLoadFromEnv_Defaults(t *testing.T) {
 	t.Setenv("HYDRUS_GO_LISTEN_ADDR", "")
+	t.Setenv("HYDRUS_GO_DB_DIR", "")
 	t.Setenv("HYDRUS_GO_ACCESS_KEY", "")
 	t.Setenv("HYDRUS_GO_ACCESS_NAME", "")
 	t.Setenv("HYDRUS_GO_LOG_LEVEL", "")
@@ -22,6 +23,10 @@ func TestLoadFromEnv_Defaults(t *testing.T) {
 
 	if cfg.ListenAddr != defaultListenAddr {
 		t.Fatalf("ListenAddr = %q, want %q", cfg.ListenAddr, defaultListenAddr)
+	}
+
+	if cfg.DBDir != "" {
+		t.Fatalf("DBDir = %q, want empty", cfg.DBDir)
 	}
 
 	if cfg.AccessName != defaultAccessName {
@@ -60,7 +65,10 @@ func TestLoadFromEnv_RejectsNonLocalListenAddressByDefault(t *testing.T) {
 }
 
 func TestLoadFromEnv_AllowsConfiguredOverrides(t *testing.T) {
+	dbDir := t.TempDir()
+
 	t.Setenv("HYDRUS_GO_LISTEN_ADDR", "0.0.0.0:9999")
+	t.Setenv("HYDRUS_GO_DB_DIR", dbDir)
 	t.Setenv("HYDRUS_GO_ACCESS_KEY", strings.Repeat("c", 64))
 	t.Setenv("HYDRUS_GO_ACCESS_NAME", "integration-test")
 	t.Setenv("HYDRUS_GO_LOG_LEVEL", "debug")
@@ -75,6 +83,10 @@ func TestLoadFromEnv_AllowsConfiguredOverrides(t *testing.T) {
 
 	if cfg.ListenAddr != "0.0.0.0:9999" {
 		t.Fatalf("ListenAddr = %q, want %q", cfg.ListenAddr, "0.0.0.0:9999")
+	}
+
+	if cfg.DBDir != dbDir {
+		t.Fatalf("DBDir = %q, want %q", cfg.DBDir, dbDir)
 	}
 
 	if cfg.AccessKey != strings.Repeat("c", 64) {
@@ -112,6 +124,15 @@ func TestLoadFromEnv_AllowsConfiguredOverrides(t *testing.T) {
 
 func TestLoadFromEnv_RejectsInvalidAccessKey(t *testing.T) {
 	t.Setenv("HYDRUS_GO_ACCESS_KEY", "abcdef")
+
+	_, err := LoadFromEnv()
+	if err == nil {
+		t.Fatal("LoadFromEnv() error = nil, want error")
+	}
+}
+
+func TestLoadFromEnv_RejectsMissingDBDir(t *testing.T) {
+	t.Setenv("HYDRUS_GO_DB_DIR", t.TempDir()+"/missing")
 
 	_, err := LoadFromEnv()
 	if err == nil {

@@ -53,6 +53,37 @@ library state.
 
 ## Current implementation reality
 
-Today, only the bootstrap daemon and a small compatibility-oriented API slice
-exist. The current service catalog is fixed in memory and not yet backed by a
-real Hydrus database.
+Today, the daemon has two concrete layers:
+
+1. a bootstrap runtime layer for config, auth, logging, lifecycle, and HTTP routing
+2. a first read-only DB-backed layer for selected Hydrus Client API parity
+
+The DB-backed layer currently:
+
+- optionally opens a real Hydrus client DB bundle via `HYDRUS_GO_DB_DIR`
+- attaches the external DBs on a single SQLite connection
+- keeps that connection read-only with `PRAGMA query_only = ON`
+- serves DB-backed service discovery
+- serves DB-backed `GET /get_files/file_metadata` in:
+  - identifier mode
+  - basic mode
+  - a first default/full non-tag metadata subset
+
+The current full/default metadata subset includes:
+
+- file service membership and timestamps
+- aggregate/local/domain modified timestamps
+- archived/inbox/local/trash/deleted state
+- known URLs
+- pixel hash
+- IPFS multihashes
+- transparency/EXIF/human-readable/ICC metadata flags
+- explicit rejection of `include_notes=true` and `detailed_url_information=true`
+
+The deeper Hydrus client-core behaviors are still pending:
+
+- full media-result metadata parity, especially tags/ratings/viewing stats/notes/detailed URL info
+- managed file-store ownership and file serving
+- imports and hashing
+- search/tagging engine behavior
+- richer stateful background processing

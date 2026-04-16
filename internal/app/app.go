@@ -12,7 +12,9 @@ import (
 	"github.com/official-elinas/hydrus-go/internal/api/httpapi"
 	"github.com/official-elinas/hydrus-go/internal/buildinfo"
 	"github.com/official-elinas/hydrus-go/internal/config"
+	"github.com/official-elinas/hydrus-go/internal/core/filemetadata"
 	"github.com/official-elinas/hydrus-go/internal/core/services"
+	"github.com/official-elinas/hydrus-go/internal/db/hydrusdb"
 )
 
 // App holds the bootstrap daemon runtime state.
@@ -21,6 +23,7 @@ type App struct {
 	logger *slog.Logger
 	access *httpapi.AccessControl
 	server *http.Server
+	bundle *hydrusdb.Bundle
 }
 
 // New constructs the bootstrap daemon application.
@@ -34,10 +37,25 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 		return nil, fmt.Errorf("create access control: %w", err)
 	}
 
+	serviceProvider := services.Provider(services.DefaultProvider())
+	var metadataStore filemetadata.Store
+	var bundle *hydrusdb.Bundle
+
+	if cfg.DBDir != "" {
+		bundle, err = hydrusdb.Open(context.Background(), cfg.DBDir)
+		if err != nil {
+			return nil, fmt.Errorf("open hydrus DB bundle: %w", err)
+		}
+
+		serviceProvider = bundle
+		metadataStore = bundle
+	}
+
 	handler := httpapi.NewHandler(
 		logger,
 		access,
-		services.DefaultCatalog(),
+		serviceProvider,
+		metadataStore,
 		cfg.EnableCORS,
 	)
 
@@ -55,12 +73,15 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 		logger: logger,
 		access: access,
 		server: server,
+		bundle: bundle,
 	}, nil
 }
 
 // Run starts the daemon and blocks until the context is canceled or the server
 // exits with an error.
 func (a *App) Run(ctx context.Context) error {
+	defer a.closeResources()
+
 	if generatedAccessKey, generated := a.access.GeneratedAccessKey(); generated {
 		a.logger.Warn(
 			"generated initial API access key",
@@ -122,5 +143,15 @@ func (a *App) Run(ctx context.Context) error {
 		}
 
 		return nil
+	}
+}
+
+func (a *App) closeResources() {
+	if a.bundle == nil {
+		return
+	}
+
+	if err := a.bundle.Close(); err != nil {
+		a.logger.Error("close hydrus DB bundle", "error", err)
 	}
 }
