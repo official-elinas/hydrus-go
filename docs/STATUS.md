@@ -37,8 +37,8 @@ Last updated: 2026-04-16
 
 ## In Progress
 
-- database/schema reconnaissance against the Python implementation
-- defining the next DB-backed parity slice beyond the current non-tag full metadata subset
+- database/schema reconnaissance for the first writable Hydrus-compatible import path
+- defining transaction, locking, and managed-store rules needed to move from read-only access to controlled writes
 
 ### Active reconnaissance notes
 
@@ -49,18 +49,40 @@ Last updated: 2026-04-16
 
 ## Next
 
-1. expand `GET /get_files/file_metadata` toward full/default media-result parity
-2. start DB-backed file access and managed-store path resolution
-3. inventory Python schema creation and migration entry points in more detail
-4. begin search/tagging read paths once file-domain and metadata foundations are stable
-5. refine live-DB locking expectations and document operational constraints
+### Roadmap checklist
+
+- [x] Phase 1: headless bootstrap daemon
+- [x] Phase 2: read-only DB-backed service discovery and basic metadata
+- [x] Phase 3: first default/full non-tag metadata slice
+
+### Phase 4: Writable Import Foundation
+
+- [ ] characterize the Python Hydrus write-set for a single local file import
+- [ ] design the first Hydrus-compatible writable import transaction flow
+- [ ] implement a serialized write model for the daemon's SQLite bundle access
+- [ ] implement managed-store path resolution and file placement in `client_files`
+- [ ] add the first DB-backed local file import path/API
+- [ ] verify round-trip behavior from import to `GET /get_files/file_metadata`
+- [ ] document live-DB write constraints and operational expectations
+
+### Phase 5: PTR Integration
+
+- [ ] implement PTR repository sync foundations for imported files
+- [ ] define PTR service configuration, auth, and local daemon state requirements
+- [ ] make imported files eligible for PTR-driven tag/update retrieval
+- [ ] verify end-to-end value from local import through PTR sync and tag acquisition
+
+### Phase 6: Read/Query Expansion After Import + PTR
+
+- [ ] continue `GET /get_files/file_metadata` toward broader parity for tags, ratings, notes, and viewing stats
+- [ ] begin DB-backed search and tagging read paths on top of imported and PTR-synced data
+- [ ] refine service/media-result behavior for common client workflows
 
 ## Later / Out of Scope for Now
 
 - native Go GUI
 - full downloader/parser/subscription parity in the first phase
-- legacy Hydrus Server reimplementation
-- PTR/server-repository compatibility as an early milestone
+- legacy Hydrus Server parity
 - multi-process/distributed architecture
 
 ## Open Risks / Unknowns
