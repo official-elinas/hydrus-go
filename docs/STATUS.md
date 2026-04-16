@@ -27,6 +27,13 @@ Last updated: 2026-04-16
 - deciding SQLite driver and locking strategy for the Go daemon
 - defining the first read-only database-backed parity slice
 
+### Active reconnaissance notes
+
+- the Hydrus client DB is an attached SQLite bundle, not a single file database
+- the Python client uses a dedicated DB worker model with one long-lived connection
+- transaction behavior is centered around `BEGIN IMMEDIATE` and savepoints
+- the first Go DB milestone should stay read-only and consume existing derived caches where possible
+
 ## Next
 
 1. inventory Python database schema creation and migration entry points
@@ -64,3 +71,9 @@ Last updated: 2026-04-16
 - confirmed the Go backend should be the long-lived source of truth
 - backend is intended to own SQLite, `client_files`, and background processing
 - real clients are expected to connect locally first, with LAN support as the next network scope
+
+### 2026-04-16 — DB reconnaissance started
+
+- identified the Python client DB as a multi-file attached SQLite topology
+- confirmed that Hydrus relies on a serialized single-connection transaction model
+- narrowed the first DB-backed parity target to read-only service, metadata, and search-oriented behavior
