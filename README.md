@@ -6,6 +6,11 @@ This project is being built incrementally alongside the original Python codebase
 The goal is not a line-by-line translation. The goal is a stable, testable,
 API-first daemon that preserves Hydrus's local-first media library model.
 
+The intended deployment model is a **single daemon/backend** that owns the
+Hydrus SQLite database, managed `client_files` storage, and background work.
+Real clients should connect to that daemon over stable APIs—first locally and
+over the LAN, with broader remote access considered later.
+
 ## Current status
 
 This repository currently provides the first bootstrap slice:
@@ -17,6 +22,12 @@ This repository currently provides the first bootstrap slice:
 - initial local HTTP API
 - Hydrus-compatible service catalog foundation
 - access key and session key flow for the initial compatibility endpoints
+
+Project notes live in:
+
+- [`docs/STATUS.md`](docs/STATUS.md) — what is done, active, and next
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — current system shape
+- [`docs/DECISIONS.md`](docs/DECISIONS.md) — important architectural decisions
 
 ## Implemented endpoints
 
@@ -92,6 +103,20 @@ Important current limitations:
 
 The point of this slice is to lock down daemon startup, auth, and early API
 contracts before the deeper Hydrus client core is ported.
+
+## Backend model
+
+`hydrus-go` is **not** targeting a direct desktop-app rewrite first.
+
+Instead:
+
+- the daemon is the source of truth
+- the daemon owns SQLite and `client_files`
+- clients talk to the daemon through APIs
+- local-only remains the default security posture
+- LAN access is an explicit supported direction
+- the legacy Hydrus Server is not a migration target unless a useful headless
+  daemon capability emerges from the same backend architecture
 
 ## Scope direction
 
