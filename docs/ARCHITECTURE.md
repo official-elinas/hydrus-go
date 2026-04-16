@@ -64,6 +64,12 @@ The `hydrusdb` package now also includes the first internal write foundation:
 - fixture-backed proof of commit, rollback, and queued-write behavior
 - no public write API yet; the daemon runtime still opens the bundle read-only today
 
+The storage layer now also has a dedicated pure-layout package:
+
+- `internal/storage/clientfiles` resolves deterministic managed file and thumbnail paths
+- it mirrors the current Hydrus prefix/granularity layout rules without performing file I/O
+- it is intentionally separate from `hydrusdb` so later import code can compose storage placement with DB transactions rather than mixing concerns
+
 The DB-backed layer currently:
 
 - optionally opens a real Hydrus client DB bundle via `HYDRUS_GO_DB_DIR`
@@ -89,7 +95,7 @@ The current full/default metadata subset includes:
 The deeper Hydrus client-core behaviors are still pending:
 
 - full media-result metadata parity, especially tags/ratings/viewing stats/notes/detailed URL info
-- managed file-store ownership and file serving
+- managed file-store directory creation, file placement, and file serving
 - imports, hashing, and managed `client_files` writes on top of the new transaction foundation
 - search/tagging engine behavior
 - richer stateful background processing

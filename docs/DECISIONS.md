@@ -179,3 +179,26 @@ runner, and require future DB mutations to go through that single path.
 The project can begin Phase 4 safely with fixture-backed writable DB primitives,
 while the daemon runtime and public APIs remain read-only until import behavior
 and `client_files` ownership are fully designed.
+
+---
+
+## 2026-04-16 — managed `client_files` layout rules live in a pure storage package first
+
+**Decision**
+
+Implement Hydrus managed file and thumbnail path derivation in a dedicated pure
+package before introducing directory creation, file copy/move orchestration, or
+public import APIs.
+
+**Why**
+
+- import safety depends on deterministic managed paths as much as on safe DB writes
+- separating path/layout logic from DB code keeps `hydrusdb` focused on bundle access and transactions
+- this yields a small, testable Phase 4 slice that can be validated without mutating real libraries
+- later import work can compose hashing, path resolution, file placement, and DB mutation as distinct steps
+
+**Consequence**
+
+The project now has a documented and tested home for managed `client_files`
+layout rules, while actual directory creation and file placement remain later
+Phase 4 work.
