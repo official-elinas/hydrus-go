@@ -223,5 +223,29 @@ conflicting existing files.
 **Consequence**
 
 The project now owns deterministic storage placement behavior internally, but it
-still needs a later Phase 4 slice to compose that behavior with serialized DB
-writes into a first real import flow.
+now composes that behavior with serialized DB writes in an internal prepared-file
+import checkpoint; public write APIs still remain later work.
+
+---
+
+## 2026-04-16 — first real import checkpoint is internal and caller-prepared
+
+**Decision**
+
+Make the first end-to-end import slice internal-only and require the caller to
+provide the prepared file metadata (hash, MIME, size, and basic media fields)
+instead of starting with a public upload/hashing/sniffing API.
+
+**Why**
+
+- it proves that managed placement and serialized DB writes compose correctly before exposing a writable HTTP surface
+- it keeps Phase 4 narrow enough to validate with fixture-backed round-trip tests
+- it lets the existing metadata readers verify the resulting Hydrus DB state immediately
+- it avoids prematurely locking the project into a public import contract before hashing, MIME sniffing, and thumbnail generation are ported
+
+**Consequence**
+
+The project now has an internal prepared-file import path that places files in
+managed `client_files`, records the minimal Hydrus DB rows for a fresh local
+import, and reads that state back through the existing metadata APIs. Runtime
+daemon wiring and public write endpoints remain read-only for now.

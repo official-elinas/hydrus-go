@@ -52,10 +52,11 @@ separate reimplementation of legacy server behavior.
 
 ## Current implementation reality
 
-Today, the daemon has two concrete layers:
+Today, the daemon has three concrete layers:
 
 1. a bootstrap runtime layer for config, auth, logging, lifecycle, and HTTP routing
 2. a first read-only DB-backed layer for selected Hydrus Client API parity
+3. a narrow internal prepared-file import checkpoint that composes managed placement with serialized DB writes
 
 The `hydrusdb` package now also includes the first internal write foundation:
 
@@ -69,6 +70,15 @@ The storage layer now also has a dedicated managed-files package:
 - `internal/storage/clientfiles` resolves deterministic managed file and thumbnail paths
 - it performs internal-only managed placement with lazy directory creation and no-overwrite publication
 - it is intentionally separate from `hydrusdb` so later import code can compose storage placement with DB transactions rather than mixing concerns
+
+The project now also has a small import-composition layer:
+
+- `internal/importing` accepts a caller-prepared local file description
+- it derives the managed destination extension from the Hydrus MIME table
+- it places the file into managed `client_files`
+- it records the minimal Hydrus DB state through `Bundle.RecordPreparedLocalImport(...)`
+- it removes a newly placed managed file on DB failure as a best-effort cleanup step
+- it remains internal-only; there is still no public HTTP import endpoint or runtime write wiring yet
 
 The DB-backed layer currently:
 
@@ -92,10 +102,24 @@ The current full/default metadata subset includes:
 - transparency/EXIF/human-readable/ICC metadata flags
 - explicit rejection of `include_notes=true` and `detailed_url_information=true`
 
+The first internal import checkpoint now proves that a caller-prepared local file
+can:
+
+- be placed into the managed `client_files` layout
+- be recorded in the Hydrus bundle with serialized `BEGIN IMMEDIATE` writes
+- round-trip immediately through the existing metadata readers
+
+That checkpoint intentionally stops short of:
+
+- hashing or MIME sniffing the source file
+- thumbnail generation
+- public HTTP write endpoints
+- runtime daemon write enablement
+
 The deeper Hydrus client-core behaviors are still pending:
 
 - full media-result metadata parity, especially tags/ratings/viewing stats/notes/detailed URL info
-- DB-backed import orchestration that composes hashing, managed placement, and serialized DB writes
+- broader DB-backed import orchestration beyond the prepared-file internal slice, especially hashing/sniffing, thumbnail generation, and a public write surface
 - file serving and broader managed file-store lifecycle behavior
 - search/tagging engine behavior
 - richer stateful background processing

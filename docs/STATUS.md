@@ -34,21 +34,23 @@ Last updated: 2026-04-16
 - added an internal writable Hydrus bundle mode with a serialized `BEGIN IMMEDIATE` transaction runner
 - added a pure managed `client_files` layout package for deterministic file and thumbnail path resolution
 - added an internal managed `client_files` placement layer with lazy directory creation and no-overwrite publication
+- added an internal prepared-file local import checkpoint that composes managed placement with serialized DB writes
+- added round-trip tests proving imported files become visible through the existing metadata read paths
 - added DB and app-wiring tests using a copied minimal SQLite fixture bundle
 - added tests for config validation, HTTP/auth behavior, and shutdown lifecycle
 - documented the daemon-first migration direction and current bootstrap limits
 
 ## In Progress
 
-- characterizing the Python write-set for the first Hydrus-compatible local file import
-- defining the first minimal import API slice that composes managed placement with serialized DB writes
+- narrowing the next expansion from the internal prepared-file import checkpoint into a broader public import flow
+- preparing the next PTR-focused phase so imported files can participate in repository tag/update retrieval
 
 ### Active reconnaissance notes
 
 - the Hydrus client DB is an attached SQLite bundle, not a single file database
 - the Python client uses a dedicated DB worker model with one long-lived connection
 - transaction behavior is centered around `BEGIN IMMEDIATE` and savepoints
-- the current daemon runtime still stays read-only while the internal write foundation is proven with fixtures
+- the current daemon runtime still stays read-only; the first import checkpoint is internal-only and fixture-proven
 
 ## Next
 
@@ -60,14 +62,16 @@ Last updated: 2026-04-16
 
 ### Phase 4: Writable Import Foundation
 
-- [ ] characterize the Python Hydrus write-set for a single local file import
-- [ ] design the first Hydrus-compatible writable import transaction flow
+- [x] characterize the Python Hydrus write-set for a single local file import
+- [x] design the first Hydrus-compatible writable import transaction flow
 - [x] implement a serialized write model for the daemon's SQLite bundle access
 - [x] implement managed-store path resolution in `client_files`
 - [x] implement directory creation and file placement in `client_files`
-- [ ] add the first DB-backed local file import path/API
-- [ ] verify round-trip behavior from import to `GET /get_files/file_metadata`
-- [ ] document live-DB write constraints and operational expectations
+- [x] add the first internal DB-backed local file import path
+- [x] verify round-trip behavior from import to `GET /get_files/file_metadata`
+- [x] document live-DB write constraints and operational expectations
+- [ ] extend the internal prepared-file checkpoint into a public hashing/sniffing import flow
+- [ ] add thumbnail generation and richer import metadata capture after placement
 
 ### Phase 5: PTR Integration
 
@@ -158,3 +162,10 @@ Last updated: 2026-04-16
 - placement now creates parent directories lazily, writes to a temp file in the destination directory, preserves source `mtime`, and publishes without overwriting conflicting destinations
 - added tests for successful placement, idempotent re-placement, coarse timestamp tolerance, conflict handling, and thumbnail placement
 - kept the slice internal-only: no DB mutation integration and no public import API yet
+
+### 2026-04-16 — Milestone 7: internal prepared-file import checkpoint
+
+- added `Bundle.RecordPreparedLocalImport(...)` for minimal serialized DB import writes using dynamic service resolution
+- added `internal/importing` to compose managed placement with the new DB write-set and best-effort cleanup on failure
+- added fixture-backed tests for exact retry, duplicate conflicts, rollback, managed-file cleanup, and import-to-metadata round trips
+- kept the daemon runtime and public HTTP surface read-only; this checkpoint is internal-only and caller-prepared for now

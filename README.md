@@ -24,6 +24,7 @@ This repository currently provides two early slices:
 - Hydrus-compatible service catalog foundation
 - access key and session key flow for the initial compatibility endpoints
 - initial DB-backed file metadata compatibility, including a first full/default non-tag slice
+- an internal prepared-file import checkpoint that composes managed placement with serialized DB writes
 
 Project notes live in:
 
@@ -124,8 +125,8 @@ This is still an early migration milestone, not feature parity.
 Important current limitations:
 
 - DB-backed daemon/runtime mode is still read-only only
-- an internal serialized writable transaction foundation now exists, but there is not yet a public import/write API
-- deterministic managed `client_files` path resolution and internal file placement now exist, but they are not yet composed into a DB-backed import flow
+- an internal prepared-file import checkpoint now exists, but there is still no public import/write API
+- deterministic managed `client_files` path resolution and internal file placement are now composed with minimal DB writes for internal round-trip testing only
 - `GET /get_files/file_metadata` currently supports:
   - `only_return_identifiers=true`
   - `only_return_basic_information=true`
@@ -149,8 +150,8 @@ Important current limitations:
   - `detailed_url_information=true`
   - exact thumbnail-dimension parity
 - `create_new_file_ids=true` is intentionally rejected in read-only mode
-- no DB-backed local import flow yet
-- no import pipeline yet
+- no public DB-backed local import flow yet
+- no hashing/sniffing import pipeline yet
 - no search/tagging engine yet
 - no downloader/subscription/parsing system yet
 
@@ -231,8 +232,8 @@ This bootstrap currently targets the Go toolchain declared in `go.mod`
 
 ## Immediate next milestones
 
-- writable import foundation and managed `client_files` ownership
-- compose managed placement with serialized DB writes into the first local import path
+- extend the internal prepared-file import checkpoint into a broader public import flow
+- add hashing/sniffing and thumbnail work on top of the new managed-placement + DB-write path
 - PTR integration so imported files can participate in repository tag/update flows
 - broader default/full metadata parity for `GET /get_files/file_metadata`
 - search/tagging model on top of imported and PTR-synced data
