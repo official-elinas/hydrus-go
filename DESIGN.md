@@ -29,7 +29,7 @@ The LLM must map the system into four distinct domains:
     *   **LLM Task:** Map Python `threading.Thread`, `queue.Queue`, and asynchronous loops to Golang's `goroutines` and `channels`.
 4.  **The GUI & API Layer (The Monolith Problem):**
     *   **Context:** Hydrus heavily mixes PyQt5/Qt6 UI logic with database logic. 
-    *   **LLM Task:** The LLM must recognize that Go is not ideal for native desktop GUIs. The agentic system must pivot the architecture: **extract the core into a Headless Go Daemon** and expose a local REST/gRPC API for either a web frontend, a Wails (Go+Web) app, or a lightweight Python/Qt UI layer.
+    *   **LLM Task:** The LLM must recognize that the migration should pivot toward a **Headless Go Daemon** with a thin desktop client. The current preferred frontend direction is a **Fyne-based Go prototype** talking to the daemon over a local HTTP/JSON API, rather than a web stack or a Python UI runtime.
 
 ---
 
@@ -90,9 +90,9 @@ Hydrus features a complex custom synchronization protocol to share tags across s
 *   **Go Action:** The API Agent will map out the existing `/get_services`, `/add_tags`, and `/search_files` endpoints. Go's strict static typing (`encoding/json`) will instantly harden the loosely-typed dictionary data payloads originally used in Python.
 
 ### Step 5: Decoupling the GUI (The Masterstroke)
-Instead of trying to force Go into a PyQt5 shape (which leads to unstable CGO dependencies), the Architect Agent must dictate a strict Backend-Frontend separation.
+Instead of trying to force Go into a PyQt5 shape, the Architect Agent must dictate a strict Backend-Frontend separation.
 *   **Action Plan:** The LLM rewrites the *entire* Hydrus core as a high-performance Go Daemon. 
-*   **The Frontend:** The LLM can generate a new web-based frontend using React/Vue, or wrap the Go binary in **Wails** (a Go framework that provides a web-view window, operating exactly like an Electron/desktop app but natively executing Go backend functions).
+*   **The Frontend:** The first practical desktop direction is a thin **Fyne-based Go prototype** that talks to the daemon over local HTTP/JSON. Full Hydrus workstation parity should come later, after the daemon's import, browse, add, trash, and performance characteristics are proven.
 
 ---
 

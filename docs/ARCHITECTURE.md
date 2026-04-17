@@ -44,7 +44,7 @@ Over time, the daemon is expected to absorb:
 
 ## What is not a primary target
 
-- a direct port of the legacy Hydrus desktop UI
+- a direct first-pass port of the legacy Hydrus desktop UI
 - legacy Hydrus Server parity
 
 The migration is centered on daemon ownership of a local library backend, not a
@@ -63,7 +63,7 @@ The `hydrusdb` package now also includes the first internal write foundation:
 - an explicit writable bundle open path for future import/mutation work
 - a serialized `BEGIN IMMEDIATE` transaction runner
 - fixture-backed proof of commit, rollback, and queued-write behavior
-- no public write API yet; the daemon runtime still opens the bundle read-only today
+- the daemon runtime now uses a separate writable bundle for public local-path imports while keeping reads on a read-only bundle
 
 The storage layer now also has a dedicated managed-files package:
 
@@ -78,7 +78,7 @@ The project now also has a small import-composition layer:
 - it places the file into managed `client_files`
 - it records the minimal Hydrus DB state through `Bundle.RecordPreparedLocalImport(...)`
 - it removes a newly placed managed file on DB failure as a best-effort cleanup step
-- it remains internal-only; there is still no public HTTP import endpoint or runtime write wiring yet
+- it now also powers the first public daemon-local import endpoint for the thin client MVP
 
 The DB-backed layer currently:
 
@@ -116,10 +116,35 @@ That checkpoint intentionally stops short of:
 - public HTTP write endpoints
 - runtime daemon write enablement
 
+The project now also has the first thin-client-oriented browse surface:
+
+- `GET /v1/library/recent` for paged recent local file browsing
+- `GET /v1/files/content` for original-file streaming
+- `GET /v1/files/thumbnail` for managed thumbnail streaming when available
+- `POST /v1/files/trash` for moving one file into the local trash domain
+- `POST /v1/import/local_file` for single-file daemon-local imports
+
+These endpoints are intentionally thin-client-oriented rather than strict Hydrus
+Client API parity. They exist to validate local add/trash/browse workflows
+before the project expands into richer public write APIs and PTR sync.
+
+The planned desktop direction is now:
+
+- a thin Fyne prototype surfaced through `cmd/hydrus-desktop` and documented in `desktop/fyne/`
+- daemon remains the owner of SQLite, `client_files`, imports, and later PTR sync
+- the first client milestone stays closer to a simple image-browser shell than to full Hydrus workstation parity
+- the prototype is specifically meant to exercise `hydrusd` add/trash behavior, not to be a general-purpose Hydrus replacement yet
+
+The runtime storage/DB model for this phase is:
+
+- one read bundle opened with `PRAGMA query_only = ON`
+- one separate writable bundle used for public import and trash mutations when writable access is available
+- browse/metadata/asset handlers talk to the read bundle so they only observe committed state
+
 The deeper Hydrus client-core behaviors are still pending:
 
 - full media-result metadata parity, especially tags/ratings/viewing stats/notes/detailed URL info
-- broader DB-backed import orchestration beyond the prepared-file internal slice, especially hashing/sniffing, thumbnail generation, and a public write surface
+- broader DB-backed import orchestration beyond the prepared-file internal slice, especially richer upload/batch flows, hashing/sniffing, and thumbnail generation
 - file serving and broader managed file-store lifecycle behavior
 - search/tagging engine behavior
 - richer stateful background processing

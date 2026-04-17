@@ -25,12 +25,16 @@ This repository currently provides two early slices:
 - access key and session key flow for the initial compatibility endpoints
 - initial DB-backed file metadata compatibility, including a first full/default non-tag slice
 - an internal prepared-file import checkpoint that composes managed placement with serialized DB writes
+- first thin-client browse/asset endpoints for recent local files, originals, and thumbnails
+- public local-path import and trash endpoints for thin-client-driven library testing
+- an initial Fyne-based desktop prototype scaffold for `hydrusd`
 
 Project notes live in:
 
 - [`docs/STATUS.md`](docs/STATUS.md) — what is done, active, and next
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — current system shape
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — important architectural decisions
+- [`docs/thin-client-mvp.md`](docs/thin-client-mvp.md) — first desktop client scope and daemon contract
 
 ## Implemented endpoints
 
@@ -44,6 +48,11 @@ Project notes live in:
   - `GET /get_services`
   - `GET /get_service`
   - `GET /get_files/file_metadata`
+  - `GET /v1/library/recent`
+  - `GET /v1/files/content`
+  - `GET /v1/files/thumbnail`
+  - `POST /v1/files/trash`
+  - `POST /v1/import/local_file`
 
 Protected endpoints accept either of these credentials:
 
@@ -58,15 +67,21 @@ API. They are intentionally narrow and are meant to establish a stable daemon
 foundation before broader database, import, storage, and search behavior are
 added.
 
-## Read-only DB-backed mode
+## DB-backed daemon mode
 
 If `HYDRUS_GO_DB_DIR` points at an existing Hydrus client database directory,
-the daemon will open the client bundle read-only and switch these endpoints to
-live DB-backed behavior:
+the daemon will open a read bundle and attempt to open a separate writable
+bundle. When the writable bundle is available, these endpoints switch to live
+DB-backed behavior:
 
 - `GET /get_services`
 - `GET /get_service`
 - `GET /get_files/file_metadata`
+- `GET /v1/library/recent`
+- `GET /v1/files/content`
+- `GET /v1/files/thumbnail`
+- `POST /v1/files/trash`
+- `POST /v1/import/local_file`
 
 Expected bundle files today:
 
@@ -76,12 +91,13 @@ Expected bundle files today:
 - `client.mappings.db`
 - optional: `client.temp.db`
 
-Implementation notes for this first slice:
+Implementation notes for this slice:
 
 - uses `modernc.org/sqlite`
-- forces a single SQLite connection so attached DB aliases remain stable
-- opens the bundle read-only and enables `PRAGMA query_only = ON`
-- does not write new file identifiers or mutate the Hydrus DB
+- uses one dedicated connection per bundle so attached DB aliases remain stable
+- keeps the read bundle in `PRAGMA query_only = ON`
+- uses a separate writable bundle for public local-path imports and trash writes when writable access is available
+- degrades safely to read-only daemon mode when the writable bundle cannot be opened
 - expands `GET /get_files/file_metadata` in safe read-only vertical slices rather than attempting full parity at once
 
 ## Bootstrap auth flow
@@ -124,9 +140,9 @@ This is still an early migration milestone, not feature parity.
 
 Important current limitations:
 
-- DB-backed daemon/runtime mode is still read-only only
-- an internal prepared-file import checkpoint now exists, but there is still no public import/write API
-- deterministic managed `client_files` path resolution and internal file placement are now composed with minimal DB writes for internal round-trip testing only
+- the daemon now exposes public local-path import and trash APIs, but there is still no permanent delete flow
+- deterministic managed `client_files` path resolution and internal file placement are now composed into both the internal prepared-file checkpoint and the first public local-path import flow
+- the first thin client prototype is now a Fyne-based shell aimed at testing add/trash behavior against `hydrusd`, not a fuller desktop app
 - `GET /get_files/file_metadata` currently supports:
   - `only_return_identifiers=true`
   - `only_return_basic_information=true`
@@ -150,8 +166,9 @@ Important current limitations:
   - `detailed_url_information=true`
   - exact thumbnail-dimension parity
 - `create_new_file_ids=true` is intentionally rejected in read-only mode
-- no public DB-backed local import flow yet
-- no hashing/sniffing import pipeline yet
+- no public batch/upload import flow yet
+- no public permanent delete flow yet
+- no rich public import pipeline yet beyond single local-path imports with basic hashing/sniffing
 - no search/tagging engine yet
 - no downloader/subscription/parsing system yet
 
@@ -192,11 +209,45 @@ port.
 If no API access key is configured, one will be generated on startup and written
 to the daemon logs.
 
-To run in DB-backed read-only mode, also set:
+To run in DB-backed daemon mode, also set:
 
 ```bash
 export HYDRUS_GO_DB_DIR=/path/to/hydrus/db
 ```
+
+When the configured Hydrus bundle is writable, `hydrusd` will also enable the
+public import/trash mutation paths. If the writable bundle cannot be opened, the
+daemon degrades safely to read-only behavior.
+
+## Fyne prototype
+
+The first desktop client is a thin Fyne prototype that connects to `hydrusd`.
+It is deliberately closer to `image-tests/comfyui-image-browser.png` than to the
+full Hydrus workstation UI, and it exists to validate daemon/database add/trash
+behavior through a real local UI.
+
+Run it with:
+
+```bash
+go run -tags fyne ./cmd/hydrus-desktop
+```
+
+Or use:
+
+```bash
+make run-desktop
+```
+
+Notes:
+
+- the desktop prototype talks to `hydrusd`; it never touches SQLite or
+  `client_files` directly
+- the current Linux desktop build depends on native windowing/OpenGL headers in
+  addition to the Go toolchain
+- the current environment in this repo can type-check the Fyne code via WASM,
+  but a native Linux build still requires the usual X11/GL development packages
+- `make check-desktop` is the canonical non-native validation path for the tagged
+  desktop code in environments that do not have those headers installed
 
 ## Developer loop
 
@@ -205,6 +256,9 @@ make fmt
 make test
 make build
 make run
+make build-desktop
+make check-desktop
+make run-desktop
 ```
 
 This bootstrap currently targets the Go toolchain declared in `go.mod`
@@ -232,9 +286,9 @@ This bootstrap currently targets the Go toolchain declared in `go.mod`
 
 ## Immediate next milestones
 
-- extend the internal prepared-file import checkpoint into a broader public import flow
-- add hashing/sniffing and thumbnail work on top of the new managed-placement + DB-write path
-- PTR integration so imported files can participate in repository tag/update flows
-- broader default/full metadata parity for `GET /get_files/file_metadata`
+- iterate on the Fyne prototype's grid polish, reconnect behavior, and metadata ergonomics now that the first connect/browse/add/trash loop is wired
+- validate add/trash latency and recent-grid refresh behavior on a real Hydrus library through the prototype
+- validate SQLite and managed `client_files` performance through the thin client before PTR work begins
+- implement PTR in the backend daemon after the local workflow contract is proven
+- broaden default/full metadata parity for `GET /get_files/file_metadata`
 - search/tagging model on top of imported and PTR-synced data
-- broader Client API compatibility
