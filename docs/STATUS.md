@@ -33,6 +33,7 @@ Last updated: 2026-04-16
 - explicitly rejects `include_notes=true` and `detailed_url_information=true` in the current full-mode slice
 - added an internal writable Hydrus bundle mode with a serialized `BEGIN IMMEDIATE` transaction runner
 - added a pure managed `client_files` layout package for deterministic file and thumbnail path resolution
+- added an internal managed `client_files` placement layer with lazy directory creation and no-overwrite publication
 - added DB and app-wiring tests using a copied minimal SQLite fixture bundle
 - added tests for config validation, HTTP/auth behavior, and shutdown lifecycle
 - documented the daemon-first migration direction and current bootstrap limits
@@ -40,7 +41,7 @@ Last updated: 2026-04-16
 ## In Progress
 
 - characterizing the Python write-set for the first Hydrus-compatible local file import
-- defining directory creation, file placement, and the first minimal import API slice on top of the serialized write and path-resolution foundations
+- defining the first minimal import API slice that composes managed placement with serialized DB writes
 
 ### Active reconnaissance notes
 
@@ -63,7 +64,7 @@ Last updated: 2026-04-16
 - [ ] design the first Hydrus-compatible writable import transaction flow
 - [x] implement a serialized write model for the daemon's SQLite bundle access
 - [x] implement managed-store path resolution in `client_files`
-- [ ] implement directory creation and file placement in `client_files`
+- [x] implement directory creation and file placement in `client_files`
 - [ ] add the first DB-backed local file import path/API
 - [ ] verify round-trip behavior from import to `GET /get_files/file_metadata`
 - [ ] document live-DB write constraints and operational expectations
@@ -150,3 +151,10 @@ Last updated: 2026-04-16
 - mirrored the current Hydrus prefix/layout rules for default granularity `2` and odd granularity cases like `3`
 - added tests for hash normalization, path derivation, invalid inputs, and default root calculation from the DB directory
 - kept the slice pure and read-only: no directory creation, no file copy/move orchestration, and no public import API yet
+
+### 2026-04-16 — Milestone 6: managed `client_files` placement foundation
+
+- added managed file and thumbnail placement helpers on top of the new layout package
+- placement now creates parent directories lazily, writes to a temp file in the destination directory, preserves source `mtime`, and publishes without overwriting conflicting destinations
+- added tests for successful placement, idempotent re-placement, coarse timestamp tolerance, conflict handling, and thumbnail placement
+- kept the slice internal-only: no DB mutation integration and no public import API yet

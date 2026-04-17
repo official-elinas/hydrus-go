@@ -202,3 +202,26 @@ public import APIs.
 The project now has a documented and tested home for managed `client_files`
 layout rules, while actual directory creation and file placement remain later
 Phase 4 work.
+
+---
+
+## 2026-04-16 — managed file placement publishes from a destination-local temp file without overwriting conflicts
+
+**Decision**
+
+Implement the first managed file/thumbnails placement helper by writing to a
+temp file in the destination directory and then publishing without overwriting
+conflicting existing files.
+
+**Why**
+
+- keeping the temp file in the destination directory avoids cross-device publication issues
+- no-overwrite publication is safer than blind replacement while import semantics are still being defined
+- this makes the placement layer testable and usable before DB mutation integration exists
+- it gives later import code a clear contract for idempotent re-placement and conflict detection
+
+**Consequence**
+
+The project now owns deterministic storage placement behavior internally, but it
+still needs a later Phase 4 slice to compose that behavior with serialized DB
+writes into a first real import flow.

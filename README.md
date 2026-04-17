@@ -125,7 +125,7 @@ Important current limitations:
 
 - DB-backed daemon/runtime mode is still read-only only
 - an internal serialized writable transaction foundation now exists, but there is not yet a public import/write API
-- deterministic managed `client_files` path resolution now exists, but there is not yet directory creation or file placement/orchestration
+- deterministic managed `client_files` path resolution and internal file placement now exist, but they are not yet composed into a DB-backed import flow
 - `GET /get_files/file_metadata` currently supports:
   - `only_return_identifiers=true`
   - `only_return_basic_information=true`
@@ -149,7 +149,7 @@ Important current limitations:
   - `detailed_url_information=true`
   - exact thumbnail-dimension parity
 - `create_new_file_ids=true` is intentionally rejected in read-only mode
-- no managed file placement/orchestration yet
+- no DB-backed local import flow yet
 - no import pipeline yet
 - no search/tagging engine yet
 - no downloader/subscription/parsing system yet
@@ -232,7 +232,7 @@ This bootstrap currently targets the Go toolchain declared in `go.mod`
 ## Immediate next milestones
 
 - writable import foundation and managed `client_files` ownership
-- directory creation and file placement on top of the new managed path resolver
+- compose managed placement with serialized DB writes into the first local import path
 - PTR integration so imported files can participate in repository tag/update flows
 - broader default/full metadata parity for `GET /get_files/file_metadata`
 - search/tagging model on top of imported and PTR-synced data
