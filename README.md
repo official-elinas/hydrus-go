@@ -219,6 +219,11 @@ When the configured Hydrus bundle is writable, `hydrusd` will also enable the
 public import/trash mutation paths. If the writable bundle cannot be opened, the
 daemon degrades safely to read-only behavior.
 
+Fresh daemon-local imports now also attempt best-effort managed thumbnail
+generation for JPEG, PNG, and GIF still images so the prototype grid can show
+immediate previews. Other formats may still import successfully without a
+thumbnail.
+
 ## Fyne prototype
 
 The first desktop client is a thin Fyne prototype that connects to `hydrusd`.

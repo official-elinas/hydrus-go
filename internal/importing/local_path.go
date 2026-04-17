@@ -87,6 +87,19 @@ func (i *Importer) ImportLocalPath(
 		return fileimport.Result{}, classifyLocalImportError(err)
 	}
 
+	thumbnailCtx, cancelThumbnail := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
+	defer cancelThumbnail()
+	if err := i.ensureManagedThumbnail(
+		thumbnailCtx,
+		result.ManagedPath,
+		hashHex,
+		mimeEnum,
+	); err != nil {
+		// Best-effort for the thin-client prototype: the import is already durable,
+		// and a missing thumbnail should not turn a successful import into a
+		// failed one.
+	}
+
 	return fileimport.Result{
 		FileID:                    result.FileID,
 		Hash:                      hashHex,

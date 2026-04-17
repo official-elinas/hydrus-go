@@ -109,12 +109,19 @@ can:
 - be recorded in the Hydrus bundle with serialized `BEGIN IMMEDIATE` writes
 - round-trip immediately through the existing metadata readers
 
-That checkpoint intentionally stops short of:
+That original internal checkpoint started without:
 
 - hashing or MIME sniffing the source file
 - thumbnail generation
 - public HTTP write endpoints
 - runtime daemon write enablement
+
+Those gaps are now partially closed by the public local-path import slice, which
+adds:
+
+- daemon-local hashing and MIME detection for `POST /v1/import/local_file`
+- runtime write enablement through a separate writable bundle when available
+- best-effort managed thumbnail generation for imported JPEG/PNG/GIF still images
 
 The project now also has the first thin-client-oriented browse surface:
 
@@ -144,7 +151,8 @@ The runtime storage/DB model for this phase is:
 The deeper Hydrus client-core behaviors are still pending:
 
 - full media-result metadata parity, especially tags/ratings/viewing stats/notes/detailed URL info
-- broader DB-backed import orchestration beyond the prepared-file internal slice, especially richer upload/batch flows, hashing/sniffing, and thumbnail generation
+- broader DB-backed import orchestration beyond the single local-path slice, especially richer upload/batch flows and richer import metadata capture
+- thumbnail generation for additional media types beyond the current JPEG/PNG/GIF still-image subset
 - file serving and broader managed file-store lifecycle behavior
 - search/tagging engine behavior
 - richer stateful background processing

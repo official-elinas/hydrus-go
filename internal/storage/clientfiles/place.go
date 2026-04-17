@@ -2,12 +2,17 @@ package clientfiles
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"time"
 )
+
+// ErrManagedDestinationConflict reports that a managed artifact already exists
+// at the deterministic destination path with different metadata or contents.
+var ErrManagedDestinationConflict = errors.New("managed destination already exists with different metadata")
 
 // PlacementResult describes the result of placing a managed artifact.
 type PlacementResult struct {
@@ -172,9 +177,7 @@ func existingPlacementResult(
 		}, true, nil
 	}
 
-	return PlacementResult{}, true, fmt.Errorf(
-		"managed destination already exists with different metadata",
-	)
+	return PlacementResult{}, true, ErrManagedDestinationConflict
 }
 
 func sameFilePlacement(

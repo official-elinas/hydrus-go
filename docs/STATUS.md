@@ -38,6 +38,7 @@ Last updated: 2026-04-17
 - added round-trip tests proving imported files become visible through the existing metadata read paths
 - added thin-client-focused browse and asset endpoints for recent local files, originals, and thumbnails
 - added public local-path import and trash endpoints built on top of separate read and write bundle connections
+- added best-effort managed thumbnail generation for imported JPEG/PNG/GIF files, including stale-thumbnail repair on exact re-import
 - added a first Fyne desktop prototype scaffold for `hydrusd`
 - added DB and app-wiring tests using a copied minimal SQLite fixture bundle
 - added tests for config validation, HTTP/auth behavior, and shutdown lifecycle
@@ -78,7 +79,8 @@ Last updated: 2026-04-17
 - [x] add minimal browse/list APIs so clients can load local files without hash-by-hash probing
 - [x] add thumbnail and original-file serving APIs for client preview flows
 - [ ] expand the public import surface beyond single local-path imports into richer batch/upload workflows
-- [ ] add thumbnail generation and richer import metadata capture after placement
+- [x] add thumbnail generation for supported JPEG/PNG/GIF imports after placement
+- [ ] capture richer import metadata after placement
 
 ### Phase 5: Thin Desktop Client MVP
 
@@ -213,3 +215,10 @@ Last updated: 2026-04-17
 - kept the daemon startup safe by degrading to read-only mode when the writable bundle cannot be opened
 - pivoted the desktop client direction from Qt to a Fyne-based `hydrusd` prototype
 - started a Fyne UI shell shaped by `image-tests/comfyui-image-browser.png` and `image-tests/hydrus.png` for add/trash validation
+
+### 2026-04-17 — Milestone 11: managed still-image thumbnails
+
+- added best-effort daemon-side thumbnail generation after successful local-path imports for JPEG, PNG, and GIF files
+- made exact re-import capable of repairing missing or stale managed thumbnails without overwriting unrelated placement failures
+- added import/storage/app tests covering happy-path thumbnail availability, corruption repair, and bounded downscaling
+- verified with targeted package tests, `go test ./...`, and `make check-desktop`

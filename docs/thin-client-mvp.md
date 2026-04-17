@@ -58,8 +58,10 @@ The thin-client-specific daemon endpoints for this prototype are:
   - streams the managed original file
 - `GET /v1/files/thumbnail?file_id=<id>`
   - streams the managed thumbnail when present
+  - fresh JPEG/PNG/GIF imports now attempt to create a managed thumbnail immediately
 - `POST /v1/import/local_file`
   - imports one daemon-local file path through the public thin-client contract
+  - supported JPEG/PNG/GIF still-image imports now attempt best-effort thumbnail generation after placement
 - `POST /v1/files/trash`
   - moves one file into the local trash domain through the public thin-client contract
 
@@ -68,6 +70,9 @@ Important note:
 - the current import endpoint is **daemon-local path based**
 - the prototype therefore assumes the selected file path is meaningful from the
   `hydrusd` host's point of view
+- immediate thumbnail availability should currently only be expected for JPEG,
+  PNG, and GIF still-image imports; other media types may browse without a
+  thumbnail until broader generation support lands
 
 ## Prototype UI shape
 

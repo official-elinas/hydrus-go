@@ -228,6 +228,32 @@ func TestApp_DBBackedImportRoundTripEndpoints(t *testing.T) {
 		t.Fatalf("recent file_id = %v, want %d", item["file_id"], fileID)
 	}
 
+	if item["has_thumbnail"] != true {
+		t.Fatalf("recent has_thumbnail = %v, want true", item["has_thumbnail"])
+	}
+
+	thumbnailReq := httptest.NewRequest(
+		http.MethodGet,
+		item["thumbnail_url"].(string),
+		nil,
+	)
+	thumbnailReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	thumbnailRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(thumbnailRR, thumbnailReq)
+
+	if thumbnailRR.Code != http.StatusOK {
+		t.Fatalf("thumbnail status = %d, want %d", thumbnailRR.Code, http.StatusOK)
+	}
+
+	if thumbnailRR.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("thumbnail Content-Type = %q, want image/png", thumbnailRR.Header().Get("Content-Type"))
+	}
+
+	if len(thumbnailRR.Body.Bytes()) == 0 {
+		t.Fatal("thumbnail body is empty, want managed preview bytes")
+	}
+
 	metadataReq := httptest.NewRequest(
 		http.MethodGet,
 		"/get_files/file_metadata?file_id="+strconv.FormatInt(fileID, 10)+"&only_return_basic_information=true",
