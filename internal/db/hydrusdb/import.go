@@ -726,7 +726,6 @@ func (b *Bundle) preparedLocalImportMatchesExisting(
 	if !currentMembershipsMatchPlan(
 		currentByHashID[hashID],
 		plan,
-		prepared.importedAtMS,
 	) {
 		return false, nil
 	}
@@ -793,21 +792,20 @@ func fileModifiedRowMatches(
 func currentMembershipsMatchPlan(
 	actual []currentFileServiceMembership,
 	plan preparedLocalImportPlan,
-	importedAtMS int64,
 ) bool {
-	expectedByServiceID := map[int64]sql.NullInt64{}
+	expectedByServiceID := map[int64]preparedCurrentMembershipPlan{}
 	for _, membership := range plan.currentMemberships {
-		expectedByServiceID[membership.service.id] = membership.expectedImportedTimestamp(importedAtMS)
+		expectedByServiceID[membership.service.id] = membership
 	}
 	matchedServiceIDs := map[int64]struct{}{}
 
 	for _, membership := range actual {
-		expectedTimestamp, ok := expectedByServiceID[membership.service.id]
+		expectedMembership, ok := expectedByServiceID[membership.service.id]
 		if !ok {
 			continue
 		}
 
-		if !nullInt64sEqual(membership.importedTimestampMS, expectedTimestamp) {
+		if !expectedMembership.matchesImportedTimestamp(membership.importedTimestampMS) {
 			return false
 		}
 
@@ -817,14 +815,12 @@ func currentMembershipsMatchPlan(
 	return len(matchedServiceIDs) == len(expectedByServiceID)
 }
 
-func (m preparedCurrentMembershipPlan) expectedImportedTimestamp(
-	importedAtMS int64,
-) sql.NullInt64 {
-	if !m.includeImportedAtMS {
-		return sql.NullInt64{}
+func (m preparedCurrentMembershipPlan) matchesImportedTimestamp(actual sql.NullInt64) bool {
+	if m.includeImportedAtMS {
+		return actual.Valid
 	}
 
-	return sql.NullInt64{Int64: importedAtMS, Valid: true}
+	return !actual.Valid
 }
 
 func nullInt64sEqual(left sql.NullInt64, right sql.NullInt64) bool {

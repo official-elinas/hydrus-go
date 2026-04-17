@@ -7,11 +7,17 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/official-elinas/hydrus-go/internal/buildinfo"
+	"github.com/official-elinas/hydrus-go/internal/core/fileassets"
+	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
 	"github.com/official-elinas/hydrus-go/internal/core/filemetadata"
+	"github.com/official-elinas/hydrus-go/internal/core/filetrash"
+	"github.com/official-elinas/hydrus-go/internal/core/librarybrowse"
 	"github.com/official-elinas/hydrus-go/internal/core/services"
 )
 
@@ -146,8 +152,20 @@ func TestProtectedEndpoints(t *testing.T) {
 			t.Fatalf("basic_permissions type = %T, want []any", payload["basic_permissions"])
 		}
 
-		if len(permissions) != 1 || int(permissions[0].(float64)) != int(PermissionSearchAndFetchFiles) {
-			t.Fatalf("basic_permissions = %v, want [%d]", permissions, PermissionSearchAndFetchFiles)
+		if len(permissions) != 2 {
+			t.Fatalf("len(basic_permissions) = %d, want 2", len(permissions))
+		}
+
+		if int(permissions[0].(float64)) != int(PermissionSearchAndFetchFiles) {
+			t.Fatalf("basic_permissions[0] = %v, want %d", permissions[0], PermissionSearchAndFetchFiles)
+		}
+
+		if int(permissions[1].(float64)) != int(PermissionImportAndDeleteFiles) {
+			t.Fatalf(
+				"basic_permissions[1] = %v, want %d",
+				permissions[1],
+				PermissionImportAndDeleteFiles,
+			)
 		}
 	})
 
@@ -233,6 +251,455 @@ func TestProtectedEndpoints(t *testing.T) {
 
 		if rr.Code != http.StatusNotImplemented {
 			t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotImplemented)
+		}
+	})
+
+	t.Run("recent local browse requires DB-backed store", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/library/recent", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", access.AccessKey())
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotImplemented)
+		}
+	})
+
+	t.Run("file content requires DB-backed store", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/v1/files/content?file_id=1", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", access.AccessKey())
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotImplemented)
+		}
+	})
+
+	t.Run("local import requires DB-backed write store", func(t *testing.T) {
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/v1/import/local_file",
+			strings.NewReader(`{"path":"/tmp/example.png"}`),
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", access.AccessKey())
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotImplemented)
+		}
+	})
+
+	t.Run("file trash requires DB-backed write store", func(t *testing.T) {
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/v1/files/trash",
+			strings.NewReader(`{"file_id":1}`),
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", access.AccessKey())
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotImplemented)
+		}
+	})
+
+	t.Run("trash requires import and delete permission", func(t *testing.T) {
+		access, err := NewAccessControl(
+			strings.Repeat("e", 64),
+			"search-only",
+			[]Permission{PermissionSearchAndFetchFiles},
+		)
+		if err != nil {
+			t.Fatalf("NewAccessControl() error = %v", err)
+		}
+
+		handler := NewHandler(
+			slog.New(slog.NewTextHandler(io.Discard, nil)),
+			access,
+			services.DefaultProvider(),
+			nil,
+			nil,
+			nil,
+			nil,
+			&fakeMetadataStore{},
+			false,
+		)
+
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/v1/files/trash",
+			strings.NewReader(`{"file_id":1}`),
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", access.AccessKey())
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusForbidden)
+		}
+	})
+}
+
+func TestThinClientEndpoints(t *testing.T) {
+	provider := services.NewStaticProvider(services.DefaultCatalog())
+
+	t.Run("recent local browse returns page payload", func(t *testing.T) {
+		store := &fakeMetadataStore{
+			listRecentHandle: func(request librarybrowse.Request) (librarybrowse.Page, error) {
+				if request.Offset != 2 || request.Limit != 1 {
+					t.Fatalf("request = %+v, want offset=2 limit=1", request)
+				}
+
+				width := int64(640)
+				height := int64(480)
+				importedAtMS := int64(123456)
+				return librarybrowse.Page{
+					Items: []librarybrowse.Item{
+						{
+							FileID:       5,
+							Hash:         strings.Repeat("a", 64),
+							MIME:         "image/jpeg",
+							Width:        &width,
+							Height:       &height,
+							ImportedAtMS: &importedAtMS,
+							HasThumbnail: true,
+						},
+					},
+					HasMore: true,
+				}, nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, provider, store, false)
+		req := httptest.NewRequest(http.MethodGet, "/v1/library/recent?offset=2&limit=1", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		if int(payload["offset"].(float64)) != 2 || int(payload["limit"].(float64)) != 1 {
+			t.Fatalf("offset/limit = %v/%v, want 2/1", payload["offset"], payload["limit"])
+		}
+
+		if payload["has_more"] != true {
+			t.Fatalf("has_more = %v, want true", payload["has_more"])
+		}
+
+		items, ok := payload["items"].([]any)
+		if !ok || len(items) != 1 {
+			t.Fatalf("items = %v, want single item", payload["items"])
+		}
+
+		item := items[0].(map[string]any)
+		if item["content_url"] != "/v1/files/content?file_id=5" {
+			t.Fatalf("content_url = %v, want /v1/files/content?file_id=5", item["content_url"])
+		}
+
+		if item["thumbnail_url"] != "/v1/files/thumbnail?file_id=5" {
+			t.Fatalf(
+				"thumbnail_url = %v, want /v1/files/thumbnail?file_id=5",
+				item["thumbnail_url"],
+			)
+		}
+	})
+
+	t.Run("file content streams managed bytes", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "content.jpg")
+		if err := os.WriteFile(path, []byte("jpeg bytes"), 0o644); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+
+		store := &fakeMetadataStore{
+			resolveContentHandle: func(fileID int64) (fileassets.Descriptor, error) {
+				if fileID != 7 {
+					t.Fatalf("fileID = %d, want 7", fileID)
+				}
+
+				return fileassets.Descriptor{
+					FileID:   7,
+					Hash:     strings.Repeat("c", 64),
+					Path:     path,
+					Filename: "file.jpg",
+					MIME:     "image/jpeg",
+				}, nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, provider, store, false)
+		req := httptest.NewRequest(http.MethodGet, "/v1/files/content?file_id=7", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		if rr.Header().Get("Content-Type") != "image/jpeg" {
+			t.Fatalf("Content-Type = %q, want image/jpeg", rr.Header().Get("Content-Type"))
+		}
+
+		if rr.Body.String() != "jpeg bytes" {
+			t.Fatalf("body = %q, want jpeg bytes", rr.Body.String())
+		}
+	})
+
+	t.Run("thumbnail endpoint sniffs content type when needed", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "thumb.thumbnail")
+		pngBytes := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n', 0x00, 0x00, 0x00, 0x00}
+		if err := os.WriteFile(path, pngBytes, 0o644); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+
+		store := &fakeMetadataStore{
+			resolveThumbnailHandle: func(fileID int64) (fileassets.Descriptor, error) {
+				return fileassets.Descriptor{
+					FileID:   fileID,
+					Hash:     strings.Repeat("d", 64),
+					Path:     path,
+					Filename: "thumb.thumbnail",
+				}, nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, provider, store, false)
+		req := httptest.NewRequest(http.MethodGet, "/v1/files/thumbnail?file_id=8", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		if rr.Header().Get("Content-Type") != "image/png" {
+			t.Fatalf("Content-Type = %q, want image/png", rr.Header().Get("Content-Type"))
+		}
+	})
+
+	t.Run("local import returns imported file payload", func(t *testing.T) {
+		store := &fakeMetadataStore{
+			importLocalHandle: func(request fileimport.Request) (fileimport.Result, error) {
+				if request.Path != "/tmp/example.png" {
+					t.Fatalf("request.Path = %q, want /tmp/example.png", request.Path)
+				}
+
+				return fileimport.Result{
+					FileID:                    42,
+					Hash:                      strings.Repeat("f", 64),
+					AlreadyImported:           false,
+					ManagedFileAlreadyPresent: false,
+				}, nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, provider, store, false)
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/v1/import/local_file",
+			strings.NewReader(`{"path":"/tmp/example.png"}`),
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		if int(payload["file_id"].(float64)) != 42 {
+			t.Fatalf("file_id = %v, want 42", payload["file_id"])
+		}
+
+		if payload["content_url"] != "/v1/files/content?file_id=42" {
+			t.Fatalf("content_url = %v, want /v1/files/content?file_id=42", payload["content_url"])
+		}
+	})
+
+	t.Run("local import maps request and not found errors", func(t *testing.T) {
+		requestStore := &fakeMetadataStore{
+			importLocalHandle: func(fileimport.Request) (fileimport.Result, error) {
+				return fileimport.Result{}, &fileimport.RequestError{Message: "bad path"}
+			},
+		}
+
+		handler := newHandlerWithDeps(t, provider, requestStore, false)
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/v1/import/local_file",
+			strings.NewReader(`{"path":"/tmp/example.png"}`),
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("request error status = %d, want %d", rr.Code, http.StatusBadRequest)
+		}
+
+		notFoundStore := &fakeMetadataStore{
+			importLocalHandle: func(fileimport.Request) (fileimport.Result, error) {
+				return fileimport.Result{}, &fileimport.NotFoundError{Message: "missing"}
+			},
+		}
+
+		handler = newHandlerWithDeps(t, provider, notFoundStore, false)
+		req = httptest.NewRequest(
+			http.MethodPost,
+			"/v1/import/local_file",
+			strings.NewReader(`{"path":"/tmp/example.png"}`),
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr = httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("not found status = %d, want %d", rr.Code, http.StatusNotFound)
+		}
+	})
+
+	t.Run("local import rejects malformed JSON", func(t *testing.T) {
+		store := &fakeMetadataStore{}
+		handler := newHandlerWithDeps(t, provider, store, false)
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/v1/import/local_file",
+			strings.NewReader(`{"path":`),
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("trash returns trashed payload", func(t *testing.T) {
+		store := &fakeMetadataStore{
+			trashFileHandle: func(request filetrash.Request) (filetrash.Result, error) {
+				if request.FileID != 42 {
+					t.Fatalf("request.FileID = %d, want 42", request.FileID)
+				}
+
+				return filetrash.Result{
+					FileID:            42,
+					Trashed:           true,
+					RemovedFromRecent: true,
+				}, nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, provider, store, false)
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/v1/files/trash",
+			strings.NewReader(`{"file_id":42}`),
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		if int(payload["file_id"].(float64)) != 42 {
+			t.Fatalf("file_id = %v, want 42", payload["file_id"])
+		}
+
+		if payload["state"] != "trashed" {
+			t.Fatalf("state = %v, want trashed", payload["state"])
+		}
+	})
+
+	t.Run("trash maps request and not found errors", func(t *testing.T) {
+		requestStore := &fakeMetadataStore{
+			trashFileHandle: func(filetrash.Request) (filetrash.Result, error) {
+				return filetrash.Result{}, &filetrash.RequestError{Message: "bad file_id"}
+			},
+		}
+
+		handler := newHandlerWithDeps(t, provider, requestStore, false)
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/v1/files/trash",
+			strings.NewReader(`{"file_id":42}`),
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("request error status = %d, want %d", rr.Code, http.StatusBadRequest)
+		}
+
+		notFoundStore := &fakeMetadataStore{
+			trashFileHandle: func(filetrash.Request) (filetrash.Result, error) {
+				return filetrash.Result{}, &filetrash.NotFoundError{Message: "missing"}
+			},
+		}
+
+		handler = newHandlerWithDeps(t, provider, notFoundStore, false)
+		req = httptest.NewRequest(
+			http.MethodPost,
+			"/v1/files/trash",
+			strings.NewReader(`{"file_id":42}`),
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr = httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("not found status = %d, want %d", rr.Code, http.StatusNotFound)
+		}
+	})
+
+	t.Run("trash rejects malformed JSON", func(t *testing.T) {
+		store := &fakeMetadataStore{}
+		handler := newHandlerWithDeps(t, provider, store, false)
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/v1/files/trash",
+			strings.NewReader(`{"file_id":`),
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
 		}
 	})
 }
@@ -566,7 +1033,7 @@ func newTestHandler(t *testing.T) http.Handler {
 	access, err := NewAccessControl(
 		strings.Repeat("a", 64),
 		"test-client",
-		[]Permission{PermissionSearchAndFetchFiles},
+		[]Permission{PermissionSearchAndFetchFiles, PermissionImportAndDeleteFiles},
 	)
 	if err != nil {
 		t.Fatalf("NewAccessControl() error = %v", err)
@@ -576,6 +1043,10 @@ func newTestHandler(t *testing.T) http.Handler {
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		access,
 		services.DefaultProvider(),
+		nil,
+		nil,
+		nil,
+		nil,
 		nil,
 		false,
 	)
@@ -587,7 +1058,7 @@ func newAccessControlledHandler(t *testing.T) (*AccessControl, http.Handler) {
 	access, err := NewAccessControl(
 		strings.Repeat("b", 64),
 		"test-client",
-		[]Permission{PermissionSearchAndFetchFiles},
+		[]Permission{PermissionSearchAndFetchFiles, PermissionImportAndDeleteFiles},
 	)
 	if err != nil {
 		t.Fatalf("NewAccessControl() error = %v", err)
@@ -597,6 +1068,10 @@ func newAccessControlledHandler(t *testing.T) (*AccessControl, http.Handler) {
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		access,
 		services.DefaultProvider(),
+		nil,
+		nil,
+		nil,
+		nil,
 		nil,
 		false,
 	)
@@ -610,7 +1085,7 @@ func newCORSEnabledHandler(t *testing.T) http.Handler {
 	access, err := NewAccessControl(
 		strings.Repeat("d", 64),
 		"test-client",
-		[]Permission{PermissionSearchAndFetchFiles},
+		[]Permission{PermissionSearchAndFetchFiles, PermissionImportAndDeleteFiles},
 	)
 	if err != nil {
 		t.Fatalf("NewAccessControl() error = %v", err)
@@ -620,6 +1095,10 @@ func newCORSEnabledHandler(t *testing.T) http.Handler {
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		access,
 		services.DefaultProvider(),
+		nil,
+		nil,
+		nil,
+		nil,
 		nil,
 		true,
 	)
@@ -636,10 +1115,32 @@ func newHandlerWithDeps(
 	access, err := NewAccessControl(
 		strings.Repeat("b", 64),
 		"test-client",
-		[]Permission{PermissionSearchAndFetchFiles},
+		[]Permission{PermissionSearchAndFetchFiles, PermissionImportAndDeleteFiles},
 	)
 	if err != nil {
 		t.Fatalf("NewAccessControl() error = %v", err)
+	}
+
+	var browseStore librarybrowse.Store
+	var assetStore fileassets.Store
+	var importStore fileimport.Store
+	var trashStore filetrash.Store
+	if store != nil {
+		if candidate, ok := store.(librarybrowse.Store); ok {
+			browseStore = candidate
+		}
+
+		if candidate, ok := store.(fileassets.Store); ok {
+			assetStore = candidate
+		}
+
+		if candidate, ok := store.(fileimport.Store); ok {
+			importStore = candidate
+		}
+
+		if candidate, ok := store.(filetrash.Store); ok {
+			trashStore = candidate
+		}
 	}
 
 	return NewHandler(
@@ -647,15 +1148,24 @@ func newHandlerWithDeps(
 		access,
 		provider,
 		store,
+		browseStore,
+		assetStore,
+		importStore,
+		trashStore,
 		enableCORS,
 	)
 }
 
 type fakeMetadataStore struct {
-	rows        []filemetadata.Row
-	err         error
-	handle      func(filemetadata.Request) ([]filemetadata.Row, error)
-	lastRequest *filemetadata.Request
+	rows                   []filemetadata.Row
+	err                    error
+	handle                 func(filemetadata.Request) ([]filemetadata.Row, error)
+	listRecentHandle       func(librarybrowse.Request) (librarybrowse.Page, error)
+	resolveContentHandle   func(int64) (fileassets.Descriptor, error)
+	resolveThumbnailHandle func(int64) (fileassets.Descriptor, error)
+	importLocalHandle      func(fileimport.Request) (fileimport.Result, error)
+	trashFileHandle        func(filetrash.Request) (filetrash.Result, error)
+	lastRequest            *filemetadata.Request
 }
 
 func (s *fakeMetadataStore) GetMetadata(
@@ -668,6 +1178,61 @@ func (s *fakeMetadataStore) GetMetadata(
 		return s.handle(request)
 	}
 	return s.rows, s.err
+}
+
+func (s *fakeMetadataStore) ListRecent(
+	_ context.Context,
+	request librarybrowse.Request,
+) (librarybrowse.Page, error) {
+	if s.listRecentHandle != nil {
+		return s.listRecentHandle(request)
+	}
+
+	return librarybrowse.Page{}, nil
+}
+
+func (s *fakeMetadataStore) ResolveFileContent(
+	_ context.Context,
+	fileID int64,
+) (fileassets.Descriptor, error) {
+	if s.resolveContentHandle != nil {
+		return s.resolveContentHandle(fileID)
+	}
+
+	return fileassets.Descriptor{}, nil
+}
+
+func (s *fakeMetadataStore) ResolveThumbnail(
+	_ context.Context,
+	fileID int64,
+) (fileassets.Descriptor, error) {
+	if s.resolveThumbnailHandle != nil {
+		return s.resolveThumbnailHandle(fileID)
+	}
+
+	return fileassets.Descriptor{}, nil
+}
+
+func (s *fakeMetadataStore) ImportLocalPath(
+	_ context.Context,
+	request fileimport.Request,
+) (fileimport.Result, error) {
+	if s.importLocalHandle != nil {
+		return s.importLocalHandle(request)
+	}
+
+	return fileimport.Result{}, nil
+}
+
+func (s *fakeMetadataStore) TrashFile(
+	_ context.Context,
+	request filetrash.Request,
+) (filetrash.Result, error) {
+	if s.trashFileHandle != nil {
+		return s.trashFileHandle(request)
+	}
+
+	return filetrash.Result{}, nil
 }
 
 func decodeJSON(t *testing.T, raw []byte, target any) {

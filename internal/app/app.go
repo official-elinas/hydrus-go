@@ -12,43 +12,105 @@ import (
 	"github.com/official-elinas/hydrus-go/internal/api/httpapi"
 	"github.com/official-elinas/hydrus-go/internal/buildinfo"
 	"github.com/official-elinas/hydrus-go/internal/config"
+	"github.com/official-elinas/hydrus-go/internal/core/fileassets"
+	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
 	"github.com/official-elinas/hydrus-go/internal/core/filemetadata"
+	"github.com/official-elinas/hydrus-go/internal/core/filetrash"
+	"github.com/official-elinas/hydrus-go/internal/core/librarybrowse"
 	"github.com/official-elinas/hydrus-go/internal/core/services"
 	"github.com/official-elinas/hydrus-go/internal/db/hydrusdb"
+	"github.com/official-elinas/hydrus-go/internal/importing"
+)
+
+var (
+	openReadBundle     = hydrusdb.Open
+	openWriteBundle    = hydrusdb.OpenWritable
+	newDefaultImporter = importing.NewDefaultImporter
 )
 
 // App holds the bootstrap daemon runtime state.
 type App struct {
-	cfg    config.Config
-	logger *slog.Logger
-	access *httpapi.AccessControl
-	server *http.Server
-	bundle *hydrusdb.Bundle
+	cfg         config.Config
+	logger      *slog.Logger
+	access      *httpapi.AccessControl
+	server      *http.Server
+	readBundle  *hydrusdb.Bundle
+	writeBundle *hydrusdb.Bundle
 }
 
 // New constructs the bootstrap daemon application.
 func New(cfg config.Config, logger *slog.Logger) (*App, error) {
-	access, err := httpapi.NewAccessControl(
-		cfg.AccessKey,
-		cfg.AccessName,
-		[]httpapi.Permission{httpapi.PermissionSearchAndFetchFiles},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("create access control: %w", err)
-	}
-
 	serviceProvider := services.Provider(services.DefaultProvider())
 	var metadataStore filemetadata.Store
-	var bundle *hydrusdb.Bundle
+	var browseStore librarybrowse.Store
+	var assetStore fileassets.Store
+	var importStore fileimport.Store
+	var trashStore filetrash.Store
+	var readBundle *hydrusdb.Bundle
+	var writeBundle *hydrusdb.Bundle
+	var err error
 
 	if cfg.DBDir != "" {
-		bundle, err = hydrusdb.Open(context.Background(), cfg.DBDir)
+		readBundle, err = openReadBundle(context.Background(), cfg.DBDir)
 		if err != nil {
 			return nil, fmt.Errorf("open hydrus DB bundle: %w", err)
 		}
 
-		serviceProvider = bundle
-		metadataStore = bundle
+		writeBundle, err = openWriteBundle(context.Background(), cfg.DBDir)
+		if err != nil {
+			logger.Warn(
+				"write bundle unavailable; continuing in read-only daemon mode",
+				"db_dir",
+				cfg.DBDir,
+				"error",
+				err,
+			)
+		} else {
+			importer, err := newDefaultImporter(writeBundle, cfg.DBDir)
+			if err != nil {
+				logger.Warn(
+					"local importer unavailable; continuing in read-only daemon mode",
+					"db_dir",
+					cfg.DBDir,
+					"error",
+					err,
+				)
+				if closeErr := writeBundle.Close(); closeErr != nil {
+					logger.Error("close unusable write hydrus DB bundle", "error", closeErr)
+				}
+				writeBundle = nil
+			} else {
+				importStore = importer
+				trashStore = writeBundle
+			}
+		}
+
+		serviceProvider = readBundle
+		metadataStore = readBundle
+		browseStore = readBundle
+		assetStore = readBundle
+	}
+
+	permissions := []httpapi.Permission{httpapi.PermissionSearchAndFetchFiles}
+	if importStore != nil || trashStore != nil {
+		permissions = append(permissions, httpapi.PermissionImportAndDeleteFiles)
+	}
+
+	access, err := httpapi.NewAccessControl(
+		cfg.AccessKey,
+		cfg.AccessName,
+		permissions,
+	)
+	if err != nil {
+		if readBundle != nil {
+			_ = readBundle.Close()
+		}
+
+		if writeBundle != nil {
+			_ = writeBundle.Close()
+		}
+
+		return nil, fmt.Errorf("create access control: %w", err)
 	}
 
 	handler := httpapi.NewHandler(
@@ -56,6 +118,10 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 		access,
 		serviceProvider,
 		metadataStore,
+		browseStore,
+		assetStore,
+		importStore,
+		trashStore,
 		cfg.EnableCORS,
 	)
 
@@ -69,11 +135,12 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 	}
 
 	return &App{
-		cfg:    cfg,
-		logger: logger,
-		access: access,
-		server: server,
-		bundle: bundle,
+		cfg:         cfg,
+		logger:      logger,
+		access:      access,
+		server:      server,
+		readBundle:  readBundle,
+		writeBundle: writeBundle,
 	}, nil
 }
 
@@ -147,11 +214,15 @@ func (a *App) Run(ctx context.Context) error {
 }
 
 func (a *App) closeResources() {
-	if a.bundle == nil {
-		return
+	if a.readBundle != nil {
+		if err := a.readBundle.Close(); err != nil {
+			a.logger.Error("close read hydrus DB bundle", "error", err)
+		}
 	}
 
-	if err := a.bundle.Close(); err != nil {
-		a.logger.Error("close hydrus DB bundle", "error", err)
+	if a.writeBundle != nil {
+		if err := a.writeBundle.Close(); err != nil {
+			a.logger.Error("close write hydrus DB bundle", "error", err)
+		}
 	}
 }

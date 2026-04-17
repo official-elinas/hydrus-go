@@ -11,7 +11,11 @@ import (
 	"time"
 
 	"github.com/official-elinas/hydrus-go/internal/buildinfo"
+	"github.com/official-elinas/hydrus-go/internal/core/fileassets"
+	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
 	"github.com/official-elinas/hydrus-go/internal/core/filemetadata"
+	"github.com/official-elinas/hydrus-go/internal/core/filetrash"
+	"github.com/official-elinas/hydrus-go/internal/core/librarybrowse"
 	"github.com/official-elinas/hydrus-go/internal/core/services"
 )
 
@@ -20,6 +24,10 @@ type Server struct {
 	access        *AccessControl
 	services      services.Provider
 	metadataStore filemetadata.Store
+	browseStore   librarybrowse.Store
+	assetStore    fileassets.Store
+	importStore   fileimport.Store
+	trashStore    filetrash.Store
 	enableCORS    bool
 }
 
@@ -29,6 +37,10 @@ func NewHandler(
 	access *AccessControl,
 	serviceProvider services.Provider,
 	metadataStore filemetadata.Store,
+	browseStore librarybrowse.Store,
+	assetStore fileassets.Store,
+	importStore fileimport.Store,
+	trashStore filetrash.Store,
 	enableCORS bool,
 ) http.Handler {
 	server := &Server{
@@ -36,6 +48,10 @@ func NewHandler(
 		access:        access,
 		services:      serviceProvider,
 		metadataStore: metadataStore,
+		browseStore:   browseStore,
+		assetStore:    assetStore,
+		importStore:   importStore,
+		trashStore:    trashStore,
 		enableCORS:    enableCORS,
 	}
 
@@ -51,6 +67,11 @@ func NewHandler(
 		"/get_files/file_metadata",
 		server.get("/get_files/file_metadata", server.handleGetFileMetadata),
 	)
+	mux.Handle("/v1/library/recent", server.get("/v1/library/recent", server.handleListRecentFiles))
+	mux.Handle("/v1/files/content", server.get("/v1/files/content", server.handleGetFileContent))
+	mux.Handle("/v1/files/thumbnail", server.get("/v1/files/thumbnail", server.handleGetFileThumbnail))
+	mux.Handle("/v1/files/trash", server.post("/v1/files/trash", server.handleTrashFile))
+	mux.Handle("/v1/import/local_file", server.post("/v1/import/local_file", server.handleImportLocalFile))
 
 	return server.withGlobalMiddleware(mux)
 }
@@ -77,6 +98,37 @@ func (s *Server) get(path string, next http.HandlerFunc) http.Handler {
 
 				s.writeCORSHeaders(w, r)
 				w.Header().Set("Access-Control-Allow-Methods", http.MethodGet)
+			}
+
+			w.WriteHeader(http.StatusOK)
+		default:
+			writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		}
+	})
+}
+
+func (s *Server) post(path string, next http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != path {
+			writeError(w, http.StatusNotFound, "not found")
+			return
+		}
+
+		w.Header().Set("Allow", http.MethodPost)
+
+		switch r.Method {
+		case http.MethodPost:
+			s.writeCORSHeaders(w, r)
+			next(w, r)
+		case http.MethodOptions:
+			if origin := strings.TrimSpace(r.Header.Get("Origin")); origin != "" {
+				if !s.enableCORS {
+					writeError(w, http.StatusForbidden, "CORS is disabled")
+					return
+				}
+
+				s.writeCORSHeaders(w, r)
+				w.Header().Set("Access-Control-Allow-Methods", http.MethodPost)
 			}
 
 			w.WriteHeader(http.StatusOK)
