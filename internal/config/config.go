@@ -33,6 +33,22 @@ type Config struct {
 
 // LoadFromEnv loads and validates the bootstrap daemon configuration.
 func LoadFromEnv() (Config, error) {
+	cfg, err := LoadFromEnvUnvalidated()
+	if err != nil {
+		return Config{}, err
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
+
+	return cfg, nil
+}
+
+// LoadFromEnvUnvalidated loads daemon configuration from environment variables
+// without final validation, so higher-precedence runtime overrides can be
+// applied before checks run.
+func LoadFromEnvUnvalidated() (Config, error) {
 	cfg := Config{
 		ListenAddr:               getEnv("HYDRUS_GO_LISTEN_ADDR", defaultListenAddr),
 		DBDir:                    strings.TrimSpace(os.Getenv("HYDRUS_GO_DB_DIR")),
@@ -78,11 +94,12 @@ func LoadFromEnv() (Config, error) {
 	}
 	cfg.AccessKey = normalizedAccessKey
 
-	if err := cfg.validate(); err != nil {
-		return Config{}, err
-	}
-
 	return cfg, nil
+}
+
+// Validate applies the final daemon configuration checks.
+func (c Config) Validate() error {
+	return c.validate()
 }
 
 func (c Config) validate() error {

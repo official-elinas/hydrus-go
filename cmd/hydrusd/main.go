@@ -4,9 +4,12 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/official-elinas/hydrus-go/internal/app"
@@ -22,7 +25,10 @@ func main() {
 	)
 	defer stop()
 
-	cfg, err := config.LoadFromEnv()
+	cfg, err := loadRuntimeConfig(os.Args[1:], os.Stderr)
+	if errors.Is(err, flag.ErrHelp) {
+		return
+	}
 	if err != nil {
 		exitf("load config: %v", err)
 	}
@@ -41,6 +47,68 @@ func main() {
 	if err != nil && !errors.Is(err, context.Canceled) {
 		exitf("run hydrus-go: %v", err)
 	}
+}
+
+type cliOptions struct {
+	listenAddr string
+	listenSet  bool
+}
+
+func loadRuntimeConfig(args []string, stderr io.Writer) (config.Config, error) {
+	options, err := parseCLIOptions(args, stderr)
+	if err != nil {
+		return config.Config{}, err
+	}
+
+	cfg, err := config.LoadFromEnvUnvalidated()
+	if err != nil {
+		return config.Config{}, err
+	}
+
+	if options.listenSet {
+		cfg.ListenAddr = options.listenAddr
+		cfg.AllowNonLocalConnections = true
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return config.Config{}, err
+	}
+
+	return cfg, nil
+}
+
+func parseCLIOptions(args []string, stderr io.Writer) (cliOptions, error) {
+	flagSet := flag.NewFlagSet("hydrusd", flag.ContinueOnError)
+	flagSet.SetOutput(stderr)
+	flagSet.Usage = func() {
+		_, _ = fmt.Fprintln(stderr, "Usage: hydrusd [--listen host:port]")
+		flagSet.PrintDefaults()
+	}
+
+	var options cliOptions
+	flagSet.StringVar(
+		&options.listenAddr,
+		"listen",
+		"",
+		"override daemon listen address for this invocation (for example 0.0.0.0:5555)",
+	)
+
+	if err := flagSet.Parse(args); err != nil {
+		return cliOptions{}, err
+	}
+
+	flagSet.Visit(func(f *flag.Flag) {
+		if f.Name == "listen" {
+			options.listenSet = true
+		}
+	})
+	options.listenAddr = strings.TrimSpace(options.listenAddr)
+
+	if flagSet.NArg() > 0 {
+		return cliOptions{}, fmt.Errorf("unexpected arguments: %s", strings.Join(flagSet.Args(), " "))
+	}
+
+	return options, nil
 }
 
 func exitf(format string, args ...any) {

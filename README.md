@@ -206,6 +206,23 @@ make run
 The daemon defaults to `127.0.0.1:45869`, matching Hydrus's default Client API
 port.
 
+For temporary LAN testing, use:
+
+```bash
+make run-lan
+./bin/hydrusd --listen 0.0.0.0:5555
+```
+
+The `--listen` runtime flag overrides `HYDRUS_GO_LISTEN_ADDR` for that
+invocation and explicitly permits the requested bind address, so
+`0.0.0.0:5555` works without separately exporting
+`HYDRUS_GO_ALLOW_NON_LOCAL_CONNECTIONS=true`. You can also override the listen
+address through the Makefile helper, for example:
+
+```bash
+make run-lan LAN_LISTEN_ADDR=0.0.0.0:9999
+```
+
 If no API access key is configured, one will be generated on startup and written
 to the daemon logs.
 
@@ -243,16 +260,35 @@ Or use:
 make run-desktop
 ```
 
+To build desktop binaries instead of running in-place:
+
+```bash
+make build-desktop-linux
+make build-desktop-windows
+```
+
 Notes:
 
 - the desktop prototype talks to `hydrusd`; it never touches SQLite or
   `client_files` directly
+- for cross-machine LAN testing, point the connect dialog at the daemon host
+  (for example `http://<linux-host>:45869`) rather than the default localhost
+  URL
+- `make build-desktop` keeps the old behavior of building a desktop binary for
+  the current host platform
 - the current Linux desktop build depends on native windowing/OpenGL headers in
   addition to the Go toolchain
+- `make build-desktop-linux` now emits an explicit `linux/amd64` build by
+  default and uses `LINUX_CC` (default: `gcc`); if you override
+  `LINUX_GOARCH`, provide a matching Linux toolchain via `LINUX_CC`
+- the Windows desktop build uses the MinGW cross-compiler configured by
+  `WINDOWS_CC` and defaults to `windows/amd64`; override the target
+  architecture with `WINDOWS_GOARCH` and use a matching compiler as needed
 - the current environment in this repo can type-check the Fyne code via WASM,
   but a native Linux build still requires the usual X11/GL development packages
 - `make check-desktop` is the canonical non-native validation path for the tagged
-  desktop code in environments that do not have those headers installed
+  desktop code in environments that do not have those headers installed; it now
+  writes `bin/hydrus-desktop.wasm` instead of a misleading repo-root binary
 
 ## Developer loop
 
@@ -262,6 +298,8 @@ make test
 make build
 make run
 make build-desktop
+make build-desktop-linux
+make build-desktop-windows
 make check-desktop
 make run-desktop
 ```
