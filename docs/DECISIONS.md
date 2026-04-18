@@ -252,25 +252,25 @@ daemon wiring and public write endpoints remain read-only for now.
 
 ---
 
-## 2026-04-16 — thin desktop client comes before PTR, and it uses Qt 6 Widgets
+## 2026-04-16 — thin desktop client comes before PTR, and it used Qt 6 Widgets initially (superseded)
 
-**Decision**
+**Decision (superseded on 2026-04-17 by the Fyne pivot below)**
 
 Prioritize a thin multi-platform desktop client before PTR work, and make Qt 6
 Widgets in C++ the first client stack.
 
 **Why**
 
-- the immediate product need is to validate import, browse, preview, export, and delete workflows against the Go daemon
+- the immediate product need was to validate import, browse, preview, export, and trash-first workflows against the Go daemon
 - SQLite and managed `client_files` performance should be proven through a real client before PTR synchronization work begins
 - Qt aligns with Hydrus's desktop direction without pulling the project into JS/TS or Python UI runtime decisions
 - a thin native client is a better first validation target than attempting full Hydrus UI parity immediately
 
 **Consequence**
 
-The roadmap now prioritizes thin-client-facing daemon APIs and a Qt desktop MVP
-before PTR. The client stays thin, while the daemon remains the owner of
-library state, storage, and later repository synchronization.
+The roadmap first prioritized thin-client-facing daemon APIs and a Qt desktop
+MVP before PTR. That client-stack choice is now superseded, but the
+daemon-before-PTR sequencing still stands.
 
 ---
 
@@ -334,5 +334,28 @@ mutation workflows rather than as a broader end-user app milestone.
 **Consequence**
 
 The first Fyne window prioritizes connect, refresh, add file, trash selected,
-recent grid browsing, and selected-file metadata. Preview/export/search/tagging
-polish remains later work.
+recent grid browsing, selected-file metadata, and bounded selected-file original
+preview. Export/search/tagging polish remains later work.
+
+---
+
+## 2026-04-17 — selected original preview stays image-only and bounded in the first prototype
+
+**Decision**
+
+Use the existing `GET /v1/files/content` endpoint for selected-file preview in
+the Fyne prototype, but keep that preview limited to JPEG/PNG/GIF and enforce
+strict payload and decoded-image limits.
+
+**Why**
+
+- validating daemon-served original files is high value for the thin-client MVP
+- unrestricted full-original preview would create avoidable memory and bandwidth risk during Windows-over-LAN testing
+- the first prototype only needs enough preview capability to prove the content-serving contract, not to become a full media viewer
+
+**Consequence**
+
+The desktop client now previews selected JPEG/PNG/GIF originals through
+`/v1/files/content`, but it rejects oversized payloads and very large decoded
+images to keep the thin client responsive while broader preview/export behavior
+remains later work.

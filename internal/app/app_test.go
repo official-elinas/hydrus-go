@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/official-elinas/hydrus-go/internal/bootstrap"
 	"github.com/official-elinas/hydrus-go/internal/config"
 	"github.com/official-elinas/hydrus-go/internal/db/hydrusdb"
 )
@@ -35,7 +36,7 @@ func TestRun_ShutsDownWhenContextIsCanceled(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	application, err := New(cfg, logger)
+	application, err := New(context.Background(), cfg, logger)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -80,7 +81,7 @@ func TestNew_OpensConfiguredDBBundle(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	application, err := New(cfg, logger)
+	application, err := New(context.Background(), cfg, logger)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -92,6 +93,185 @@ func TestNew_OpensConfiguredDBBundle(t *testing.T) {
 
 	if application.writeBundle == nil {
 		t.Fatal("application.writeBundle = nil, want opened write bundle")
+	}
+}
+
+func TestNew_BootstrapsEmptyConfiguredDBBundleWhenEnabled(t *testing.T) {
+	dbDir := t.TempDir()
+
+	originalEnsureFreshClientBundle := ensureFreshClientBundle
+	ensureFreshClientBundle = func(
+		_ context.Context,
+		options bootstrap.Options,
+	) (bootstrap.Result, error) {
+		if options.DBDir != dbDir {
+			t.Fatalf("options.DBDir = %q, want %q", options.DBDir, dbDir)
+		}
+
+		if !options.Enabled {
+			t.Fatal("options.Enabled = false, want true")
+		}
+
+		if options.PythonCommand != "/usr/bin/python-custom" {
+			t.Fatalf(
+				"options.PythonCommand = %q, want %q",
+				options.PythonCommand,
+				"/usr/bin/python-custom",
+			)
+		}
+
+		if options.HydrusRoot != "/hydrus/root" {
+			t.Fatalf("options.HydrusRoot = %q, want %q", options.HydrusRoot, "/hydrus/root")
+		}
+
+		if options.Timeout != time.Minute {
+			t.Fatalf("options.Timeout = %v, want %v", options.Timeout, time.Minute)
+		}
+
+		createEmptySQLiteDB(t, filepath.Join(options.DBDir, "client.db"))
+		createEmptySQLiteDB(t, filepath.Join(options.DBDir, "client.master.db"))
+		createEmptySQLiteDB(t, filepath.Join(options.DBDir, "client.caches.db"))
+		createEmptySQLiteDB(t, filepath.Join(options.DBDir, "client.mappings.db"))
+
+		return bootstrap.Result{Bootstrapped: true, HydrusRoot: "/hydrus/root"}, nil
+	}
+	defer func() {
+		ensureFreshClientBundle = originalEnsureFreshClientBundle
+	}()
+
+	cfg := config.Config{
+		ListenAddr:                 "127.0.0.1:0",
+		DBDir:                      dbDir,
+		EnableFreshClientBootstrap: true,
+		BootstrapPythonCommand:     "/usr/bin/python-custom",
+		BootstrapHydrusRoot:        "/hydrus/root",
+		BootstrapTimeout:           time.Minute,
+		AccessName:                 "test-client",
+		LogLevel:                   "error",
+		ShutdownTimeout:            time.Second,
+		AllowNonLocalConnections:   false,
+		EnableCORS:                 false,
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	application, err := New(context.Background(), cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer application.closeResources()
+
+	if application.readBundle == nil {
+		t.Fatal("application.readBundle = nil, want opened read bundle")
+	}
+
+	if application.writeBundle == nil {
+		t.Fatal("application.writeBundle = nil, want opened write bundle")
+	}
+}
+
+func TestNew_RejectsEmptyConfiguredDBBundleWhenBootstrapDisabled(t *testing.T) {
+	cfg := config.Config{
+		ListenAddr:               "127.0.0.1:0",
+		DBDir:                    t.TempDir(),
+		AccessName:               "test-client",
+		LogLevel:                 "error",
+		ShutdownTimeout:          time.Second,
+		AllowNonLocalConnections: false,
+		EnableCORS:               false,
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	_, err := New(context.Background(), cfg, logger)
+	if err == nil {
+		t.Fatal("New() error = nil, want error")
+	}
+
+	if !strings.Contains(err.Error(), "fresh-client bootstrap is disabled") {
+		t.Fatalf("New() error = %v, want bootstrap guidance", err)
+	}
+}
+
+func TestNew_PropagatesBootstrapPreparationFailure(t *testing.T) {
+	dbDir := t.TempDir()
+
+	originalEnsureFreshClientBundle := ensureFreshClientBundle
+	ensureFreshClientBundle = func(context.Context, bootstrap.Options) (bootstrap.Result, error) {
+		return bootstrap.Result{}, errors.New("forced bootstrap failure")
+	}
+	defer func() {
+		ensureFreshClientBundle = originalEnsureFreshClientBundle
+	}()
+
+	cfg := config.Config{
+		ListenAddr:                 "127.0.0.1:0",
+		DBDir:                      dbDir,
+		EnableFreshClientBootstrap: true,
+		BootstrapPythonCommand:     "/usr/bin/python-custom",
+		BootstrapHydrusRoot:        "/hydrus/root",
+		BootstrapTimeout:           time.Minute,
+		AccessName:                 "test-client",
+		LogLevel:                   "error",
+		ShutdownTimeout:            time.Second,
+		AllowNonLocalConnections:   false,
+		EnableCORS:                 false,
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	_, err := New(context.Background(), cfg, logger)
+	if err == nil {
+		t.Fatal("New() error = nil, want error")
+	}
+
+	if !strings.Contains(err.Error(), "prepare hydrus DB bundle: forced bootstrap failure") {
+		t.Fatalf("New() error = %v, want wrapped bootstrap failure", err)
+	}
+}
+
+func TestNew_PropagatesReadBundleFailureAfterBootstrap(t *testing.T) {
+	dbDir := t.TempDir()
+
+	originalEnsureFreshClientBundle := ensureFreshClientBundle
+	ensureFreshClientBundle = func(context.Context, bootstrap.Options) (bootstrap.Result, error) {
+		return bootstrap.Result{Bootstrapped: true, HydrusRoot: "/hydrus/root"}, nil
+	}
+	defer func() {
+		ensureFreshClientBundle = originalEnsureFreshClientBundle
+	}()
+
+	originalOpenReadBundle := openReadBundle
+	openReadBundle = func(context.Context, string) (*hydrusdb.Bundle, error) {
+		return nil, errors.New("forced read open failure")
+	}
+	defer func() {
+		openReadBundle = originalOpenReadBundle
+	}()
+
+	cfg := config.Config{
+		ListenAddr:                 "127.0.0.1:0",
+		DBDir:                      dbDir,
+		EnableFreshClientBootstrap: true,
+		BootstrapPythonCommand:     "/usr/bin/python-custom",
+		BootstrapHydrusRoot:        "/hydrus/root",
+		BootstrapTimeout:           time.Minute,
+		AccessName:                 "test-client",
+		LogLevel:                   "error",
+		ShutdownTimeout:            time.Second,
+		AllowNonLocalConnections:   false,
+		EnableCORS:                 false,
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	_, err := New(context.Background(), cfg, logger)
+	if err == nil {
+		t.Fatal("New() error = nil, want error")
+	}
+
+	if !strings.Contains(err.Error(), "open hydrus DB bundle: forced read open failure") {
+		t.Fatalf("New() error = %v, want wrapped read open failure", err)
 	}
 }
 
@@ -118,7 +298,7 @@ func TestNew_AllowsReadOnlyBundleWhenWritableOpenFails(t *testing.T) {
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	application, err := New(cfg, logger)
+	application, err := New(context.Background(), cfg, logger)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
@@ -173,7 +353,7 @@ func TestApp_DBBackedImportRoundTripEndpoints(t *testing.T) {
 	}
 
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	application, err := New(cfg, logger)
+	application, err := New(context.Background(), cfg, logger)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}

@@ -2,9 +2,9 @@
 
 ## Goal
 
-Build a simple multi-platform desktop prototype that validates `hydrusd` add,
-trash, and recent-browse workflows against a real Hydrus library before PTR work
-begins.
+Build a simple multi-platform desktop prototype that validates `hydrusd`
+recent-browse, selected-file preview, add, and trash workflows against a real
+Hydrus library before PTR work begins.
 
 This is **not** a full Hydrus desktop parity effort yet.
 
@@ -30,6 +30,9 @@ The first prototype iteration is intentionally narrow:
 
 - connect to the local daemon
 - browse recent local files in a dense thumbnail grid
+- preview selected JPEG/PNG/GIF originals through the daemon's `/v1/files/content` endpoint
+  - keep preview bounded for thin-client responsiveness (currently 16 MiB payload,
+    8192px maximum dimension, 16,000,000 decoded pixels)
 - show selected-file metadata in a narrow sidebar
 - add one local file through the daemon's local-path import endpoint
 - trash one selected file through the daemon's trash endpoint
@@ -70,6 +73,12 @@ Important note:
 - the current import endpoint is **daemon-local path based**
 - the prototype therefore assumes the selected file path is meaningful from the
   `hydrusd` host's point of view
+- the prototype can now be tested against either an existing Hydrus client
+  bundle or an empty/missing `HYDRUS_GO_DB_DIR` that `hydrusd` bootstraps on
+  first start
+- fresh bootstrap runs on the daemon host, so
+  `HYDRUS_GO_BOOTSTRAP_HYDRUS_ROOT` or `--bootstrap-hydrus-root` must point at
+  an upstream Hydrus Python checkout on that host
 - immediate thumbnail availability should currently only be expected for JPEG,
   PNG, and GIF still-image imports; other media types may browse without a
   thumbnail until broader generation support lands
@@ -81,6 +90,7 @@ Minimum window structure:
 - compact top action bar: connect, refresh, add file, trash selected
 - narrow left sidebar:
   - daemon connection state
+  - selected-file preview for supported JPEG/PNG/GIF image types
   - selected-file metadata
   - last action/result text
 - dominant center thumbnail grid

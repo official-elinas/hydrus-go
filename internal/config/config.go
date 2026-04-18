@@ -7,28 +7,34 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	defaultListenAddr      = "127.0.0.1:45869"
-	defaultAccessName      = "hydrus-go"
-	defaultLogLevel        = "info"
-	defaultShutdownTimeout = 10 * time.Second
+	defaultListenAddr       = "127.0.0.1:45869"
+	defaultAccessName       = "hydrus-go"
+	defaultLogLevel         = "info"
+	defaultShutdownTimeout  = 10 * time.Second
+	defaultBootstrapTimeout = 2 * time.Minute
 )
 
 // Config holds the bootstrap hydrus-go daemon configuration.
 type Config struct {
-	ListenAddr               string
-	DBDir                    string
-	AccessKey                string
-	AccessName               string
-	LogLevel                 string
-	ShutdownTimeout          time.Duration
-	AllowNonLocalConnections bool
-	EnableCORS               bool
+	ListenAddr                 string
+	DBDir                      string
+	EnableFreshClientBootstrap bool
+	BootstrapPythonCommand     string
+	BootstrapHydrusRoot        string
+	BootstrapTimeout           time.Duration
+	AccessKey                  string
+	AccessName                 string
+	LogLevel                   string
+	ShutdownTimeout            time.Duration
+	AllowNonLocalConnections   bool
+	EnableCORS                 bool
 }
 
 // LoadFromEnv loads and validates the bootstrap daemon configuration.
@@ -50,19 +56,36 @@ func LoadFromEnv() (Config, error) {
 // applied before checks run.
 func LoadFromEnvUnvalidated() (Config, error) {
 	cfg := Config{
-		ListenAddr:               getEnv("HYDRUS_GO_LISTEN_ADDR", defaultListenAddr),
-		DBDir:                    strings.TrimSpace(os.Getenv("HYDRUS_GO_DB_DIR")),
-		AccessKey:                strings.TrimSpace(os.Getenv("HYDRUS_GO_ACCESS_KEY")),
-		AccessName:               getEnv("HYDRUS_GO_ACCESS_NAME", defaultAccessName),
-		LogLevel:                 getEnv("HYDRUS_GO_LOG_LEVEL", defaultLogLevel),
-		ShutdownTimeout:          defaultShutdownTimeout,
-		AllowNonLocalConnections: false,
-		EnableCORS:               false,
+		ListenAddr:                 getEnv("HYDRUS_GO_LISTEN_ADDR", defaultListenAddr),
+		DBDir:                      strings.TrimSpace(os.Getenv("HYDRUS_GO_DB_DIR")),
+		EnableFreshClientBootstrap: false,
+		BootstrapPythonCommand:     getEnv("HYDRUS_GO_BOOTSTRAP_PYTHON", defaultBootstrapPythonCommand()),
+		BootstrapHydrusRoot:        strings.TrimSpace(os.Getenv("HYDRUS_GO_BOOTSTRAP_HYDRUS_ROOT")),
+		BootstrapTimeout:           defaultBootstrapTimeout,
+		AccessKey:                  strings.TrimSpace(os.Getenv("HYDRUS_GO_ACCESS_KEY")),
+		AccessName:                 getEnv("HYDRUS_GO_ACCESS_NAME", defaultAccessName),
+		LogLevel:                   getEnv("HYDRUS_GO_LOG_LEVEL", defaultLogLevel),
+		ShutdownTimeout:            defaultShutdownTimeout,
+		AllowNonLocalConnections:   false,
+		EnableCORS:                 false,
 	}
 
 	if cfg.DBDir != "" {
 		cfg.DBDir = filepath.Clean(cfg.DBDir)
 	}
+
+	if cfg.BootstrapHydrusRoot != "" {
+		cfg.BootstrapHydrusRoot = filepath.Clean(cfg.BootstrapHydrusRoot)
+	}
+
+	enableFreshClientBootstrap, err := getEnvBool(
+		"HYDRUS_GO_ENABLE_PYTHON_FRESH_CLIENT_BOOTSTRAP",
+		false,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.EnableFreshClientBootstrap = enableFreshClientBootstrap
 
 	allowNonLocal, err := getEnvBool(
 		"HYDRUS_GO_ALLOW_NON_LOCAL_CONNECTIONS",
@@ -88,6 +111,15 @@ func LoadFromEnvUnvalidated() (Config, error) {
 	}
 	cfg.ShutdownTimeout = shutdownTimeout
 
+	bootstrapTimeout, err := getEnvDuration(
+		"HYDRUS_GO_BOOTSTRAP_TIMEOUT",
+		defaultBootstrapTimeout,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.BootstrapTimeout = bootstrapTimeout
+
 	normalizedAccessKey, err := normalizeOptionalAccessKey(cfg.AccessKey)
 	if err != nil {
 		return Config{}, err
@@ -111,13 +143,39 @@ func (c Config) validate() error {
 		return fmt.Errorf("shutdown timeout must be greater than zero")
 	}
 
+	if c.EnableFreshClientBootstrap {
+		if strings.TrimSpace(c.DBDir) == "" {
+			return fmt.Errorf("HYDRUS_GO_DB_DIR is required when Python fresh-client bootstrap is enabled")
+		}
+
+		if strings.TrimSpace(c.BootstrapPythonCommand) == "" {
+			return fmt.Errorf("bootstrap python command must not be empty")
+		}
+
+		if c.BootstrapTimeout <= 0 {
+			return fmt.Errorf("bootstrap timeout must be greater than zero")
+		}
+
+		if c.BootstrapHydrusRoot != "" {
+			if err := validateHydrusRootPath(c.BootstrapHydrusRoot); err != nil {
+				return fmt.Errorf("validate HYDRUS_GO_BOOTSTRAP_HYDRUS_ROOT: %w", err)
+			}
+		}
+	}
+
 	if c.DBDir != "" {
 		info, err := os.Stat(c.DBDir)
 		if err != nil {
-			return fmt.Errorf("stat HYDRUS_GO_DB_DIR: %w", err)
+			if os.IsNotExist(err) && c.EnableFreshClientBootstrap {
+				info = nil
+			} else {
+				return fmt.Errorf("stat HYDRUS_GO_DB_DIR: %w", err)
+			}
 		}
 
-		if !info.IsDir() {
+		if info == nil {
+			// fresh bootstrap is allowed to create the directory on first start
+		} else if !info.IsDir() {
 			return fmt.Errorf("HYDRUS_GO_DB_DIR must be a directory")
 		}
 	}
@@ -148,6 +206,14 @@ func getEnv(key, fallback string) string {
 	}
 
 	return value
+}
+
+func defaultBootstrapPythonCommand() string {
+	if runtime.GOOS == "windows" {
+		return "python"
+	}
+
+	return "python3"
 }
 
 func getEnvBool(key string, fallback bool) (bool, error) {
@@ -208,4 +274,39 @@ func normalizeOptionalAccessKey(accessKey string) (string, error) {
 	}
 
 	return normalized, nil
+}
+
+func validateHydrusRootPath(root string) error {
+	info, err := os.Stat(root)
+	if err != nil {
+		return err
+	}
+
+	if !info.IsDir() {
+		return fmt.Errorf("must be a directory")
+	}
+
+	for _, requiredPath := range []string{
+		filepath.Join(root, "hydrus"),
+		filepath.Join(root, "hydrus_client.py"),
+		filepath.Join(root, "hydrus", "client", "db", "ClientDB.py"),
+	} {
+		requiredInfo, statErr := os.Stat(requiredPath)
+		if statErr != nil {
+			return statErr
+		}
+
+		if strings.HasSuffix(requiredPath, ".py") {
+			if requiredInfo.IsDir() {
+				return fmt.Errorf("%q must be a file", requiredPath)
+			}
+			continue
+		}
+
+		if !requiredInfo.IsDir() {
+			return fmt.Errorf("%q must be a directory", requiredPath)
+		}
+	}
+
+	return nil
 }

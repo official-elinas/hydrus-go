@@ -1,6 +1,6 @@
 # hydrus-go status
 
-Last updated: 2026-04-17
+Last updated: 2026-04-18
 
 ## Completed
 
@@ -40,13 +40,21 @@ Last updated: 2026-04-17
 - added public local-path import and trash endpoints built on top of separate read and write bundle connections
 - added best-effort managed thumbnail generation for imported JPEG/PNG/GIF files, including stale-thumbnail repair on exact re-import
 - added a first Fyne desktop prototype scaffold for `hydrusd`
+- added focused daemonclient contract tests for the desktop client's auth, browse, mutation, thumbnail, and content-fetch HTTP paths
+- added a real `hydrusd --listen host:port` runtime override for temporary LAN testing without extra environment setup
+- added explicit Linux and Windows desktop build targets, plus a Windows GUI-subsystem build so Explorer launches do not spawn an extra terminal
+- added selected-file original preview in the Fyne client for JPEG/PNG/GIF files through `/v1/files/content`
+- bounded selected-file preview work to keep the thin client responsive (16 MiB payload, 8192px maximum dimension, 16,000,000 decoded pixels)
+- added an opt-in Python-backed fresh client bundle bootstrap for empty or missing `HYDRUS_GO_DB_DIR` targets
+- added runtime bootstrap flags and validation for Python interpreter, Hydrus root, timeout, and bundle-state safety checks
 - added DB and app-wiring tests using a copied minimal SQLite fixture bundle
 - added tests for config validation, HTTP/auth behavior, and shutdown lifecycle
 - documented the daemon-first migration direction and current bootstrap limits
 
 ## In Progress
 
-- iterating on the Fyne prototype's grid, reconnect, and metadata UX after landing the first connect/browse/import/trash loop
+- iterating on the Fyne prototype's preview, reconnect, and metadata UX after landing the first connect/browse/import/trash/original-preview loop
+- preparing real Windows-over-LAN smoke testing against a live `hydrusd` instance, now without requiring a pre-existing Hydrus bundle for first-start setup
 - preparing thin-client-driven performance validation for SQLite and managed `client_files` behavior before PTR work begins
 
 ### Active reconnaissance notes
@@ -55,6 +63,8 @@ Last updated: 2026-04-17
 - the Python client uses a dedicated DB worker model with one long-lived connection
 - transaction behavior is centered around `BEGIN IMMEDIATE` and savepoints
 - the current daemon runtime now splits reads and writes across separate bundle connections so public local-path imports do not share a connection with browse/read handlers
+- the packaged Linux Hydrus release exposes `hydrus_client -d/--db_dir`, and a headless first-start probe created the canonical client DB bundle plus `client_files` in a fresh directory
+- next exploration is expected to branch from the current thin-client state and evaluate a fully Go-native client-bundle bootstrap path
 
 ## Next
 
@@ -75,7 +85,7 @@ Last updated: 2026-04-17
 - [x] verify round-trip behavior from import to `GET /get_files/file_metadata`
 - [x] document live-DB write constraints and operational expectations
 - [x] extend the internal prepared-file checkpoint into a public hashing/sniffing import flow
-- [x] add public delete/trash behavior for imported local files
+- [x] add public trash behavior for imported local files
 - [x] add minimal browse/list APIs so clients can load local files without hash-by-hash probing
 - [x] add thumbnail and original-file serving APIs for client preview flows
 - [ ] expand the public import surface beyond single local-path imports into richer batch/upload workflows
@@ -85,13 +95,14 @@ Last updated: 2026-04-17
 ### Phase 5: Thin Desktop Client MVP
 
 - [x] connect a desktop client to the local daemon with the existing auth/bootstrap flow
-- [x] support basic import, browse, add, and delete/trash workflows against daemon APIs
+- [x] support basic import, browse, add, and trash workflows against daemon APIs
+- [x] preview selected JPEG/PNG/GIF originals through daemon APIs with bounded client-side safety limits
 - [ ] validate the daemon/client contract with a simple multi-platform desktop UI before attempting Hydrus UI parity
 - [x] keep the first client closer to `comfyui-image-browser` scope than full Hydrus parity
 
 ### Phase 6: Performance Validation
 
-- [ ] validate import/browse/delete latency against real libraries through the thin client
+- [ ] validate import/browse/trash latency against real libraries through the thin client
 - [ ] measure SQLite read/write behavior under realistic daemon workflows
 - [ ] validate managed `client_files` correctness and throughput before PTR work begins
 - [ ] address bottlenecks discovered during end-to-end client/daemon testing
@@ -222,3 +233,26 @@ Last updated: 2026-04-17
 - made exact re-import capable of repairing missing or stale managed thumbnails without overwriting unrelated placement failures
 - added import/storage/app tests covering happy-path thumbnail availability, corruption repair, and bounded downscaling
 - verified with targeted package tests, `go test ./...`, and `make check-desktop`
+
+### 2026-04-17 — Milestone 12: desktop contract and build ergonomics
+
+- added dedicated daemonclient contract tests for auth bootstrap, browse, mutation, thumbnail fetch, and original content fetch
+- added `hydrusd --listen host:port` for one-off LAN test binds without requiring separate non-local environment toggles
+- added explicit `build-desktop-linux` and `build-desktop-windows` targets alongside the existing host-platform desktop build
+- switched the Windows desktop build to the GUI subsystem so Explorer launches do not open an extra terminal window
+- verified with `go test ./...`, `make build-desktop`, `make build-desktop-windows`, and `make check-desktop`
+
+### 2026-04-17 — Milestone 13: bounded selected-file original preview
+
+- added larger selected-file preview in the Fyne client for JPEG/PNG/GIF originals using `GET /v1/files/content`
+- added request cancellation, reconnect invalidation, and stale-result suppression for preview loads
+- bounded preview payload and decoded image size to keep the thin client responsive during Windows/LAN testing
+- verified with `go test ./...`, `make build-desktop`, `make build-desktop-windows`, and `make check-desktop`
+
+### 2026-04-18 — Milestone 14: Python-backed fresh bundle bootstrap
+
+- added opt-in daemon startup bootstrap for empty or missing `HYDRUS_GO_DB_DIR` targets using the upstream Python Hydrus client bundle creation path
+- added runtime flags and env validation for bootstrap enablement, interpreter selection, Hydrus root resolution, and timeout control
+- made startup bootstrap/open work honor the daemon's signal-aware startup context instead of using an uncancelable background context
+- added fail-fast bundle-state handling for `ready`, `empty`, `partial`, and `non-empty without bundle` directory states
+- verified with targeted bootstrap/config/app/runtime tests plus `go test ./...`

@@ -216,6 +216,21 @@ func (c *Client) FetchGridImage(ctx context.Context, item RecentItem) ([]byte, e
 	return payload, nil
 }
 
+// FetchFileContent returns the bytes for one daemon-served managed original.
+// If maxBytes is greater than zero, the response body must not exceed that size.
+func (c *Client) FetchFileContent(ctx context.Context, item RecentItem, maxBytes int64) ([]byte, error) {
+	if strings.TrimSpace(item.ContentURL) == "" {
+		return nil, fmt.Errorf("no content URL is available for file_id %d", item.FileID)
+	}
+
+	payload, err := c.doBytesLimited(ctx, http.MethodGet, item.ContentURL, true, maxBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	return payload, nil
+}
+
 func (c *Client) doJSON(
 	ctx context.Context,
 	method string,
@@ -270,6 +285,16 @@ func (c *Client) doBytes(
 	path string,
 	preferSession bool,
 ) ([]byte, error) {
+	return c.doBytesLimited(ctx, method, path, preferSession, 0)
+}
+
+func (c *Client) doBytesLimited(
+	ctx context.Context,
+	method string,
+	path string,
+	preferSession bool,
+	maxBytes int64,
+) ([]byte, error) {
 	req, err := c.newRequest(ctx, method, path, nil, preferSession)
 	if err != nil {
 		return nil, err
@@ -285,9 +310,18 @@ func (c *Client) doBytes(
 		return nil, err
 	}
 
-	payload, err := io.ReadAll(resp.Body)
+	bodyReader := io.Reader(resp.Body)
+	if maxBytes > 0 {
+		bodyReader = io.LimitReader(resp.Body, maxBytes+1)
+	}
+
+	payload, err := io.ReadAll(bodyReader)
 	if err != nil {
 		return nil, fmt.Errorf("read daemon response body: %w", err)
+	}
+
+	if maxBytes > 0 && int64(len(payload)) > maxBytes {
+		return nil, fmt.Errorf("daemon response exceeded %d bytes", maxBytes)
 	}
 
 	return payload, nil

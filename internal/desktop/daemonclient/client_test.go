@@ -397,6 +397,106 @@ func TestClientFetchGridImage(t *testing.T) {
 	})
 }
 
+func TestClientFetchFileContent(t *testing.T) {
+	t.Run("rejects items without content urls", func(t *testing.T) {
+		client := New()
+		_, err := client.FetchFileContent(context.Background(), RecentItem{FileID: 61}, 1024)
+		if err == nil {
+			t.Fatal("FetchFileContent() error = nil, want error")
+		}
+
+		if !strings.Contains(err.Error(), "no content URL is available") {
+			t.Fatalf("FetchFileContent() error = %v, want missing content URL error", err)
+		}
+	})
+
+	t.Run("returns bytes for available original content", func(t *testing.T) {
+		contentBytes := []byte("managed-original-bytes")
+
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("2", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodGet, "/v1/files/content")
+				assertHeader(t, r, "Hydrus-Client-API-Access-Key", "")
+				assertHeader(t, r, "Hydrus-Client-API-Session-Key", "content-session")
+				assertQueryValue(t, r.URL, "file_id", "93")
+				return bytesResponse(r, http.StatusOK, contentBytes), nil
+			}),
+		)
+		client.sessionKey = "content-session"
+
+		payload, err := client.FetchFileContent(context.Background(), RecentItem{
+			FileID:     93,
+			ContentURL: "/v1/files/content?file_id=93",
+		}, 1024)
+		if err != nil {
+			t.Fatalf("FetchFileContent() error = %v", err)
+		}
+
+		if string(payload) != string(contentBytes) {
+			t.Fatalf("FetchFileContent() bytes = %q, want %q", payload, contentBytes)
+		}
+	})
+
+	t.Run("surfaces content endpoint errors", func(t *testing.T) {
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("3", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodGet, "/v1/files/content")
+				assertHeader(t, r, "Hydrus-Client-API-Access-Key", "")
+				assertHeader(t, r, "Hydrus-Client-API-Session-Key", "content-session")
+				assertQueryValue(t, r.URL, "file_id", "94")
+				return textResponse(r, http.StatusNotFound, "missing original"), nil
+			}),
+		)
+		client.sessionKey = "content-session"
+
+		_, err := client.FetchFileContent(context.Background(), RecentItem{
+			FileID:     94,
+			ContentURL: "/v1/files/content?file_id=94",
+		}, 1024)
+		if err == nil {
+			t.Fatal("FetchFileContent() error = nil, want error")
+		}
+
+		if !strings.Contains(err.Error(), "daemon returned HTTP 404") || !strings.Contains(err.Error(), "missing original") {
+			t.Fatalf("FetchFileContent() error = %v, want HTTP 404 body text", err)
+		}
+	})
+
+	t.Run("rejects oversized original responses", func(t *testing.T) {
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("4", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodGet, "/v1/files/content")
+				assertHeader(t, r, "Hydrus-Client-API-Access-Key", "")
+				assertHeader(t, r, "Hydrus-Client-API-Session-Key", "content-session")
+				assertQueryValue(t, r.URL, "file_id", "95")
+				return bytesResponse(r, http.StatusOK, []byte("0123456789abcdef")), nil
+			}),
+		)
+		client.sessionKey = "content-session"
+
+		_, err := client.FetchFileContent(context.Background(), RecentItem{
+			FileID:     95,
+			ContentURL: "/v1/files/content?file_id=95",
+		}, 8)
+		if err == nil {
+			t.Fatal("FetchFileContent() error = nil, want error")
+		}
+
+		if !strings.Contains(err.Error(), "exceeded 8 bytes") {
+			t.Fatalf("FetchFileContent() error = %v, want size limit error", err)
+		}
+	})
+}
+
 func TestClientErrorHandling(t *testing.T) {
 	t.Run("surfaces daemon response body on non-2xx responses", func(t *testing.T) {
 		client := newClientWithRoundTripper(

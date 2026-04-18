@@ -83,6 +83,8 @@ The project now also has a small import-composition layer:
 The DB-backed layer currently:
 
 - optionally opens a real Hydrus client DB bundle via `HYDRUS_GO_DB_DIR`
+- optionally bootstraps a fresh canonical client bundle through the upstream
+  Python Hydrus path before Go opens the bundle
 - attaches the external DBs on a single SQLite connection
 - keeps that connection read-only with `PRAGMA query_only = ON`
 - serves DB-backed service discovery
@@ -101,6 +103,28 @@ The current full/default metadata subset includes:
 - IPFS multihashes
 - transparency/EXIF/human-readable/ICC metadata flags
 - explicit rejection of `include_notes=true` and `detailed_url_information=true`
+
+The current daemon startup flow for bundle-backed mode is:
+
+1. load config and runtime overrides
+2. inspect `HYDRUS_GO_DB_DIR`
+3. if fresh bootstrap is enabled and the target directory is missing, create it
+4. classify the bundle state as one of:
+   - `ready`
+   - `empty`
+   - `partial`
+   - `non-empty without bundle`
+5. only the `empty` state is eligible for fresh bootstrap
+6. if bootstrap runs, invoke the upstream Python Hydrus client bootstrap path to
+   create the canonical bundle
+7. open the resulting bundle from Go and continue with normal read/write wiring
+
+Important boundary for this phase:
+
+- the fresh client bundle is created by upstream Python code, not by a
+  handwritten native Go schema/bootstrap path
+- `hydrus-go` currently fails fast on partial or otherwise invalid bundle
+  directories instead of trying to repair or overwrite them
 
 The first internal import checkpoint now proves that a caller-prepared local file
 can:
@@ -140,7 +164,13 @@ The planned desktop direction is now:
 - a thin Fyne prototype surfaced through `cmd/hydrus-desktop` and documented in `desktop/fyne/`
 - daemon remains the owner of SQLite, `client_files`, imports, and later PTR sync
 - the first client milestone stays closer to a simple image-browser shell than to full Hydrus workstation parity
-- the prototype is specifically meant to exercise `hydrusd` add/trash behavior, not to be a general-purpose Hydrus replacement yet
+- the prototype is specifically meant to exercise `hydrusd` browse/add/trash behavior, selected-file metadata, and original-file serving, not to be a general-purpose Hydrus replacement yet
+
+The current selected-file preview behavior is intentionally narrow:
+
+- the desktop client uses `GET /v1/files/content` for selected JPEG/PNG/GIF items only
+- preview requests are bounded to 16 MiB payloads, 8192px maximum dimension, and 16,000,000 decoded pixels
+- those limits are deliberate thin-client safety rails so manual LAN testing can validate original-file serving without turning the prototype into an unrestricted media viewer
 
 The runtime storage/DB model for this phase is:
 

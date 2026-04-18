@@ -3,8 +3,14 @@
 package fyneapp
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"image"
+	"image/color"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -12,6 +18,7 @@ import (
 
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/app"
+	"fyne.io/fyne/v2/canvas"
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/dialog"
 	"fyne.io/fyne/v2/storage"
@@ -24,8 +31,12 @@ const (
 	prefsDaemonURLKey   = "daemon_url"
 	prefsAccessKeyKey   = "access_key"
 	recentPageLimit     = 120
+	previewByteLimit    = 16 << 20
+	previewPixelLimit   = 16_000_000
+	previewMaxDimension = 8192
 	defaultDaemonURL    = "http://127.0.0.1:45869"
 	defaultMetadataText = "Select a file from the grid to inspect the daemon-backed metadata state.\n\nThis prototype is focused on validating hydrusd add/trash flows, not full Hydrus UI parity."
+	defaultPreviewText  = "Select a supported still image to preview the daemon-served original file."
 )
 
 // Run launches the Fyne thin-client prototype window.
@@ -46,6 +57,8 @@ type prototype struct {
 	trashButton   *widget.Button
 
 	connectionLabel *widget.Label
+	previewImage    *canvas.Image
+	previewLabel    *widget.Label
 	metadataLabel   *widget.Label
 	activityLabel   *widget.Label
 	statusBarLabel  *widget.Label
@@ -60,6 +73,9 @@ type prototype struct {
 	thumbnailLoads   map[int64]struct{}
 	thumbnailGen     uint64
 	thumbnailCacheM  sync.Mutex
+	previewRequestID uint64
+	previewCancel    context.CancelFunc
+	previewRequestM  sync.Mutex
 }
 
 type connectionSnapshot struct {
@@ -86,6 +102,11 @@ func newPrototype() *prototype {
 
 	p.connectionLabel = widget.NewLabel("")
 	p.connectionLabel.Wrapping = fyne.TextWrapWord
+	p.previewImage = canvas.NewImageFromImage(tilePlaceholderImage)
+	p.previewImage.FillMode = canvas.ImageFillContain
+	p.previewLabel = widget.NewLabel(defaultPreviewText)
+	p.previewLabel.Wrapping = fyne.TextWrapWord
+	p.previewLabel.Alignment = fyne.TextAlignCenter
 	p.metadataLabel = widget.NewLabel(defaultMetadataText)
 	p.metadataLabel.Wrapping = fyne.TextWrapWord
 	p.activityLabel = widget.NewLabel("No actions yet.")
@@ -172,6 +193,49 @@ func (p *prototype) clearThumbnailLoad(fileID int64, generation uint64) {
 	delete(p.thumbnailLoads, fileID)
 }
 
+func (p *prototype) beginPreviewRequest(timeout time.Duration) (context.Context, context.CancelFunc, uint64) {
+	p.previewRequestM.Lock()
+	defer p.previewRequestM.Unlock()
+
+	if p.previewCancel != nil {
+		p.previewCancel()
+	}
+
+	p.previewRequestID++
+	requestID := p.previewRequestID
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	p.previewCancel = cancel
+
+	return ctx, cancel, requestID
+}
+
+func (p *prototype) cancelPreviewRequest() {
+	p.previewRequestM.Lock()
+	defer p.previewRequestM.Unlock()
+
+	p.previewRequestID++
+	if p.previewCancel != nil {
+		p.previewCancel()
+		p.previewCancel = nil
+	}
+}
+
+func (p *prototype) finishPreviewRequest(requestID uint64) {
+	p.previewRequestM.Lock()
+	defer p.previewRequestM.Unlock()
+
+	if p.previewRequestID == requestID {
+		p.previewCancel = nil
+	}
+}
+
+func (p *prototype) isCurrentPreviewRequest(requestID uint64) bool {
+	p.previewRequestM.Lock()
+	defer p.previewRequestM.Unlock()
+
+	return p.previewRequestID == requestID
+}
+
 func (p *prototype) buildContent() fyne.CanvasObject {
 	toolbar := container.NewHBox(
 		p.connectButton,
@@ -180,12 +244,24 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		p.trashButton,
 	)
 
+	previewPanel := container.NewGridWrap(
+		fyne.NewSize(280, 220),
+		container.NewStack(
+			canvas.NewRectangle(color.NRGBA{R: 18, G: 18, B: 20, A: 255}),
+			p.previewImage,
+			container.NewPadded(container.NewCenter(p.previewLabel)),
+		),
+	)
+
 	sidebar := container.NewVScroll(container.NewPadded(container.NewVBox(
 		widget.NewLabelWithStyle("hydrusd prototype", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		widget.NewLabel("A thin Fyne shell for testing add/trash workflows against the Go daemon."),
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Connection", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		p.connectionLabel,
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Selected preview", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		previewPanel,
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Selected file", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		p.metadataLabel,
@@ -254,6 +330,7 @@ func (p *prototype) connectToDaemon(baseURL string, accessKey string) {
 		return
 	}
 
+	p.cancelPreviewRequest()
 	attemptID, wasConnected := p.beginConnectAttempt()
 	p.setStatus("Connecting to hydrusd...")
 	p.connectButton.Disable()
@@ -276,6 +353,9 @@ func (p *prototype) connectToDaemon(baseURL string, accessKey string) {
 				p.updateActionState()
 				if wasConnected {
 					p.renderGrid()
+					if p.selectedFileID > 0 {
+						p.loadSelectedPreview(p.selectedFileID)
+					}
 				}
 				p.setStatus("Connection failed.")
 				dialog.ShowError(err, p.window)
@@ -298,6 +378,9 @@ func (p *prototype) connectToDaemon(baseURL string, accessKey string) {
 				p.updateActionState()
 				if wasConnected {
 					p.renderGrid()
+					if p.selectedFileID > 0 {
+						p.loadSelectedPreview(p.selectedFileID)
+					}
 				}
 				p.setStatus("Session creation failed.")
 				dialog.ShowError(err, p.window)
@@ -320,6 +403,9 @@ func (p *prototype) connectToDaemon(baseURL string, accessKey string) {
 				p.updateActionState()
 				if wasConnected {
 					p.renderGrid()
+					if p.selectedFileID > 0 {
+						p.loadSelectedPreview(p.selectedFileID)
+					}
 				}
 				p.setStatus("Connected, but loading recent files failed.")
 				dialog.ShowError(err, p.window)
@@ -547,11 +633,14 @@ func (p *prototype) applyRecentItems(items []daemonclient.RecentItem, preferredF
 
 	if p.selectedFileID > 0 {
 		p.metadataLabel.SetText("Loading selected-file metadata from hydrusd...")
+		p.loadSelectedPreview(p.selectedFileID)
 		p.loadSelectedMetadata(p.selectedFileID)
 		return
 	}
 
 	p.metadataLabel.SetText(defaultMetadataText)
+	p.cancelPreviewRequest()
+	p.clearSelectedPreview(defaultPreviewText)
 }
 
 func (p *prototype) renderGrid() {
@@ -611,7 +700,87 @@ func (p *prototype) selectFile(fileID int64) {
 	p.renderGrid()
 	p.updateActionState()
 	p.metadataLabel.SetText("Loading selected-file metadata from hydrusd...")
+	p.loadSelectedPreview(fileID)
 	p.loadSelectedMetadata(fileID)
+}
+
+func (p *prototype) loadSelectedPreview(fileID int64) {
+	connection := p.currentConnection()
+	if !connection.connected || connection.client == nil {
+		return
+	}
+
+	item, ok := p.lookupRecentItem(fileID)
+	if !ok {
+		p.cancelPreviewRequest()
+		p.clearSelectedPreview(defaultPreviewText)
+		return
+	}
+
+	if !supportsSelectedPreviewMime(item.MIME) {
+		p.cancelPreviewRequest()
+		p.clearSelectedPreview(fmt.Sprintf("Preview not available for %s.", item.MIME))
+		return
+	}
+
+	ctx, cancel, requestID := p.beginPreviewRequest(20 * time.Second)
+	p.clearSelectedPreview("Loading selected-file preview from hydrusd...")
+
+	go func(connection connectionSnapshot, item daemonclient.RecentItem, ctx context.Context, cancel context.CancelFunc, requestID uint64) {
+		defer cancel()
+		defer p.finishPreviewRequest(requestID)
+
+		payload, err := connection.client.FetchFileContent(ctx, item, previewByteLimit)
+		if err != nil {
+			if ctx.Err() != nil || !p.isCurrentPreviewRequest(requestID) {
+				return
+			}
+
+			fyne.Do(func() {
+				if !p.isCurrentOperation(connection) || !p.isCurrentPreviewRequest(requestID) || p.selectedFileID != item.FileID {
+					return
+				}
+
+				p.clearSelectedPreview("Could not load preview from hydrusd.\n\n" + err.Error())
+			})
+			return
+		}
+
+		if len(payload) == 0 {
+			fyne.Do(func() {
+				if !p.isCurrentOperation(connection) || !p.isCurrentPreviewRequest(requestID) || p.selectedFileID != item.FileID {
+					return
+				}
+
+				p.clearSelectedPreview(fmt.Sprintf("Daemon returned an empty original for file_id %d.", item.FileID))
+			})
+			return
+		}
+
+		if err := validateSelectedPreviewPayload(payload); err != nil {
+			fyne.Do(func() {
+				if !p.isCurrentOperation(connection) || !p.isCurrentPreviewRequest(requestID) || p.selectedFileID != item.FileID {
+					return
+				}
+
+				p.clearSelectedPreview("Preview could not be prepared for display.\n\n" + err.Error())
+			})
+			return
+		}
+
+		resource := fyne.NewStaticResource(
+			fmt.Sprintf("file-%d-original", item.FileID),
+			payload,
+		)
+
+		fyne.Do(func() {
+			if !p.isCurrentOperation(connection) || !p.isCurrentPreviewRequest(requestID) || p.selectedFileID != item.FileID {
+				return
+			}
+
+			p.setSelectedPreview(resource, "")
+		})
+	}(connection, item, ctx, cancel, requestID)
 }
 
 func (p *prototype) loadSelectedMetadata(fileID int64) {
@@ -765,9 +934,76 @@ func (p *prototype) hasRecentFile(fileID int64) bool {
 	return false
 }
 
+func (p *prototype) lookupRecentItem(fileID int64) (daemonclient.RecentItem, bool) {
+	for _, item := range p.recent {
+		if item.FileID == fileID {
+			return item, true
+		}
+	}
+
+	return daemonclient.RecentItem{}, false
+}
+
+func (p *prototype) clearSelectedPreview(message string) {
+	p.setSelectedPreview(nil, message)
+}
+
+func (p *prototype) setSelectedPreview(resource fyne.Resource, message string) {
+	p.previewImage.Image = tilePlaceholderImage
+	p.previewImage.Resource = nil
+	if resource != nil {
+		p.previewImage.Image = nil
+		p.previewImage.Resource = resource
+	}
+	p.previewImage.Refresh()
+	p.previewLabel.SetText(message)
+}
+
 func (p *prototype) setStatus(text string) {
 	p.activityLabel.SetText(text)
 	p.statusBarLabel.SetText(text)
+}
+
+func supportsSelectedPreviewMime(mime string) bool {
+	switch strings.TrimSpace(strings.ToLower(mime)) {
+	case "image/gif", "image/jpeg", "image/png":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateSelectedPreviewPayload(payload []byte) error {
+	config, _, err := image.DecodeConfig(bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("decode image config: %w", err)
+	}
+
+	if config.Width <= 0 || config.Height <= 0 {
+		return fmt.Errorf("decoded image dimensions were invalid")
+	}
+
+	if config.Width > previewMaxDimension || config.Height > previewMaxDimension {
+		return fmt.Errorf(
+			"decoded image dimensions %dx%d exceed the preview limit of %dx%d",
+			config.Width,
+			config.Height,
+			previewMaxDimension,
+			previewMaxDimension,
+		)
+	}
+
+	pixels := int64(config.Width) * int64(config.Height)
+	if pixels > previewPixelLimit {
+		return fmt.Errorf(
+			"decoded image dimensions %dx%d exceed the preview limit of %d pixels",
+			config.Width,
+			config.Height,
+			previewPixelLimit,
+		)
+	}
+
+	return nil
 }
 
 func formatMetadata(metadata daemonclient.FileMetadata) string {

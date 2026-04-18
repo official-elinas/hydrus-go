@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/official-elinas/hydrus-go/internal/api/httpapi"
+	"github.com/official-elinas/hydrus-go/internal/bootstrap"
 	"github.com/official-elinas/hydrus-go/internal/buildinfo"
 	"github.com/official-elinas/hydrus-go/internal/config"
 	"github.com/official-elinas/hydrus-go/internal/core/fileassets"
@@ -23,9 +24,10 @@ import (
 )
 
 var (
-	openReadBundle     = hydrusdb.Open
-	openWriteBundle    = hydrusdb.OpenWritable
-	newDefaultImporter = importing.NewDefaultImporter
+	openReadBundle          = hydrusdb.Open
+	openWriteBundle         = hydrusdb.OpenWritable
+	newDefaultImporter      = importing.NewDefaultImporter
+	ensureFreshClientBundle = bootstrap.EnsureFreshClientBundle
 )
 
 // App holds the bootstrap daemon runtime state.
@@ -39,7 +41,11 @@ type App struct {
 }
 
 // New constructs the bootstrap daemon application.
-func New(cfg config.Config, logger *slog.Logger) (*App, error) {
+func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*App, error) {
+	if startupCtx == nil {
+		startupCtx = context.Background()
+	}
+
 	serviceProvider := services.Provider(services.DefaultProvider())
 	var metadataStore filemetadata.Store
 	var browseStore librarybrowse.Store
@@ -51,12 +57,33 @@ func New(cfg config.Config, logger *slog.Logger) (*App, error) {
 	var err error
 
 	if cfg.DBDir != "" {
-		readBundle, err = openReadBundle(context.Background(), cfg.DBDir)
+		bootstrapResult, err := ensureFreshClientBundle(startupCtx, bootstrap.Options{
+			DBDir:         cfg.DBDir,
+			Enabled:       cfg.EnableFreshClientBootstrap,
+			PythonCommand: cfg.BootstrapPythonCommand,
+			HydrusRoot:    cfg.BootstrapHydrusRoot,
+			Timeout:       cfg.BootstrapTimeout,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("prepare hydrus DB bundle: %w", err)
+		}
+
+		if bootstrapResult.Bootstrapped {
+			logger.Info(
+				"bootstrapped fresh hydrus client bundle via Python",
+				"db_dir",
+				cfg.DBDir,
+				"hydrus_root",
+				bootstrapResult.HydrusRoot,
+			)
+		}
+
+		readBundle, err = openReadBundle(startupCtx, cfg.DBDir)
 		if err != nil {
 			return nil, fmt.Errorf("open hydrus DB bundle: %w", err)
 		}
 
-		writeBundle, err = openWriteBundle(context.Background(), cfg.DBDir)
+		writeBundle, err = openWriteBundle(startupCtx, cfg.DBDir)
 		if err != nil {
 			logger.Warn(
 				"write bundle unavailable; continuing in read-only daemon mode",

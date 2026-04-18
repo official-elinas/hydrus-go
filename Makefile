@@ -26,7 +26,7 @@ build-desktop-linux:
 
 build-desktop-windows:
 	mkdir -p bin
-	CGO_ENABLED=1 CC=$(WINDOWS_CC) GOOS=windows GOARCH=$(WINDOWS_GOARCH) go build -tags fyne -o bin/hydrus-desktop.exe ./cmd/hydrus-desktop
+	CGO_ENABLED=1 CC=$(WINDOWS_CC) GOOS=windows GOARCH=$(WINDOWS_GOARCH) go build -tags fyne -ldflags="-H windowsgui" -o bin/hydrus-desktop.exe ./cmd/hydrus-desktop
 
 check-desktop:
 	mkdir -p bin

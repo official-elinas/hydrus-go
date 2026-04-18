@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,10 @@ import (
 func TestLoadFromEnv_Defaults(t *testing.T) {
 	t.Setenv("HYDRUS_GO_LISTEN_ADDR", "")
 	t.Setenv("HYDRUS_GO_DB_DIR", "")
+	t.Setenv("HYDRUS_GO_ENABLE_PYTHON_FRESH_CLIENT_BOOTSTRAP", "")
+	t.Setenv("HYDRUS_GO_BOOTSTRAP_PYTHON", "")
+	t.Setenv("HYDRUS_GO_BOOTSTRAP_HYDRUS_ROOT", "")
+	t.Setenv("HYDRUS_GO_BOOTSTRAP_TIMEOUT", "")
 	t.Setenv("HYDRUS_GO_ACCESS_KEY", "")
 	t.Setenv("HYDRUS_GO_ACCESS_NAME", "")
 	t.Setenv("HYDRUS_GO_LOG_LEVEL", "")
@@ -27,6 +32,30 @@ func TestLoadFromEnv_Defaults(t *testing.T) {
 
 	if cfg.DBDir != "" {
 		t.Fatalf("DBDir = %q, want empty", cfg.DBDir)
+	}
+
+	if cfg.EnableFreshClientBootstrap {
+		t.Fatal("EnableFreshClientBootstrap = true, want false")
+	}
+
+	if cfg.BootstrapPythonCommand != defaultBootstrapPythonCommand() {
+		t.Fatalf(
+			"BootstrapPythonCommand = %q, want %q",
+			cfg.BootstrapPythonCommand,
+			defaultBootstrapPythonCommand(),
+		)
+	}
+
+	if cfg.BootstrapHydrusRoot != "" {
+		t.Fatalf("BootstrapHydrusRoot = %q, want empty", cfg.BootstrapHydrusRoot)
+	}
+
+	if cfg.BootstrapTimeout != defaultBootstrapTimeout {
+		t.Fatalf(
+			"BootstrapTimeout = %v, want %v",
+			cfg.BootstrapTimeout,
+			defaultBootstrapTimeout,
+		)
 	}
 
 	if cfg.AccessName != defaultAccessName {
@@ -66,9 +95,14 @@ func TestLoadFromEnv_RejectsNonLocalListenAddressByDefault(t *testing.T) {
 
 func TestLoadFromEnv_AllowsConfiguredOverrides(t *testing.T) {
 	dbDir := t.TempDir()
+	bootstrapRoot := createFakeHydrusRoot(t)
 
 	t.Setenv("HYDRUS_GO_LISTEN_ADDR", "0.0.0.0:9999")
 	t.Setenv("HYDRUS_GO_DB_DIR", dbDir)
+	t.Setenv("HYDRUS_GO_ENABLE_PYTHON_FRESH_CLIENT_BOOTSTRAP", "true")
+	t.Setenv("HYDRUS_GO_BOOTSTRAP_PYTHON", "/usr/bin/python-custom")
+	t.Setenv("HYDRUS_GO_BOOTSTRAP_HYDRUS_ROOT", bootstrapRoot)
+	t.Setenv("HYDRUS_GO_BOOTSTRAP_TIMEOUT", "45s")
 	t.Setenv("HYDRUS_GO_ACCESS_KEY", strings.Repeat("c", 64))
 	t.Setenv("HYDRUS_GO_ACCESS_NAME", "integration-test")
 	t.Setenv("HYDRUS_GO_LOG_LEVEL", "debug")
@@ -87,6 +121,26 @@ func TestLoadFromEnv_AllowsConfiguredOverrides(t *testing.T) {
 
 	if cfg.DBDir != dbDir {
 		t.Fatalf("DBDir = %q, want %q", cfg.DBDir, dbDir)
+	}
+
+	if !cfg.EnableFreshClientBootstrap {
+		t.Fatal("EnableFreshClientBootstrap = false, want true")
+	}
+
+	if cfg.BootstrapPythonCommand != "/usr/bin/python-custom" {
+		t.Fatalf(
+			"BootstrapPythonCommand = %q, want %q",
+			cfg.BootstrapPythonCommand,
+			"/usr/bin/python-custom",
+		)
+	}
+
+	if cfg.BootstrapHydrusRoot != bootstrapRoot {
+		t.Fatalf("BootstrapHydrusRoot = %q, want %q", cfg.BootstrapHydrusRoot, bootstrapRoot)
+	}
+
+	if cfg.BootstrapTimeout != 45*time.Second {
+		t.Fatalf("BootstrapTimeout = %v, want %v", cfg.BootstrapTimeout, 45*time.Second)
 	}
 
 	if cfg.AccessKey != strings.Repeat("c", 64) {
@@ -137,5 +191,72 @@ func TestLoadFromEnv_RejectsMissingDBDir(t *testing.T) {
 	_, err := LoadFromEnv()
 	if err == nil {
 		t.Fatal("LoadFromEnv() error = nil, want error")
+	}
+}
+
+func TestLoadFromEnv_AllowsMissingDBDirWhenBootstrapEnabled(t *testing.T) {
+	t.Setenv("HYDRUS_GO_DB_DIR", t.TempDir()+"/missing")
+	t.Setenv("HYDRUS_GO_ENABLE_PYTHON_FRESH_CLIENT_BOOTSTRAP", "true")
+	t.Setenv("HYDRUS_GO_BOOTSTRAP_HYDRUS_ROOT", createFakeHydrusRoot(t))
+
+	cfg, err := LoadFromEnv()
+	if err != nil {
+		t.Fatalf("LoadFromEnv() error = %v", err)
+	}
+
+	if !cfg.EnableFreshClientBootstrap {
+		t.Fatal("EnableFreshClientBootstrap = false, want true")
+	}
+}
+
+func TestLoadFromEnv_RejectsMissingBootstrapRootWhenEnabled(t *testing.T) {
+	t.Setenv("HYDRUS_GO_DB_DIR", t.TempDir()+"/missing")
+	t.Setenv("HYDRUS_GO_ENABLE_PYTHON_FRESH_CLIENT_BOOTSTRAP", "true")
+	t.Setenv("HYDRUS_GO_BOOTSTRAP_HYDRUS_ROOT", t.TempDir()+"/missing")
+
+	_, err := LoadFromEnv()
+	if err == nil {
+		t.Fatal("LoadFromEnv() error = nil, want error")
+	}
+}
+
+func TestLoadFromEnv_RejectsBootstrapWithoutDBDir(t *testing.T) {
+	t.Setenv("HYDRUS_GO_ENABLE_PYTHON_FRESH_CLIENT_BOOTSTRAP", "true")
+	t.Setenv("HYDRUS_GO_BOOTSTRAP_HYDRUS_ROOT", createFakeHydrusRoot(t))
+
+	_, err := LoadFromEnv()
+	if err == nil {
+		t.Fatal("LoadFromEnv() error = nil, want error")
+	}
+
+	if !strings.Contains(err.Error(), "HYDRUS_GO_DB_DIR is required") {
+		t.Fatalf("LoadFromEnv() error = %v, want missing DB dir error", err)
+	}
+}
+
+func createFakeHydrusRoot(t *testing.T) string {
+	t.Helper()
+
+	root := t.TempDir()
+	mustMkdirAll(t, root+"/hydrus/client/db")
+	mustWriteFile(t, root+"/hydrus_client.py")
+	mustWriteFile(t, root+"/hydrus/client/db/ClientDB.py")
+
+	return root
+}
+
+func mustMkdirAll(t *testing.T, path string) {
+	t.Helper()
+
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("MkdirAll(%q) error = %v", path, err)
+	}
+}
+
+func mustWriteFile(t *testing.T, path string) {
+	t.Helper()
+
+	if err := os.WriteFile(path, nil, 0o644); err != nil {
+		t.Fatalf("WriteFile(%q) error = %v", path, err)
 	}
 }
