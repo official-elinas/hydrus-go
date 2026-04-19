@@ -1,10 +1,12 @@
 package httpapi
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -396,6 +398,18 @@ func TestProtectedEndpoints(t *testing.T) {
 		}
 	})
 
+	t.Run("upload import requires DB-backed write store", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/v1/import/upload", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", access.AccessKey())
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotImplemented)
+		}
+	})
+
 	t.Run("file trash requires DB-backed write store", func(t *testing.T) {
 		req := httptest.NewRequest(
 			http.MethodPost,
@@ -698,6 +712,167 @@ func TestThinClientEndpoints(t *testing.T) {
 
 		if rr.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("upload import returns imported file payload", func(t *testing.T) {
+		store := &fakeMetadataStore{
+			importUploadHandle: func(request fileimport.UploadRequest) (fileimport.Result, error) {
+				if request.Filename != "example.png" {
+					t.Fatalf("request.Filename = %q, want example.png", request.Filename)
+				}
+
+				if request.LocalFileServiceKey != "service-key" {
+					t.Fatalf(
+						"request.LocalFileServiceKey = %q, want service-key",
+						request.LocalFileServiceKey,
+					)
+				}
+
+				if request.FileModifiedAtMS == nil || *request.FileModifiedAtMS != 1234567890 {
+					t.Fatalf("request.FileModifiedAtMS = %v, want 1234567890", request.FileModifiedAtMS)
+				}
+
+				payload, err := os.ReadFile(request.StagedPath)
+				if err != nil {
+					t.Fatalf("ReadFile(staged upload) error = %v", err)
+				}
+
+				if !bytes.Equal(payload, []byte("png-bytes")) {
+					t.Fatalf("staged payload = %q, want png-bytes", string(payload))
+				}
+
+				return fileimport.Result{
+					FileID:                    52,
+					Hash:                      strings.Repeat("9", 64),
+					AlreadyImported:           false,
+					ManagedFileAlreadyPresent: false,
+				}, nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, provider, store, false)
+		req := newMultipartFormRequest(
+			t,
+			"/v1/import/upload",
+			map[string]string{
+				uploadFormLocalServiceKeyField:  "service-key",
+				uploadFormFileModifiedAtMSField: "1234567890",
+			},
+			uploadFormFileField,
+			"example.png",
+			[]byte("png-bytes"),
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		if int(payload["file_id"].(float64)) != 52 {
+			t.Fatalf("file_id = %v, want 52", payload["file_id"])
+		}
+
+		if payload["content_url"] != "/v1/files/content?file_id=52" {
+			t.Fatalf("content_url = %v, want /v1/files/content?file_id=52", payload["content_url"])
+		}
+	})
+
+	t.Run("upload import maps request errors", func(t *testing.T) {
+		store := &fakeMetadataStore{
+			importUploadHandle: func(fileimport.UploadRequest) (fileimport.Result, error) {
+				return fileimport.Result{}, &fileimport.RequestError{Message: "bad upload"}
+			},
+		}
+
+		handler := newHandlerWithDeps(t, provider, store, false)
+		req := newMultipartFormRequest(
+			t,
+			"/v1/import/upload",
+			nil,
+			uploadFormFileField,
+			"example.png",
+			[]byte("png-bytes"),
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("upload import rejects missing file field", func(t *testing.T) {
+		store := &fakeMetadataStore{}
+		handler := newHandlerWithDeps(t, provider, store, false)
+		req := newMultipartFormRequest(
+			t,
+			"/v1/import/upload",
+			map[string]string{uploadFormLocalServiceKeyField: "service-key"},
+			"",
+			"",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("upload import rejects malformed multipart requests", func(t *testing.T) {
+		store := &fakeMetadataStore{}
+		handler := newHandlerWithDeps(t, provider, store, false)
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/v1/import/upload",
+			strings.NewReader("not-a-multipart-request"),
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("upload import rejects oversized bodies", func(t *testing.T) {
+		originalLimit := uploadRequestBodyLimitBytes
+		uploadRequestBodyLimitBytes = 32
+		defer func() {
+			uploadRequestBodyLimitBytes = originalLimit
+		}()
+
+		store := &fakeMetadataStore{}
+		handler := newHandlerWithDeps(t, provider, store, false)
+		req := newMultipartFormRequest(
+			t,
+			"/v1/import/upload",
+			nil,
+			uploadFormFileField,
+			"example.png",
+			[]byte("png-bytes"),
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusRequestEntityTooLarge)
 		}
 	})
 
@@ -1367,6 +1542,7 @@ type fakeMetadataStore struct {
 	resolveContentHandle   func(int64) (fileassets.Descriptor, error)
 	resolveThumbnailHandle func(int64) (fileassets.Descriptor, error)
 	importLocalHandle      func(fileimport.Request) (fileimport.Result, error)
+	importUploadHandle     func(fileimport.UploadRequest) (fileimport.Result, error)
 	trashFileHandle        func(filetrash.Request) (filetrash.Result, error)
 	lastRequest            *filemetadata.Request
 }
@@ -1427,6 +1603,17 @@ func (s *fakeMetadataStore) ImportLocalPath(
 	return fileimport.Result{}, nil
 }
 
+func (s *fakeMetadataStore) ImportUpload(
+	_ context.Context,
+	request fileimport.UploadRequest,
+) (fileimport.Result, error) {
+	if s.importUploadHandle != nil {
+		return s.importUploadHandle(request)
+	}
+
+	return fileimport.Result{}, nil
+}
+
 func (s *fakeMetadataStore) TrashFile(
 	_ context.Context,
 	request filetrash.Request,
@@ -1436,6 +1623,45 @@ func (s *fakeMetadataStore) TrashFile(
 	}
 
 	return filetrash.Result{}, nil
+}
+
+func newMultipartFormRequest(
+	t *testing.T,
+	path string,
+	fields map[string]string,
+	fileFieldName string,
+	fileName string,
+	payload []byte,
+) *http.Request {
+	t.Helper()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+
+	for name, value := range fields {
+		if err := writer.WriteField(name, value); err != nil {
+			t.Fatalf("WriteField(%q) error = %v", name, err)
+		}
+	}
+
+	if fileFieldName != "" {
+		part, err := writer.CreateFormFile(fileFieldName, fileName)
+		if err != nil {
+			t.Fatalf("CreateFormFile() error = %v", err)
+		}
+
+		if _, err := part.Write(payload); err != nil {
+			t.Fatalf("multipart file write error = %v", err)
+		}
+	}
+
+	if err := writer.Close(); err != nil {
+		t.Fatalf("multipart writer Close() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body.Bytes()))
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	return req
 }
 
 func assertDefaultServiceDiscoveryPayload(t *testing.T, payload map[string]any) {

@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -287,6 +289,54 @@ func TestClientMutationRequests(t *testing.T) {
 
 		if result.FileID != 11 {
 			t.Fatalf("result.FileID = %d, want 11", result.FileID)
+		}
+	})
+
+	t.Run("uploads file through session-backed multipart request", func(t *testing.T) {
+		sourcePath := filepath.Join(t.TempDir(), "upload.png")
+		if err := os.WriteFile(sourcePath, []byte("png-bytes"), 0o644); err != nil {
+			t.Fatalf("WriteFile() error = %v", err)
+		}
+
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("f", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodPost, "/v1/import/upload")
+				assertHeader(t, r, "Hydrus-Client-API-Access-Key", "")
+				assertHeader(t, r, "Hydrus-Client-API-Session-Key", "session-upload")
+
+				contentType := r.Header.Get("Content-Type")
+				if !strings.HasPrefix(contentType, "multipart/form-data; boundary=") {
+					t.Fatalf("Content-Type = %q, want multipart/form-data boundary", contentType)
+				}
+
+				fields, filename, payload := decodeMultipartBody(t, r)
+				if filename != "upload.png" {
+					t.Fatalf("multipart filename = %q, want upload.png", filename)
+				}
+
+				if string(payload) != "png-bytes" {
+					t.Fatalf("multipart payload = %q, want png-bytes", string(payload))
+				}
+
+				if strings.TrimSpace(fields["file_modified_at_ms"]) == "" {
+					t.Fatal("file_modified_at_ms field is empty, want upload timestamp")
+				}
+
+				return jsonResponse(t, r, http.StatusOK, ImportResult{FileID: 12, Hash: strings.Repeat("e", 64)}), nil
+			}),
+		)
+		client.sessionKey = "session-upload"
+
+		result, err := client.UploadFile(context.Background(), sourcePath)
+		if err != nil {
+			t.Fatalf("UploadFile() error = %v", err)
+		}
+
+		if result.FileID != 12 {
+			t.Fatalf("result.FileID = %d, want 12", result.FileID)
 		}
 	})
 
@@ -668,4 +718,44 @@ func decodeJSONBody(t *testing.T, r *http.Request, target any) {
 	if err := json.NewDecoder(r.Body).Decode(target); err != nil {
 		t.Fatalf("json.NewDecoder().Decode() error = %v", err)
 	}
+}
+
+func decodeMultipartBody(t *testing.T, r *http.Request) (map[string]string, string, []byte) {
+	t.Helper()
+
+	reader, err := r.MultipartReader()
+	if err != nil {
+		t.Fatalf("MultipartReader() error = %v", err)
+	}
+
+	fields := map[string]string{}
+	var filename string
+	var payload []byte
+
+	for {
+		part, err := reader.NextPart()
+		if err == io.EOF {
+			break
+		}
+
+		if err != nil {
+			t.Fatalf("NextPart() error = %v", err)
+		}
+
+		body, err := io.ReadAll(part)
+		_ = part.Close()
+		if err != nil {
+			t.Fatalf("ReadAll(part) error = %v", err)
+		}
+
+		if part.FileName() != "" {
+			filename = part.FileName()
+			payload = body
+			continue
+		}
+
+		fields[part.FormName()] = string(body)
+	}
+
+	return fields, filename, payload
 }

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/official-elinas/hydrus-go/internal/buildinfo"
 	"github.com/official-elinas/hydrus-go/internal/core/librarybrowse"
@@ -51,8 +52,14 @@ func defaultCreateFreshClientBundle(ctx context.Context, dbDir string) error {
 
 	stagingPaths := bundleFilePaths(stagingDir)
 	targetPaths := bundleFilePaths(dbDir)
+	thumbnailRoot := clientfiles.DefaultThumbnailRoot(dbDir)
 
-	if err := createMainBootstrapDB(ctx, stagingPaths.main, targetPaths.files); err != nil {
+	if err := createMainBootstrapDB(
+		ctx,
+		stagingPaths.main,
+		portableStorageLocation(dbDir, targetPaths.files),
+		portableStorageLocation(dbDir, thumbnailRoot),
+	); err != nil {
 		return err
 	}
 
@@ -78,6 +85,10 @@ func defaultCreateFreshClientBundle(ctx context.Context, dbDir string) error {
 
 	if err := moveBootstrappedPathsIntoPlace(stagingPaths, targetPaths); err != nil {
 		return err
+	}
+
+	if err := os.MkdirAll(thumbnailRoot, 0o755); err != nil {
+		return fmt.Errorf("create managed thumbnails root: %w", err)
 	}
 
 	return nil
@@ -197,7 +208,12 @@ func cleanupMovedTargets(paths []string) {
 	}
 }
 
-func createMainBootstrapDB(ctx context.Context, path string, clientFilesRoot string) error {
+func createMainBootstrapDB(
+	ctx context.Context,
+	path string,
+	clientFilesRoot string,
+	thumbnailRoot string,
+) error {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return fmt.Errorf("open main bootstrap DB %q: %w", path, err)
@@ -340,7 +356,7 @@ func createMainBootstrapDB(ctx context.Context, path string, clientFilesRoot str
 		}
 	}
 
-	if err := seedBootstrapStorage(ctx, tx, clientFilesRoot); err != nil {
+	if err := seedBootstrapStorage(ctx, tx, clientFilesRoot, thumbnailRoot); err != nil {
 		return err
 	}
 
@@ -436,7 +452,12 @@ func seedBootstrapServices(ctx context.Context, tx *sql.Tx) ([]seededService, er
 	return seeded, nil
 }
 
-func seedBootstrapStorage(ctx context.Context, tx *sql.Tx, clientFilesRoot string) error {
+func seedBootstrapStorage(
+	ctx context.Context,
+	tx *sql.Tx,
+	clientFilesRoot string,
+	thumbnailRoot string,
+) error {
 	if _, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO current_storage_granularity (granularity) VALUES (?)`,
@@ -445,43 +466,103 @@ func seedBootstrapStorage(ctx context.Context, tx *sql.Tx, clientFilesRoot strin
 		return fmt.Errorf("seed client-files storage granularity: %w", err)
 	}
 
-	result, err := tx.ExecContext(
-		ctx,
-		`INSERT INTO current_client_files_locations (location) VALUES (?)`,
-		clientFilesRoot,
-	)
+	fileLocationID, err := seedStorageLocation(ctx, tx, clientFilesRoot)
 	if err != nil {
 		return fmt.Errorf("seed client-files location: %w", err)
 	}
 
-	locationID, err := result.LastInsertId()
+	thumbnailLocationID, err := seedStorageLocation(ctx, tx, thumbnailRoot)
 	if err != nil {
-		return fmt.Errorf("read seeded client-files location id: %w", err)
+		return fmt.Errorf("seed thumbnail location: %w", err)
 	}
 
-	for _, kind := range []clientfiles.Kind{clientfiles.KindFile, clientfiles.KindThumbnail} {
-		for _, prefix := range storagePrefixes(kind, clientfiles.DefaultPrefixLength) {
-			if _, err := tx.ExecContext(
-				ctx,
-				`INSERT INTO client_files_subfolders (prefix, location_id) VALUES (?, ?)`,
-				prefix,
-				locationID,
-			); err != nil {
-				return fmt.Errorf("seed client-files subfolder %q: %w", prefix, err)
-			}
+	for _, prefix := range storagePrefixes(clientfiles.KindFile, clientfiles.DefaultPrefixLength) {
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO client_files_subfolders (prefix, location_id) VALUES (?, ?)`,
+			prefix,
+			fileLocationID,
+		); err != nil {
+			return fmt.Errorf("seed client-files subfolder %q: %w", prefix, err)
+		}
+	}
+
+	for _, prefix := range storagePrefixes(clientfiles.KindThumbnail, clientfiles.DefaultPrefixLength) {
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO client_files_subfolders (prefix, location_id) VALUES (?, ?)`,
+			prefix,
+			thumbnailLocationID,
+		); err != nil {
+			return fmt.Errorf("seed client-files subfolder %q: %w", prefix, err)
 		}
 	}
 
 	if _, err := tx.ExecContext(
 		ctx,
 		`INSERT INTO ideal_client_files_locations (location_id, weight, max_num_bytes) VALUES (?, ?, NULL)`,
-		locationID,
+		fileLocationID,
 		1,
 	); err != nil {
 		return fmt.Errorf("seed ideal client-files location: %w", err)
 	}
 
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO ideal_thumbnail_override_location (location_id) VALUES (?)`,
+		thumbnailLocationID,
+	); err != nil {
+		return fmt.Errorf("seed ideal thumbnail override location: %w", err)
+	}
+
 	return nil
+}
+
+func seedStorageLocation(ctx context.Context, tx *sql.Tx, location string) (int64, error) {
+	result, err := tx.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO current_client_files_locations (location) VALUES (?)`,
+		location,
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	if locationID, err := result.LastInsertId(); err != nil {
+		return 0, fmt.Errorf("read seeded location id: %w", err)
+	} else if locationID > 0 {
+		return locationID, nil
+	}
+
+	row := tx.QueryRowContext(
+		ctx,
+		`SELECT location_id FROM current_client_files_locations WHERE location = ? LIMIT 1`,
+		location,
+	)
+
+	var locationID int64
+	if err := row.Scan(&locationID); err != nil {
+		return 0, fmt.Errorf("look up seeded location id: %w", err)
+	}
+
+	return locationID, nil
+}
+
+func portableStorageLocation(dbDir string, absolutePath string) string {
+	relativePath, err := filepath.Rel(dbDir, absolutePath)
+	if err == nil && relativePath != "." && !strings.HasPrefix(relativePath, "..") {
+		if os.PathSeparator == '\\' {
+			return strings.ReplaceAll(relativePath, `\`, `/`)
+		}
+
+		return relativePath
+	}
+
+	if os.PathSeparator == '\\' {
+		return strings.ReplaceAll(absolutePath, `\`, `/`)
+	}
+
+	return absolutePath
 }
 
 func bootstrapServiceDictionaryString(service services.Service) string {
@@ -752,7 +833,11 @@ func verifySeededBootstrapTables(mainTableNames map[string]struct{}) error {
 }
 
 func verifySeededBootstrapStorage(ctx context.Context, dbDir string, mainPath string) error {
-	clientFilesRoot := clientfiles.DefaultRoot(dbDir)
+	clientFilesRoot := clientfiles.DefaultFileRoot(dbDir)
+	thumbnailRoot := clientfiles.DefaultThumbnailRoot(dbDir)
+	storedClientFilesRoot := portableStorageLocation(dbDir, clientFilesRoot)
+	storedThumbnailRoot := portableStorageLocation(dbDir, thumbnailRoot)
+
 	info, err := os.Stat(clientFilesRoot)
 	if err != nil {
 		return fmt.Errorf("stat seeded client_files root: %w", err)
@@ -760,6 +845,15 @@ func verifySeededBootstrapStorage(ctx context.Context, dbDir string, mainPath st
 
 	if !info.IsDir() {
 		return fmt.Errorf("seeded client_files root %q must be a directory", clientFilesRoot)
+	}
+
+	thumbnailInfo, err := os.Stat(thumbnailRoot)
+	if err != nil {
+		return fmt.Errorf("stat seeded thumbnails root: %w", err)
+	}
+
+	if !thumbnailInfo.IsDir() {
+		return fmt.Errorf("seeded thumbnails root %q must be a directory", thumbnailRoot)
 	}
 
 	if tempInfo, err := os.Stat(filepath.Join(dbDir, "client.temp.db")); err != nil {
@@ -800,21 +894,44 @@ func verifySeededBootstrapStorage(ctx context.Context, dbDir string, mainPath st
 		return fmt.Errorf("count seeded client-files locations: %w", err)
 	}
 
-	if locationCount != 1 {
-		return fmt.Errorf("expected exactly one seeded client-files location, found %d", locationCount)
+	if locationCount != 2 {
+		return fmt.Errorf("expected exactly two seeded client-files locations, found %d", locationCount)
 	}
 
-	location, err := querySingleString(
+	fileLocation, err := querySingleString(
 		ctx,
 		db,
-		`SELECT location FROM current_client_files_locations ORDER BY location_id ASC LIMIT 1`,
+		`SELECT cfl.location
+		FROM current_client_files_locations cfl
+		JOIN client_files_subfolders cfs USING (location_id)
+		WHERE cfs.prefix LIKE 'f%'
+		ORDER BY cfs.rowid ASC
+		LIMIT 1`,
 	)
 	if err != nil {
-		return fmt.Errorf("read seeded client-files location: %w", err)
+		return fmt.Errorf("read seeded file location: %w", err)
 	}
 
-	if location != clientFilesRoot {
-		return fmt.Errorf("seeded client-files location = %q, want %q", location, clientFilesRoot)
+	if fileLocation != storedClientFilesRoot {
+		return fmt.Errorf("seeded file location = %q, want %q", fileLocation, storedClientFilesRoot)
+	}
+
+	thumbnailLocation, err := querySingleString(
+		ctx,
+		db,
+		`SELECT cfl.location
+		FROM current_client_files_locations cfl
+		JOIN client_files_subfolders cfs USING (location_id)
+		WHERE cfs.prefix LIKE 't%'
+		ORDER BY cfs.rowid ASC
+		LIMIT 1`,
+	)
+	if err != nil {
+		return fmt.Errorf("read seeded thumbnail location: %w", err)
+	}
+
+	if thumbnailLocation != storedThumbnailRoot {
+		return fmt.Errorf("seeded thumbnail location = %q, want %q", thumbnailLocation, storedThumbnailRoot)
 	}
 
 	idealLocationCount, err := querySingleInt(
@@ -839,10 +956,30 @@ func verifySeededBootstrapStorage(ctx context.Context, dbDir string, mainPath st
 		return fmt.Errorf("count ideal thumbnail override locations: %w", err)
 	}
 
-	if thumbnailOverrideCount != 0 {
+	if thumbnailOverrideCount != 1 {
 		return fmt.Errorf(
-			"expected zero ideal thumbnail override locations, found %d",
+			"expected one ideal thumbnail override location, found %d",
 			thumbnailOverrideCount,
+		)
+	}
+
+	idealThumbnailLocation, err := querySingleString(
+		ctx,
+		db,
+		`SELECT cfl.location
+		FROM ideal_thumbnail_override_location itol
+		JOIN current_client_files_locations cfl USING (location_id)
+		LIMIT 1`,
+	)
+	if err != nil {
+		return fmt.Errorf("read ideal thumbnail override location: %w", err)
+	}
+
+	if idealThumbnailLocation != storedThumbnailRoot {
+		return fmt.Errorf(
+			"ideal thumbnail override location = %q, want %q",
+			idealThumbnailLocation,
+			storedThumbnailRoot,
 		)
 	}
 
@@ -880,6 +1017,39 @@ func verifySeededBootstrapStorage(ctx context.Context, dbDir string, mainPath st
 				"expected %d seeded %s client-files prefixes, found %d",
 				expectedPrefixes,
 				kind,
+				count,
+			)
+		}
+	}
+
+	for _, check := range []struct {
+		kind string
+		want string
+	}{
+		{kind: "f", want: clientFilesRoot},
+		{kind: "t", want: thumbnailRoot},
+	} {
+		storedWant := portableStorageLocation(dbDir, check.want)
+		count, err := querySingleInt(
+			ctx,
+			db,
+			`SELECT COUNT(*)
+			FROM client_files_subfolders cfs
+			JOIN current_client_files_locations cfl USING (location_id)
+			WHERE cfs.prefix LIKE ? AND cfl.location = ?`,
+			check.kind+"%",
+			storedWant,
+		)
+		if err != nil {
+			return fmt.Errorf("count seeded %s-prefix locations: %w", check.kind, err)
+		}
+
+		if count != expectedPrefixes {
+			return fmt.Errorf(
+				"expected %d seeded %s-prefix rows at %q, found %d",
+				expectedPrefixes,
+				check.kind,
+				storedWant,
 				count,
 			)
 		}

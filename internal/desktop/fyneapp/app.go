@@ -462,7 +462,7 @@ func (p *prototype) showImportDialog() {
 		}
 
 		if uri.Scheme() != "file" {
-			dialog.ShowError(fmt.Errorf("only local file paths are supported by the current hydrusd import prototype"), p.window)
+			dialog.ShowError(fmt.Errorf("only local file selections are supported by the desktop prototype"), p.window)
 			return
 		}
 
@@ -482,26 +482,26 @@ func (p *prototype) importFile(path string) {
 		return
 	}
 
-	p.setStatus(fmt.Sprintf("Adding %s through hydrusd...", filepath.Base(path)))
+	p.setStatus(fmt.Sprintf("Uploading %s through hydrusd...", filepath.Base(path)))
 
 	go func(connection connectionSnapshot) {
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 
-		result, err := connection.client.ImportLocalFile(ctx, path)
+		result, err := connection.client.UploadFile(ctx, path)
 		if err != nil {
 			fyne.Do(func() {
 				if !p.isCurrentOperation(connection) {
 					return
 				}
 
-				p.setStatus("Add file failed.")
+				p.setStatus("Upload failed.")
 				dialog.ShowError(err, p.window)
 			})
 			return
 		}
 
-		status := fmt.Sprintf("Added file_id %d through hydrusd.", result.FileID)
+		status := fmt.Sprintf("Uploaded file_id %d through hydrusd.", result.FileID)
 		if result.AlreadyImported {
 			status = fmt.Sprintf("File already existed as file_id %d; hydrusd confirmed it.", result.FileID)
 		}

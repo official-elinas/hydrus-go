@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/official-elinas/hydrus-go/internal/core/librarybrowse"
 	"github.com/official-elinas/hydrus-go/internal/core/mimes"
@@ -32,7 +31,7 @@ func (b *Bundle) ListRecent(
 		return librarybrowse.Page{}, err
 	}
 
-	layout, err := b.defaultManagedLayout()
+	layout, err := b.ManagedLayout(ctx)
 	if err != nil {
 		return librarybrowse.Page{}, err
 	}
@@ -161,13 +160,6 @@ func (b *Bundle) resolveRecentBrowseTable(ctx context.Context) (string, error) {
 	return "", &librarybrowse.UnsupportedError{
 		Message: "recent local browse is unavailable for this Hydrus bundle",
 	}
-}
-
-func (b *Bundle) defaultManagedLayout() (clientfiles.Layout, error) {
-	return clientfiles.NewLayout(
-		clientfiles.DefaultRoot(filepath.Dir(b.paths.main)),
-		clientfiles.DefaultPrefixLength,
-	)
 }
 
 func managedThumbnailExists(layout clientfiles.Layout, hash string) (bool, error) {

@@ -10,6 +10,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
@@ -173,6 +174,103 @@ func TestImporterImportLocalPath(t *testing.T) {
 					t.Fatalf("row[mime] = %v, want %s", row["mime"], caseData.wantMIME)
 				}
 			})
+		}
+	})
+
+	t.Run("uses DB-configured split storage roots", func(t *testing.T) {
+		dir, _ := createImportTestBundle(t)
+
+		mainDB := openSQLiteForTest(t, filepath.Join(dir, "client.db"))
+		defer mainDB.Close()
+
+		portableFileRoot := "custom_files"
+		thumbnailRoot := filepath.Join(filepath.Dir(dir), "custom-thumbnails")
+		if err := os.MkdirAll(filepath.Join(dir, portableFileRoot), 0o755); err != nil {
+			t.Fatalf("MkdirAll(portableFileRoot) error = %v", err)
+		}
+		if err := os.MkdirAll(thumbnailRoot, 0o755); err != nil {
+			t.Fatalf("MkdirAll(thumbnailRoot) error = %v", err)
+		}
+
+		mustExec(
+			t,
+			mainDB,
+			`UPDATE current_client_files_locations SET location = CASE location_id WHEN 1 THEN ? WHEN 2 THEN ? ELSE location END`,
+			portableFileRoot,
+			thumbnailRoot,
+		)
+
+		bundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		importer, err := NewDefaultImporter(bundle, dir)
+		if err != nil {
+			t.Fatalf("NewDefaultImporter() error = %v", err)
+		}
+
+		sourcePath := writePNGSourceFile(t, t.TempDir(), "custom-roots.png", 20, 10)
+		result, err := importer.ImportLocalPath(context.Background(), fileimport.Request{Path: sourcePath})
+		if err != nil {
+			t.Fatalf("ImportLocalPath() error = %v", err)
+		}
+
+		readBundle, err := hydrusdb.Open(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("Open() error = %v", err)
+		}
+		defer func() {
+			if err := readBundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		layout, err := readBundle.ManagedLayout(context.Background())
+		if err != nil {
+			t.Fatalf("ManagedLayout() error = %v", err)
+		}
+
+		managedFilePath, err := layout.ResolveFilePath(result.Hash, ".png")
+		if err != nil {
+			t.Fatalf("ResolveFilePath() error = %v", err)
+		}
+
+		wantFilePrefix := filepath.Join(dir, portableFileRoot, "f")
+		if !strings.HasPrefix(managedFilePath, wantFilePrefix) {
+			t.Fatalf("managedFilePath = %q, want prefix %q", managedFilePath, wantFilePrefix)
+		}
+
+		if _, err := os.Stat(managedFilePath); err != nil {
+			t.Fatalf("Stat(managedFilePath) error = %v", err)
+		}
+
+		thumbnailPath, err := layout.ResolveThumbnailPath(result.Hash)
+		if err != nil {
+			t.Fatalf("ResolveThumbnailPath() error = %v", err)
+		}
+
+		wantThumbnailPrefix := filepath.Join(thumbnailRoot, "t")
+		if !strings.HasPrefix(thumbnailPath, wantThumbnailPrefix) {
+			t.Fatalf("thumbnailPath = %q, want prefix %q", thumbnailPath, wantThumbnailPrefix)
+		}
+
+		assertManagedThumbnailImage(t, thumbnailPath, 20, 10)
+
+		defaultThumbnailPath := filepath.Join(
+			clientfiles.DefaultThumbnailRoot(dir),
+			"t"+result.Hash[:2],
+			result.Hash+".thumbnail",
+		)
+		if defaultThumbnailPath != thumbnailPath {
+			if _, err := os.Stat(defaultThumbnailPath); !os.IsNotExist(err) {
+				t.Fatalf("default thumbnail path stat err = %v, want not exists", err)
+			}
 		}
 	})
 
@@ -494,12 +592,13 @@ func writeSolidImage(width int, height int) *image.RGBA {
 func mustImportTestLayout(t *testing.T, dir string) clientfiles.Layout {
 	t.Helper()
 
-	layout, err := clientfiles.NewLayout(
-		clientfiles.DefaultRoot(dir),
+	layout, err := clientfiles.NewSplitLayout(
+		clientfiles.DefaultFileRoot(dir),
+		clientfiles.DefaultThumbnailRoot(dir),
 		clientfiles.DefaultPrefixLength,
 	)
 	if err != nil {
-		t.Fatalf("NewLayout() error = %v", err)
+		t.Fatalf("NewSplitLayout() error = %v", err)
 	}
 
 	return layout

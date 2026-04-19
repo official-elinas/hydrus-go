@@ -172,6 +172,100 @@ func TestBundleResolveThumbnail(t *testing.T) {
 	}
 }
 
+func TestBundleManagedLayout_UsesConfiguredSplitRootsAndPortablePaths(t *testing.T) {
+	dir, fixture := createTestBundle(t)
+	mainDB := openSQLiteForTest(t, filepath.Join(dir, "client.db"))
+	defer mainDB.Close()
+
+	portableFileRoot := "custom_files"
+	thumbnailRoot := filepath.Join(filepath.Dir(dir), "custom-thumbnails")
+	if err := os.MkdirAll(filepath.Join(dir, portableFileRoot), 0o755); err != nil {
+		t.Fatalf("MkdirAll(portableFileRoot) error = %v", err)
+	}
+	if err := os.MkdirAll(thumbnailRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(thumbnailRoot) error = %v", err)
+	}
+
+	mustExec(
+		t,
+		mainDB,
+		`UPDATE current_client_files_locations SET location = CASE location_id WHEN 1 THEN ? WHEN 2 THEN ? ELSE location END`,
+		portableFileRoot,
+		thumbnailRoot,
+	)
+
+	bundle, err := Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer func() {
+		if err := bundle.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	layout, err := bundle.ManagedLayout(context.Background())
+	if err != nil {
+		t.Fatalf("ManagedLayout() error = %v", err)
+	}
+
+	filePath, err := layout.ResolveFilePath(fixture.hash1Hex, ".jpg")
+	if err != nil {
+		t.Fatalf("ResolveFilePath() error = %v", err)
+	}
+
+	wantFilePath := filepath.Join(dir, portableFileRoot, "f01", fixture.hash1Hex+".jpg")
+	if filePath != wantFilePath {
+		t.Fatalf("filePath = %q, want %q", filePath, wantFilePath)
+	}
+
+	thumbnailPath, err := layout.ResolveThumbnailPath(fixture.hash1Hex)
+	if err != nil {
+		t.Fatalf("ResolveThumbnailPath() error = %v", err)
+	}
+
+	wantThumbnailPath := filepath.Join(thumbnailRoot, "t01", fixture.hash1Hex+".thumbnail")
+	if thumbnailPath != wantThumbnailPath {
+		t.Fatalf("thumbnailPath = %q, want %q", thumbnailPath, wantThumbnailPath)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(filePath dir) error = %v", err)
+	}
+	if err := os.WriteFile(filePath, []byte("jpeg bytes"), 0o644); err != nil {
+		t.Fatalf("WriteFile(filePath) error = %v", err)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(thumbnailPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(thumbnailPath dir) error = %v", err)
+	}
+	if err := os.WriteFile(thumbnailPath, []byte("thumb bytes"), 0o644); err != nil {
+		t.Fatalf("WriteFile(thumbnailPath) error = %v", err)
+	}
+
+	fileDescriptor, err := bundle.ResolveFileContent(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("ResolveFileContent() error = %v", err)
+	}
+
+	if fileDescriptor.Path != wantFilePath {
+		t.Fatalf("fileDescriptor.Path = %q, want %q", fileDescriptor.Path, wantFilePath)
+	}
+
+	thumbnailDescriptor, err := bundle.ResolveThumbnail(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("ResolveThumbnail() error = %v", err)
+	}
+
+	if thumbnailDescriptor.Path != wantThumbnailPath {
+		t.Fatalf(
+			"thumbnailDescriptor.Path = %q, want %q",
+			thumbnailDescriptor.Path,
+			wantThumbnailPath,
+		)
+	}
+}
+
 func TestSeparateReadAndWriteBundles_IsolateUncommittedImports(t *testing.T) {
 	dir, _ := createTestBundle(t)
 
@@ -348,7 +442,7 @@ func writeManagedFileForTest(
 	t.Helper()
 
 	layout, err := clientfiles.NewLayout(
-		clientfiles.DefaultRoot(dbDir),
+		clientfiles.DefaultFileRoot(dbDir),
 		clientfiles.DefaultPrefixLength,
 	)
 	if err != nil {
@@ -377,8 +471,9 @@ func writeManagedThumbnailForTest(
 ) {
 	t.Helper()
 
-	layout, err := clientfiles.NewLayout(
-		clientfiles.DefaultRoot(dbDir),
+	layout, err := clientfiles.NewSplitLayout(
+		clientfiles.DefaultFileRoot(dbDir),
+		clientfiles.DefaultThumbnailRoot(dbDir),
 		clientfiles.DefaultPrefixLength,
 	)
 	if err != nil {

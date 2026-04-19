@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/official-elinas/hydrus-go/internal/core/fileassets"
 	"github.com/official-elinas/hydrus-go/internal/core/mimes"
@@ -23,7 +22,7 @@ func (b *Bundle) ResolveFileContent(
 		return fileassets.Descriptor{}, err
 	}
 
-	layout, err := b.defaultManagedLayout()
+	layout, err := b.ManagedLayout(ctx)
 	if err != nil {
 		return fileassets.Descriptor{}, err
 	}
@@ -77,7 +76,7 @@ func (b *Bundle) ResolveThumbnail(
 		return fileassets.Descriptor{}, err
 	}
 
-	layout, err := b.defaultManagedLayout()
+	layout, err := b.ManagedLayout(ctx)
 	if err != nil {
 		return fileassets.Descriptor{}, err
 	}
@@ -136,8 +135,4 @@ func (b *Bundle) lookupManagedFileDescriptor(
 	}
 
 	return hash, mime, forcedMime, nil
-}
-
-func managedRootFromBundle(b *Bundle) string {
-	return filepath.Dir(b.paths.main)
 }

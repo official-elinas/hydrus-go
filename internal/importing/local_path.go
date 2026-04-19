@@ -64,7 +64,7 @@ func (i *Importer) ImportLocalPath(
 		return fileimport.Result{}, err
 	}
 
-	width, height := detectLocalImageDimensions(sourcePath, mimeEnum)
+	width, height := detectImageDimensions(sourcePath, mimeEnum)
 
 	importedAtMS := time.Now().UTC().UnixMilli()
 	var fileModifiedAtMS *int64
@@ -84,28 +84,10 @@ func (i *Importer) ImportLocalPath(
 		LocalFileServiceKey: strings.TrimSpace(request.LocalFileServiceKey),
 	})
 	if err != nil {
-		return fileimport.Result{}, classifyLocalImportError(err)
+		return fileimport.Result{}, classifyImportError(err)
 	}
 
-	thumbnailCtx, cancelThumbnail := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
-	defer cancelThumbnail()
-	if err := i.ensureManagedThumbnail(
-		thumbnailCtx,
-		result.ManagedPath,
-		hashHex,
-		mimeEnum,
-	); err != nil {
-		// Best-effort for the thin-client prototype: the import is already durable,
-		// and a missing thumbnail should not turn a successful import into a
-		// failed one.
-	}
-
-	return fileimport.Result{
-		FileID:                    result.FileID,
-		Hash:                      hashHex,
-		AlreadyImported:           result.AlreadyImported,
-		ManagedFileAlreadyPresent: result.ManagedFileAlreadyPresent,
-	}, nil
+	return i.finalizeImportedFile(ctx, result, hashHex, mimeEnum), nil
 }
 
 func normalizeLocalImportPath(path string) (string, error) {
@@ -184,7 +166,7 @@ func detectLocalImportMIME(path string) (int, error) {
 	}
 }
 
-func detectLocalImageDimensions(path string, mimeEnum int) (*int64, *int64) {
+func detectImageDimensions(path string, mimeEnum int) (*int64, *int64) {
 	if !supportsDecodeConfigDimensions(mimeEnum) {
 		return nil, nil
 	}
@@ -214,7 +196,7 @@ func supportsDecodeConfigDimensions(mimeEnum int) bool {
 	}
 }
 
-func classifyLocalImportError(err error) error {
+func classifyImportError(err error) error {
 	message := err.Error()
 	switch {
 	case strings.Contains(message, "local file service key"):

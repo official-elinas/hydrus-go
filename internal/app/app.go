@@ -152,8 +152,8 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 		Addr:              cfg.ListenAddr,
 		Handler:           handler,
 		ReadHeaderTimeout: 5 * time.Second,
-		ReadTimeout:       15 * time.Second,
-		WriteTimeout:      30 * time.Second,
+		ReadTimeout:       5 * time.Minute,
+		WriteTimeout:      5 * time.Minute,
 		IdleTimeout:       time.Minute,
 	}
 

@@ -9,3 +9,4 @@
 *.pprof
 *.prof
 .DS_Store
+image-tests/

@@ -7,8 +7,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -16,7 +19,7 @@ import (
 
 const userAgent = "hydrus-desktop-prototype/0.1"
 
-// Client talks to hydrusd over HTTP/JSON.
+// Client talks to hydrusd over HTTP.
 type Client struct {
 	httpClient *http.Client
 	baseURL    string
@@ -66,7 +69,7 @@ type FileMetadata struct {
 	IsDeleted bool   `json:"is_deleted"`
 }
 
-// ImportResult is the public local-path import response payload.
+// ImportResult is the public file import response payload.
 type ImportResult struct {
 	FileID                    int64  `json:"file_id"`
 	Hash                      string `json:"hash"`
@@ -90,10 +93,10 @@ type sessionResponse struct {
 	SessionKey string `json:"session_key"`
 }
 
-// New constructs a daemon client with a modest request timeout.
+// New constructs a daemon client with an upload-safe request timeout.
 func New() *Client {
 	return &Client{
-		httpClient: &http.Client{Timeout: 20 * time.Second},
+		httpClient: &http.Client{Timeout: 5 * time.Minute},
 	}
 }
 
@@ -182,6 +185,79 @@ func (c *Client) ImportLocalFile(ctx context.Context, path string) (ImportResult
 	body := map[string]string{"path": strings.TrimSpace(path)}
 	if err := c.doJSON(ctx, http.MethodPost, "/v1/import/local_file", body, true, &response); err != nil {
 		return ImportResult{}, err
+	}
+
+	return response, nil
+}
+
+// UploadFile streams one local file to hydrusd for import.
+func (c *Client) UploadFile(ctx context.Context, path string) (ImportResult, error) {
+	normalizedPath := filepath.Clean(strings.TrimSpace(path))
+	if normalizedPath == "." || normalizedPath == "" {
+		return ImportResult{}, fmt.Errorf("file path is required")
+	}
+
+	file, err := os.Open(normalizedPath)
+	if err != nil {
+		return ImportResult{}, fmt.Errorf("open file for upload: %w", err)
+	}
+
+	info, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return ImportResult{}, fmt.Errorf("stat file for upload: %w", err)
+	}
+
+	if !info.Mode().IsRegular() {
+		_ = file.Close()
+		return ImportResult{}, fmt.Errorf("file path must point to a regular file")
+	}
+
+	pipeReader, pipeWriter := io.Pipe()
+	writer := multipart.NewWriter(pipeWriter)
+
+	req, err := c.newRequest(ctx, http.MethodPost, "/v1/import/upload", pipeReader, true)
+	if err != nil {
+		_ = file.Close()
+		_ = pipeReader.Close()
+		_ = pipeWriter.Close()
+		return ImportResult{}, err
+	}
+
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	writeErrCh := make(chan error, 1)
+	go func() {
+		writeErrCh <- writeUploadRequestBody(
+			writer,
+			pipeWriter,
+			file,
+			filepath.Base(normalizedPath),
+			info.ModTime(),
+		)
+	}()
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		if writeErr := <-writeErrCh; writeErr != nil {
+			return ImportResult{}, fmt.Errorf("stream upload request: %w", writeErr)
+		}
+
+		return ImportResult{}, fmt.Errorf("perform daemon request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if writeErr := <-writeErrCh; writeErr != nil {
+		return ImportResult{}, fmt.Errorf("stream upload request: %w", writeErr)
+	}
+
+	if err := checkAPIResponse(resp); err != nil {
+		return ImportResult{}, err
+	}
+
+	var response ImportResult
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return ImportResult{}, fmt.Errorf("decode daemon response: %w", err)
 	}
 
 	return response, nil
@@ -420,4 +496,40 @@ func checkAPIResponse(resp *http.Response) error {
 	}
 
 	return fmt.Errorf("daemon returned HTTP %d: %s", resp.StatusCode, message)
+}
+
+func writeUploadRequestBody(
+	writer *multipart.Writer,
+	pipeWriter *io.PipeWriter,
+	file *os.File,
+	filename string,
+	modifiedAt time.Time,
+) error {
+	defer file.Close()
+
+	closeWithError := func(err error) error {
+		_ = pipeWriter.CloseWithError(err)
+		return err
+	}
+
+	if modifiedAtMS := modifiedAt.UTC().UnixMilli(); modifiedAtMS > 0 {
+		if err := writer.WriteField("file_modified_at_ms", strconv.FormatInt(modifiedAtMS, 10)); err != nil {
+			return closeWithError(err)
+		}
+	}
+
+	part, err := writer.CreateFormFile("file", filename)
+	if err != nil {
+		return closeWithError(err)
+	}
+
+	if _, err := io.Copy(part, file); err != nil {
+		return closeWithError(err)
+	}
+
+	if err := writer.Close(); err != nil {
+		return closeWithError(err)
+	}
+
+	return pipeWriter.Close()
 }

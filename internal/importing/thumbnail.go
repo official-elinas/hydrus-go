@@ -35,22 +35,31 @@ func (i *Importer) ensureManagedThumbnail(
 	}
 	defer cleanup()
 
-	if err := i.placeManagedThumbnail(thumbnailPath, hashHex); err != nil {
+	if err := i.placeManagedThumbnail(ctx, thumbnailPath, hashHex); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (i *Importer) placeManagedThumbnail(sourcePath string, hashHex string) error {
-	if _, err := i.layout.PlaceThumbnailFromPath(sourcePath, hashHex); err == nil {
+func (i *Importer) placeManagedThumbnail(
+	ctx context.Context,
+	sourcePath string,
+	hashHex string,
+) error {
+	layout, err := i.managedLayout(ctx)
+	if err != nil {
+		return err
+	}
+
+	if _, err := layout.PlaceThumbnailFromPath(sourcePath, hashHex); err == nil {
 		return nil
 	} else {
 		if !errors.Is(err, clientfiles.ErrManagedDestinationConflict) {
 			return fmt.Errorf("place managed thumbnail: %w", err)
 		}
 
-		destinationPath, resolveErr := i.layout.ResolveThumbnailPath(hashHex)
+		destinationPath, resolveErr := layout.ResolveThumbnailPath(hashHex)
 		if resolveErr != nil {
 			return fmt.Errorf("place managed thumbnail: %w", errors.Join(err, resolveErr))
 		}
@@ -72,7 +81,7 @@ func (i *Importer) placeManagedThumbnail(sourcePath string, hashHex string) erro
 			return fmt.Errorf("remove stale managed thumbnail: %w", errors.Join(err, removeErr))
 		}
 
-		if _, retryErr := i.layout.PlaceThumbnailFromPath(sourcePath, hashHex); retryErr != nil {
+		if _, retryErr := layout.PlaceThumbnailFromPath(sourcePath, hashHex); retryErr != nil {
 			return fmt.Errorf("replace managed thumbnail: %w", errors.Join(err, retryErr))
 		}
 	}

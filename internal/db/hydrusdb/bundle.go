@@ -12,8 +12,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/official-elinas/hydrus-go/internal/core/services"
+	"github.com/official-elinas/hydrus-go/internal/storage/clientfiles"
 	_ "modernc.org/sqlite"
 )
 
@@ -38,6 +40,10 @@ type Bundle struct {
 	mode      openMode
 	writeGate chan struct{}
 	paths     bundlePaths
+
+	managedLayoutMu  sync.RWMutex
+	managedLayout    clientfiles.Layout
+	hasManagedLayout bool
 }
 
 type bundlePaths struct {

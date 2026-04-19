@@ -1,4 +1,4 @@
-// Package fileimport defines the thin-client local file import contract.
+// Package fileimport defines the thin-client file import contract.
 package fileimport
 
 import "context"
@@ -9,7 +9,7 @@ type Request struct {
 	LocalFileServiceKey string `json:"local_file_service_key,omitempty"`
 }
 
-// Result is the daemon response for one imported local file.
+// Result is the daemon response for one imported file.
 type Result struct {
 	FileID                    int64  `json:"file_id"`
 	Hash                      string `json:"hash"`
@@ -17,9 +17,18 @@ type Result struct {
 	ManagedFileAlreadyPresent bool   `json:"managed_file_already_present"`
 }
 
-// Store imports local files into the daemon-managed library.
+// UploadRequest describes one daemon-staged upload import request.
+type UploadRequest struct {
+	StagedPath          string
+	Filename            string
+	LocalFileServiceKey string
+	FileModifiedAtMS    *int64
+}
+
+// Store imports files into the daemon-managed library.
 type Store interface {
 	ImportLocalPath(context.Context, Request) (Result, error)
+	ImportUpload(context.Context, UploadRequest) (Result, error)
 }
 
 // RequestError reports an invalid import request.

@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -10,6 +11,7 @@ import (
 	"image/png"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -22,6 +24,7 @@ import (
 	"github.com/official-elinas/hydrus-go/internal/bootstrap"
 	"github.com/official-elinas/hydrus-go/internal/config"
 	"github.com/official-elinas/hydrus-go/internal/db/hydrusdb"
+	"github.com/official-elinas/hydrus-go/internal/storage/clientfiles"
 )
 
 func TestRun_ShutsDownWhenContextIsCanceled(t *testing.T) {
@@ -425,16 +428,7 @@ func runImportRoundTripEndpointsTest(
 		t.Fatalf("len(initial items) = %d, want 0", len(items))
 	}
 
-	importBody, err := json.Marshal(map[string]string{"path": sourcePath})
-	if err != nil {
-		t.Fatalf("json.Marshal() error = %v", err)
-	}
-
-	importReq := httptest.NewRequest(
-		http.MethodPost,
-		"/v1/import/local_file",
-		strings.NewReader(string(importBody)),
-	)
+	importReq := newAppMultipartUploadRequest(t, "/v1/import/upload", sourcePath)
 	importReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
 	importRR := httptest.NewRecorder()
 
@@ -672,6 +666,11 @@ func createThinClientBundle(t *testing.T) string {
 	mustExecApp(t, mainDB, `CREATE TABLE has_exif (hash_id INTEGER PRIMARY KEY);`)
 	mustExecApp(t, mainDB, `CREATE TABLE has_human_readable_embedded_metadata (hash_id INTEGER PRIMARY KEY);`)
 	mustExecApp(t, mainDB, `CREATE TABLE has_icc_profile (hash_id INTEGER PRIMARY KEY);`)
+	mustExecApp(t, mainDB, `CREATE TABLE current_client_files_locations (location_id INTEGER PRIMARY KEY, location TEXT UNIQUE);`)
+	mustExecApp(t, mainDB, `CREATE TABLE client_files_subfolders (prefix TEXT, location_id INTEGER, PRIMARY KEY (prefix, location_id));`)
+	mustExecApp(t, mainDB, `CREATE TABLE ideal_client_files_locations (location_id INTEGER PRIMARY KEY, weight INTEGER, max_num_bytes INTEGER);`)
+	mustExecApp(t, mainDB, `CREATE TABLE ideal_thumbnail_override_location (location_id INTEGER);`)
+	mustExecApp(t, mainDB, `CREATE TABLE current_storage_granularity (granularity INTEGER);`)
 	mustExecApp(t, mainDB, `CREATE TABLE current_files_2 (hash_id INTEGER PRIMARY KEY, timestamp_ms INTEGER);`)
 	mustExecApp(t, mainDB, `CREATE TABLE current_files_3 (hash_id INTEGER PRIMARY KEY, timestamp_ms INTEGER);`)
 	mustExecApp(t, mainDB, `CREATE TABLE current_files_4 (hash_id INTEGER PRIMARY KEY, timestamp_ms INTEGER);`)
@@ -679,6 +678,7 @@ func createThinClientBundle(t *testing.T) string {
 	mustExecApp(t, mainDB, `CREATE TABLE deleted_files_4 (hash_id INTEGER PRIMARY KEY, timestamp_ms INTEGER, original_timestamp_ms INTEGER);`)
 	mustExecApp(t, mainDB, `CREATE TABLE deleted_files_5 (hash_id INTEGER PRIMARY KEY, timestamp_ms INTEGER, original_timestamp_ms INTEGER);`)
 	mustExecApp(t, mainDB, `CREATE TABLE current_files_6 (hash_id INTEGER PRIMARY KEY, timestamp_ms INTEGER);`)
+	seedAppTestStorage(t, mainDB, dir)
 	mustExecApp(
 		t,
 		mainDB,
@@ -707,6 +707,52 @@ func createThinClientBundle(t *testing.T) string {
 	createEmptySQLiteDB(t, cachesPath)
 	createEmptySQLiteDB(t, mappingsPath)
 	return dir
+}
+
+func seedAppTestStorage(t *testing.T, db *sql.DB, dbDir string) {
+	t.Helper()
+
+	fileRoot := clientfiles.DefaultFileRoot(dbDir)
+	thumbnailRoot := clientfiles.DefaultThumbnailRoot(dbDir)
+
+	mustExecApp(t, db, `INSERT INTO current_storage_granularity (granularity) VALUES (?);`, clientfiles.DefaultPrefixLength)
+	mustExecApp(t, db, `INSERT INTO current_client_files_locations (location_id, location) VALUES (?, ?), (?, ?);`, 1, fileRoot, 2, thumbnailRoot)
+	mustExecApp(t, db, `INSERT INTO ideal_client_files_locations (location_id, weight, max_num_bytes) VALUES (?, ?, NULL);`, 1, 1)
+	mustExecApp(t, db, `INSERT INTO ideal_thumbnail_override_location (location_id) VALUES (?);`, 2)
+
+	for _, prefix := range appTestStoragePrefixes(clientfiles.KindFile, clientfiles.DefaultPrefixLength) {
+		mustExecApp(t, db, `INSERT INTO client_files_subfolders (prefix, location_id) VALUES (?, ?);`, prefix, 1)
+	}
+
+	for _, prefix := range appTestStoragePrefixes(clientfiles.KindThumbnail, clientfiles.DefaultPrefixLength) {
+		mustExecApp(t, db, `INSERT INTO client_files_subfolders (prefix, location_id) VALUES (?, ?);`, prefix, 2)
+	}
+
+	if err := os.MkdirAll(fileRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(fileRoot) error = %v", err)
+	}
+
+	if err := os.MkdirAll(thumbnailRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(thumbnailRoot) error = %v", err)
+	}
+}
+
+func appTestStoragePrefixes(kind clientfiles.Kind, prefixLength int) []string {
+	prefixes := []string{}
+	var build func(string, int)
+	build = func(prefix string, remaining int) {
+		if remaining == 0 {
+			prefixes = append(prefixes, string(kind)+prefix)
+			return
+		}
+
+		for _, digit := range "0123456789abcdef" {
+			build(prefix+string(digit), remaining-1)
+		}
+	}
+
+	build("", prefixLength)
+	return prefixes
 }
 
 func writeAppPNGSourceFile(
@@ -753,6 +799,47 @@ func decodeAppJSON(t *testing.T, raw []byte, target any) {
 	if err := json.Unmarshal(raw, target); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
+}
+
+func newAppMultipartUploadRequest(t *testing.T, target string, sourcePath string) *http.Request {
+	t.Helper()
+
+	fileInfo, err := os.Stat(sourcePath)
+	if err != nil {
+		t.Fatalf("Stat(sourcePath) error = %v", err)
+	}
+
+	payload, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("ReadFile(sourcePath) error = %v", err)
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+
+	modifiedAtMS := fileInfo.ModTime().UTC().UnixMilli()
+	if modifiedAtMS > 0 {
+		if err := writer.WriteField("file_modified_at_ms", strconv.FormatInt(modifiedAtMS, 10)); err != nil {
+			t.Fatalf("WriteField(file_modified_at_ms) error = %v", err)
+		}
+	}
+
+	part, err := writer.CreateFormFile("file", filepath.Base(sourcePath))
+	if err != nil {
+		t.Fatalf("CreateFormFile() error = %v", err)
+	}
+
+	if _, err := part.Write(payload); err != nil {
+		t.Fatalf("multipart file write error = %v", err)
+	}
+
+	if err := writer.Close(); err != nil {
+		t.Fatalf("multipart writer Close() error = %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, target, bytes.NewReader(body.Bytes()))
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	return req
 }
 
 func assertAppGetServiceLookup(

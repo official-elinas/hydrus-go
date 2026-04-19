@@ -357,7 +357,10 @@ func TestEnsureFreshClientBundle_NativeBootstrapCreatesUsableBundle(t *testing.T
 		}
 	}
 
-	clientFilesRoot := clientfiles.DefaultRoot(dbDir)
+	clientFilesRoot := clientfiles.DefaultFileRoot(dbDir)
+	thumbnailRoot := clientfiles.DefaultThumbnailRoot(dbDir)
+	storedClientFilesRoot := portableStorageLocation(dbDir, clientFilesRoot)
+	storedThumbnailRoot := portableStorageLocation(dbDir, thumbnailRoot)
 	info, err := os.Stat(clientFilesRoot)
 	if err != nil {
 		t.Fatalf("Stat(client_files) error = %v", err)
@@ -365,6 +368,15 @@ func TestEnsureFreshClientBundle_NativeBootstrapCreatesUsableBundle(t *testing.T
 
 	if !info.IsDir() {
 		t.Fatalf("client_files root %q is not a directory", clientFilesRoot)
+	}
+
+	thumbnailInfo, err := os.Stat(thumbnailRoot)
+	if err != nil {
+		t.Fatalf("Stat(thumbnails) error = %v", err)
+	}
+
+	if !thumbnailInfo.IsDir() {
+		t.Fatalf("thumbnails root %q is not a directory", thumbnailRoot)
 	}
 
 	mainDB, err := sql.Open("sqlite", filepath.Join(dbDir, "client.db"))
@@ -472,15 +484,36 @@ func TestEnsureFreshClientBundle_NativeBootstrapCreatesUsableBundle(t *testing.T
 		)
 	}
 
-	var location string
+	var fileLocation string
 	if err := mainDB.QueryRow(
-		`SELECT location FROM current_client_files_locations ORDER BY location_id ASC LIMIT 1`,
-	).Scan(&location); err != nil {
-		t.Fatalf("QueryRow(client-files location) error = %v", err)
+		`SELECT cfl.location
+		FROM current_client_files_locations cfl
+		JOIN client_files_subfolders cfs USING (location_id)
+		WHERE cfs.prefix LIKE 'f%'
+		ORDER BY cfs.rowid ASC
+		LIMIT 1`,
+	).Scan(&fileLocation); err != nil {
+		t.Fatalf("QueryRow(file location) error = %v", err)
 	}
 
-	if location != clientFilesRoot {
-		t.Fatalf("client-files location = %q, want %q", location, clientFilesRoot)
+	if fileLocation != storedClientFilesRoot {
+		t.Fatalf("file location = %q, want %q", fileLocation, storedClientFilesRoot)
+	}
+
+	var thumbnailLocation string
+	if err := mainDB.QueryRow(
+		`SELECT cfl.location
+		FROM current_client_files_locations cfl
+		JOIN client_files_subfolders cfs USING (location_id)
+		WHERE cfs.prefix LIKE 't%'
+		ORDER BY cfs.rowid ASC
+		LIMIT 1`,
+	).Scan(&thumbnailLocation); err != nil {
+		t.Fatalf("QueryRow(thumbnail location) error = %v", err)
+	}
+
+	if thumbnailLocation != storedThumbnailRoot {
+		t.Fatalf("thumbnail location = %q, want %q", thumbnailLocation, storedThumbnailRoot)
 	}
 
 	var prefixCount int
@@ -491,6 +524,33 @@ func TestEnsureFreshClientBundle_NativeBootstrapCreatesUsableBundle(t *testing.T
 	wantPrefixCount := expectedPrefixCount(clientfiles.DefaultPrefixLength) * 2
 	if prefixCount != wantPrefixCount {
 		t.Fatalf("client-files prefix count = %d, want %d", prefixCount, wantPrefixCount)
+	}
+
+	var locationCount int
+	if err := mainDB.QueryRow(`SELECT COUNT(*) FROM current_client_files_locations`).Scan(&locationCount); err != nil {
+		t.Fatalf("QueryRow(location count) error = %v", err)
+	}
+
+	if locationCount != 2 {
+		t.Fatalf("location count = %d, want 2", locationCount)
+	}
+
+	var thumbnailOverrideLocation string
+	if err := mainDB.QueryRow(
+		`SELECT cfl.location
+		FROM ideal_thumbnail_override_location itol
+		JOIN current_client_files_locations cfl USING (location_id)
+		LIMIT 1`,
+	).Scan(&thumbnailOverrideLocation); err != nil {
+		t.Fatalf("QueryRow(ideal thumbnail override) error = %v", err)
+	}
+
+	if thumbnailOverrideLocation != storedThumbnailRoot {
+		t.Fatalf(
+			"ideal thumbnail override = %q, want %q",
+			thumbnailOverrideLocation,
+			storedThumbnailRoot,
+		)
 	}
 }
 

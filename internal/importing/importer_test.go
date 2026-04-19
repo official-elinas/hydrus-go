@@ -238,7 +238,7 @@ func TestImporterImportPreparedFile(t *testing.T) {
 		)
 
 		layout, err := clientfiles.NewLayout(
-			clientfiles.DefaultRoot(dir),
+			clientfiles.DefaultFileRoot(dir),
 			clientfiles.DefaultPrefixLength,
 		)
 		if err != nil {
@@ -492,10 +492,16 @@ func createImportTestBundle(t *testing.T) (string, importTestFixture) {
 	mustExec(t, mainDB, `CREATE TABLE has_exif (hash_id INTEGER PRIMARY KEY);`)
 	mustExec(t, mainDB, `CREATE TABLE has_human_readable_embedded_metadata (hash_id INTEGER PRIMARY KEY);`)
 	mustExec(t, mainDB, `CREATE TABLE has_icc_profile (hash_id INTEGER PRIMARY KEY);`)
+	mustExec(t, mainDB, `CREATE TABLE current_client_files_locations (location_id INTEGER PRIMARY KEY, location TEXT UNIQUE);`)
+	mustExec(t, mainDB, `CREATE TABLE client_files_subfolders (prefix TEXT, location_id INTEGER, PRIMARY KEY (prefix, location_id));`)
+	mustExec(t, mainDB, `CREATE TABLE ideal_client_files_locations (location_id INTEGER PRIMARY KEY, weight INTEGER, max_num_bytes INTEGER);`)
+	mustExec(t, mainDB, `CREATE TABLE ideal_thumbnail_override_location (location_id INTEGER);`)
+	mustExec(t, mainDB, `CREATE TABLE current_storage_granularity (granularity INTEGER);`)
 	mustExec(t, mainDB, `CREATE TABLE current_files_2 (hash_id INTEGER PRIMARY KEY, timestamp_ms INTEGER);`)
 	mustExec(t, mainDB, `CREATE TABLE current_files_3 (hash_id INTEGER PRIMARY KEY, timestamp_ms INTEGER);`)
 	mustExec(t, mainDB, `CREATE TABLE current_files_4 (hash_id INTEGER PRIMARY KEY, timestamp_ms INTEGER);`)
 	mustExec(t, mainDB, `CREATE TABLE current_files_5 (hash_id INTEGER PRIMARY KEY, timestamp_ms INTEGER);`)
+	seedImportTestStorage(t, mainDB, dir)
 
 	mustExec(
 		t,
@@ -524,6 +530,52 @@ func createImportTestBundle(t *testing.T) (string, importTestFixture) {
 		combinedLocalMediaServiceKeyHex: hex.EncodeToString(combinedLocalMediaKey),
 		allKnownFilesServiceKeyHex:      hex.EncodeToString(combinedFilesKey),
 	}
+}
+
+func seedImportTestStorage(t *testing.T, db *sql.DB, dbDir string) {
+	t.Helper()
+
+	fileRoot := clientfiles.DefaultFileRoot(dbDir)
+	thumbnailRoot := clientfiles.DefaultThumbnailRoot(dbDir)
+
+	mustExec(t, db, `INSERT INTO current_storage_granularity (granularity) VALUES (?);`, clientfiles.DefaultPrefixLength)
+	mustExec(t, db, `INSERT INTO current_client_files_locations (location_id, location) VALUES (?, ?), (?, ?);`, 1, fileRoot, 2, thumbnailRoot)
+	mustExec(t, db, `INSERT INTO ideal_client_files_locations (location_id, weight, max_num_bytes) VALUES (?, ?, NULL);`, 1, 1)
+	mustExec(t, db, `INSERT INTO ideal_thumbnail_override_location (location_id) VALUES (?);`, 2)
+
+	for _, prefix := range testStoragePrefixes(clientfiles.KindFile, clientfiles.DefaultPrefixLength) {
+		mustExec(t, db, `INSERT INTO client_files_subfolders (prefix, location_id) VALUES (?, ?);`, prefix, 1)
+	}
+
+	for _, prefix := range testStoragePrefixes(clientfiles.KindThumbnail, clientfiles.DefaultPrefixLength) {
+		mustExec(t, db, `INSERT INTO client_files_subfolders (prefix, location_id) VALUES (?, ?);`, prefix, 2)
+	}
+
+	if err := os.MkdirAll(fileRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(fileRoot) error = %v", err)
+	}
+
+	if err := os.MkdirAll(thumbnailRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(thumbnailRoot) error = %v", err)
+	}
+}
+
+func testStoragePrefixes(kind clientfiles.Kind, prefixLength int) []string {
+	prefixes := make([]string, 0, 1)
+	var build func(string, int)
+	build = func(prefix string, remaining int) {
+		if remaining == 0 {
+			prefixes = append(prefixes, string(kind)+prefix)
+			return
+		}
+
+		for _, digit := range "0123456789abcdef" {
+			build(prefix+string(digit), remaining-1)
+		}
+	}
+
+	build("", prefixLength)
+	return prefixes
 }
 
 func createEmptySQLiteFile(t *testing.T, path string) {
