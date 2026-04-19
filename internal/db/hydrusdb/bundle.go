@@ -191,13 +191,13 @@ func (b *Bundle) ByKey(
 
 	row := b.conn.QueryRowContext(
 		ctx,
-		`SELECT lower(hex(service_key)), service_type, name
+		`SELECT lower(hex(service_key)), service_type, name, dictionary_string
 		FROM main.services
 		WHERE service_key = ?`,
 		keyBytes,
 	)
 
-	service, err := scanService(row)
+	service, err := scanCatalogService(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return services.Service{}, false, nil
@@ -216,7 +216,7 @@ func (b *Bundle) ByName(
 ) (services.Service, bool, error) {
 	service, ok, err := b.lookupServiceByName(
 		ctx,
-		`SELECT lower(hex(service_key)), service_type, name
+		`SELECT lower(hex(service_key)), service_type, name, dictionary_string
 		FROM main.services
 		WHERE name = ?
 		ORDER BY service_id ASC
@@ -288,7 +288,7 @@ func (b *Bundle) lookupServiceByName(
 ) (services.Service, bool, error) {
 	row := b.conn.QueryRowContext(ctx, query, name)
 
-	service, err := scanService(row)
+	service, err := scanCatalogService(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return services.Service{}, false, nil
@@ -309,7 +309,7 @@ func (b *Bundle) lookupCaseInsensitiveServiceByName(
 	// ASCII-oriented NOCASE collation.
 	rows, err := b.conn.QueryContext(
 		ctx,
-		`SELECT lower(hex(service_key)), service_type, name
+		`SELECT lower(hex(service_key)), service_type, name, dictionary_string
 		FROM main.services
 		ORDER BY service_id ASC`,
 	)
@@ -319,7 +319,7 @@ func (b *Bundle) lookupCaseInsensitiveServiceByName(
 	defer rows.Close()
 
 	for rows.Next() {
-		service, err := scanService(rows)
+		service, err := scanCatalogService(rows)
 		if err != nil {
 			return services.Service{}, false, err
 		}

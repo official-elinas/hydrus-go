@@ -34,6 +34,9 @@ Last updated: 2026-04-19
   - service-keyed `tags` payloads with per-service `storage_tags` and Hydrus-like `display_tags`
   - compatibility `service_keys_to_statuses_to_tags` and `service_keys_to_statuses_to_display_tags` behind `hide_service_keys_tags=false`, with legacy display values matching `tags[*].display_tags`
   - `display_tags` now prefer specific display cache tables when available, otherwise fall back to sibling/parent-expanded storage tags, with deleted/petitioned display copied from storage
+- expanded full/default DB-backed `file_metadata` with daemon-served `ratings` keyed by rating service key:
+  - Hydrus-like API values for local like/dislike, numerical, and inc/dec services
+  - unrated service defaults that stay aligned with Hydrus (`null` for like/numerical, `0` for inc/dec)
 - explicitly rejects `include_notes=true` and `detailed_url_information=true` in the current full-mode slice
 - added an internal writable Hydrus bundle mode with a serialized `BEGIN IMMEDIATE` transaction runner
 - added a pure managed `client_files` layout package for deterministic file and thumbnail path resolution
@@ -123,7 +126,7 @@ Last updated: 2026-04-19
 
 ### Phase 8: Read/Query Expansion After Import + PTR
 
-- [ ] continue `GET /get_files/file_metadata` toward broader parity for tags, ratings, notes, and viewing stats
+- [ ] continue `GET /get_files/file_metadata` toward broader parity for notes, detailed URLs, viewing stats, and remaining edge-case payload semantics
 - [ ] begin DB-backed search and tagging read paths on top of imported and PTR-synced data
 - [ ] refine service/media-result behavior for common client workflows
 
@@ -271,3 +274,12 @@ Last updated: 2026-04-19
 - kept the daemon-first boundary intact; desktop clients still receive tags only through daemon-served metadata
 - added display-tag parity that prefers specific display cache tables when available and otherwise derives display tags through sibling/parent fallback
 - verified with targeted DB/API/app/daemonclient package tests
+
+### 2026-04-19 — Milestone 16: DB-backed metadata ratings slice
+
+- expanded full/default `GET /get_files/file_metadata` rows with a `ratings` object keyed by rating service key
+- added DB-backed reads from `main.local_ratings` and `main.local_incdec_ratings` for local rating services
+- mirrored Hydrus API rating semantics for like/dislike booleans, numerical star conversion, and inc/dec integer counts
+- preserved Hydrus-like unrated defaults in the payload (`null` for like/numerical services, `0` for inc/dec services)
+- kept the daemon-first boundary intact; desktop clients still receive ratings only through daemon-served metadata
+- verified with targeted DB/API/app/hydrusdb package tests

@@ -35,8 +35,8 @@ func TestBundleServices(t *testing.T) {
 		t.Fatalf("List() error = %v", err)
 	}
 
-	if len(catalog) != 10 {
-		t.Fatalf("len(catalog) = %d, want 10", len(catalog))
+	if len(catalog) != 11 {
+		t.Fatalf("len(catalog) = %d, want 11", len(catalog))
 	}
 
 	if catalog[0].Name != "my tags" {
@@ -195,6 +195,30 @@ func TestBundleServices(t *testing.T) {
 			favourites.Colours["mixed"].Brush,
 		)
 	}
+
+	repoStars, ok, err := bundle.ByKey(
+		context.Background(),
+		fixture.repoStarsServiceKeyHex,
+	)
+	if err != nil {
+		t.Fatalf("ByKey(repo stars) error = %v", err)
+	}
+
+	if !ok {
+		t.Fatal("ByKey(repo stars) ok = false, want true")
+	}
+
+	if repoStars.StarShape != "circle" {
+		t.Fatalf("repoStars.StarShape = %q, want circle", repoStars.StarShape)
+	}
+
+	if repoStars.AllowsZero == nil || !*repoStars.AllowsZero {
+		t.Fatal("repoStars.AllowsZero missing or false, want true")
+	}
+
+	if repoStars.MaxStars == nil || *repoStars.MaxStars != 7 {
+		t.Fatalf("repoStars.MaxStars = %v, want 7", repoStars.MaxStars)
+	}
 }
 
 func TestBundleByName_PrefersExactMatchBeforeCaseInsensitiveFallback(t *testing.T) {
@@ -210,7 +234,7 @@ func TestBundleByName_PrefersExactMatchBeforeCaseInsensitiveFallback(t *testing.
 		t,
 		mainDB,
 		`INSERT INTO services (service_id, service_key, service_type, name, dictionary_string) VALUES (?, ?, ?, ?, ?);`,
-		13,
+		16,
 		exactCaseKey,
 		int(services.TypeClientAPIService),
 		"Client API",
@@ -732,6 +756,65 @@ func TestBundleMetadata(t *testing.T) {
 		}
 	})
 
+	t.Run("full mode returns Hydrus-like ratings payloads", func(t *testing.T) {
+		rows, err := bundle.GetMetadata(context.Background(), filemetadata.Request{
+			Hashes: []string{fixture.hash1Hex, fixture.hash2Hex},
+		})
+		if err != nil {
+			t.Fatalf("GetMetadata() error = %v", err)
+		}
+
+		ratings1, ok := rows[0]["ratings"].(map[string]any)
+		if !ok {
+			t.Fatalf("rows[0][ratings] type = %T, want map[string]any", rows[0]["ratings"])
+		}
+
+		if got, ok := ratings1[fixture.starsServiceKeyHex]; !ok || got != 4 {
+			t.Fatalf("rows[0][ratings][stars] = %v (present=%t), want 4", got, ok)
+		}
+
+		if got, ok := ratings1[fixture.repoStarsServiceKeyHex]; !ok || got != 6 {
+			t.Fatalf("rows[0][ratings][repo_stars] = %v (present=%t), want 6", got, ok)
+		}
+
+		if got, ok := ratings1[fixture.repoLikesServiceKeyHex]; !ok || got != nil {
+			t.Fatalf("rows[0][ratings][repo_likes] = %v (present=%t), want nil", got, ok)
+		}
+
+		if got, ok := ratings1[fixture.favouritesServiceKeyHex]; !ok || got != true {
+			t.Fatalf("rows[0][ratings][favourites] = %v (present=%t), want true", got, ok)
+		}
+
+		if got, ok := ratings1[fixture.incDecServiceKeyHex]; !ok || got != 5 {
+			t.Fatalf("rows[0][ratings][incdec] = %v (present=%t), want 5", got, ok)
+		}
+
+		ratings2, ok := rows[1]["ratings"].(map[string]any)
+		if !ok {
+			t.Fatalf("rows[1][ratings] type = %T, want map[string]any", rows[1]["ratings"])
+		}
+
+		if got, ok := ratings2[fixture.starsServiceKeyHex]; !ok || got != nil {
+			t.Fatalf("rows[1][ratings][stars] = %v (present=%t), want nil", got, ok)
+		}
+
+		if got, ok := ratings2[fixture.repoStarsServiceKeyHex]; !ok || got != nil {
+			t.Fatalf("rows[1][ratings][repo_stars] = %v (present=%t), want nil", got, ok)
+		}
+
+		if got, ok := ratings2[fixture.repoLikesServiceKeyHex]; !ok || got != nil {
+			t.Fatalf("rows[1][ratings][repo_likes] = %v (present=%t), want nil", got, ok)
+		}
+
+		if got, ok := ratings2[fixture.favouritesServiceKeyHex]; !ok || got != false {
+			t.Fatalf("rows[1][ratings][favourites] = %v (present=%t), want false", got, ok)
+		}
+
+		if got, ok := ratings2[fixture.incDecServiceKeyHex]; !ok || got != 0 {
+			t.Fatalf("rows[1][ratings][incdec] = %v (present=%t), want 0", got, ok)
+		}
+	})
+
 	t.Run("full mode supports millisecond timestamps", func(t *testing.T) {
 		rows, err := bundle.GetMetadata(context.Background(), filemetadata.Request{
 			FileIDs:             []int64{1},
@@ -1160,6 +1243,11 @@ type testFixture struct {
 	hash1PixelHashHex               string
 	hash1IPFSMultihash              string
 	clientAPIServiceKey             []byte
+	starsServiceKeyHex              string
+	repoStarsServiceKeyHex          string
+	repoLikesServiceKeyHex          string
+	favouritesServiceKeyHex         string
+	incDecServiceKeyHex             string
 	localTagServiceKeyHex           string
 	downloaderTagsServiceKeyHex     string
 	combinedTagServiceKeyHex        string
@@ -1222,8 +1310,12 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 	trashKey := []byte("trash")
 	ipfsKey := []byte("my-ipfs")
 	clientAPIKey := []byte("client-api")
+	myStarsKey := []byte("my-stars")
+	repoStarsKey := []byte("repo-stars")
+	repoLikesKey := []byte("repo-likes")
 	downloaderTagsKey := []byte("downloader tags")
 	favouritesKey := []byte("favourites")
+	incDecKey := []byte("score-counter")
 
 	mainDB := openSQLiteForTest(t, mainPath)
 	defer mainDB.Close()
@@ -1267,6 +1359,8 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 	mustExec(t, mainDB, `CREATE TABLE has_exif (hash_id INTEGER PRIMARY KEY);`)
 	mustExec(t, mainDB, `CREATE TABLE has_human_readable_embedded_metadata (hash_id INTEGER PRIMARY KEY);`)
 	mustExec(t, mainDB, `CREATE TABLE has_icc_profile (hash_id INTEGER PRIMARY KEY);`)
+	mustExec(t, mainDB, `CREATE TABLE local_ratings (service_id INTEGER, hash_id INTEGER, rating REAL, PRIMARY KEY (service_id, hash_id));`)
+	mustExec(t, mainDB, `CREATE TABLE local_incdec_ratings (service_id INTEGER, hash_id INTEGER, rating INTEGER, PRIMARY KEY (service_id, hash_id));`)
 	mustExec(t, mainDB, `CREATE TABLE current_client_files_locations (location_id INTEGER PRIMARY KEY, location TEXT UNIQUE);`)
 	mustExec(t, mainDB, `CREATE TABLE client_files_subfolders (prefix TEXT, location_id INTEGER, PRIMARY KEY (prefix, location_id));`)
 	mustExec(t, mainDB, `CREATE TABLE ideal_client_files_locations (location_id INTEGER PRIMARY KEY, weight INTEGER, max_num_bytes INTEGER);`)
@@ -1285,19 +1379,22 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 	mustExec(
 		t,
 		mainDB,
-		`INSERT INTO services (service_id, service_key, service_type, name, dictionary_string) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?);`,
+		`INSERT INTO services (service_id, service_key, service_type, name, dictionary_string) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?);`,
 		1, localTagKey, int(services.TypeLocalTag), "my tags", "{}",
 		2, localFilesKey, int(services.TypeLocalFileDomain), "my files", "{}",
 		3, hydrusLocalFilesKey, int(services.TypeHydrusLocalFileStorage), "all local files", "{}",
 		4, combinedLocalMediaKey, int(services.TypeCombinedLocalFileDomains), "all local media", "{}",
 		5, combinedFilesKey, int(services.TypeCombinedFile), "all known files", "{}",
 		6, trashKey, int(services.TypeLocalFileTrashDomain), "trash", "{}",
-		7, []byte("my-stars"), int(services.TypeLocalRatingNumerical), "my stars", ratingDictionary,
+		7, myStarsKey, int(services.TypeLocalRatingNumerical), "my stars", ratingDictionary,
 		8, ipfsKey, int(services.TypeIPFS), "my ipfs", "{}",
 		9, clientAPIKey, int(services.TypeClientAPIService), "client api", "{}",
 		10, downloaderTagsKey, int(services.TypeLocalTag), "downloader tags", "{}",
 		11, favouritesKey, int(services.TypeLocalRatingLike), "favourites", favouritesDictionary,
 		12, combinedTagsKey, int(services.TypeCombinedTag), "all known tags", "{}",
+		13, incDecKey, int(services.TypeLocalRatingIncDec), "score counter", "",
+		14, repoStarsKey, int(services.TypeRatingNumericalRepository), "repo stars", ratingDictionary,
+		15, repoLikesKey, int(services.TypeRatingLikeRepository), "repo likes", favouritesDictionary,
 	)
 	mustExec(
 		t,
@@ -1352,6 +1449,21 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 	mustExec(t, mainDB, `INSERT INTO has_exif (hash_id) VALUES (?);`, 1)
 	mustExec(t, mainDB, `INSERT INTO has_human_readable_embedded_metadata (hash_id) VALUES (?);`, 2)
 	mustExec(t, mainDB, `INSERT INTO has_icc_profile (hash_id) VALUES (?);`, 1)
+	mustExec(
+		t,
+		mainDB,
+		`INSERT INTO local_ratings (service_id, hash_id, rating) VALUES (?, ?, ?), (?, ?, ?), (?, ?, ?), (?, ?, ?);`,
+		7, 1, 4.0/7.0,
+		11, 1, 1.0,
+		11, 2, 0.0,
+		14, 1, 6.0/7.0,
+	)
+	mustExec(
+		t,
+		mainDB,
+		`INSERT INTO local_incdec_ratings (service_id, hash_id, rating) VALUES (?, ?, ?);`,
+		13, 1, 5,
+	)
 	mustExec(
 		t,
 		mainDB,
@@ -1625,6 +1737,11 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 		hash1PixelHashHex:               pixelHash,
 		hash1IPFSMultihash:              ipfsMultihash,
 		clientAPIServiceKey:             clientAPIKey,
+		starsServiceKeyHex:              hex.EncodeToString(myStarsKey),
+		repoStarsServiceKeyHex:          hex.EncodeToString(repoStarsKey),
+		repoLikesServiceKeyHex:          hex.EncodeToString(repoLikesKey),
+		favouritesServiceKeyHex:         hex.EncodeToString(favouritesKey),
+		incDecServiceKeyHex:             hex.EncodeToString(incDecKey),
 		localTagServiceKeyHex:           hex.EncodeToString(localTagKey),
 		downloaderTagsServiceKeyHex:     hex.EncodeToString(downloaderTagsKey),
 		combinedTagServiceKeyHex:        hex.EncodeToString(combinedTagsKey),

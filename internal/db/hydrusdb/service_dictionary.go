@@ -80,7 +80,10 @@ func applyServiceExtras(
 		service.Colours = colours
 	}
 
-	if serviceType == services.TypeLocalRatingLike || serviceType == services.TypeLocalRatingNumerical {
+	if serviceType == services.TypeLocalRatingLike ||
+		serviceType == services.TypeLocalRatingNumerical ||
+		serviceType == services.TypeRatingLikeRepository ||
+		serviceType == services.TypeRatingNumericalRepository {
 		if ratingSVG, exists := dictionary["rating_svg"]; exists && ratingSVG != nil {
 			service.StarShape = "svg"
 		} else if shape, ok, err := mapInt(dictionary, "shape"); err != nil {
@@ -90,7 +93,8 @@ func applyServiceExtras(
 		}
 	}
 
-	if serviceType == services.TypeLocalRatingNumerical {
+	if serviceType == services.TypeLocalRatingNumerical ||
+		serviceType == services.TypeRatingNumericalRepository {
 		allowsZero, ok, err := mapBool(dictionary, "allow_zero")
 		if err != nil {
 			return err
@@ -121,7 +125,9 @@ func isRatingService(serviceType services.Type) bool {
 	switch serviceType {
 	case services.TypeLocalRatingLike,
 		services.TypeLocalRatingNumerical,
-		services.TypeLocalRatingIncDec:
+		services.TypeLocalRatingIncDec,
+		services.TypeRatingLikeRepository,
+		services.TypeRatingNumericalRepository:
 		return true
 	default:
 		return false

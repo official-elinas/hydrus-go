@@ -138,6 +138,11 @@ func (b *Bundle) fullMetadataRows(
 		return nil, err
 	}
 
+	ratingsByHashID, err := b.lookupFileRatings(ctx, knownFileIDs)
+	if err != nil {
+		return nil, err
+	}
+
 	tagsByHashID, err := b.lookupFileTags(ctx, knownFileIDs, currentFileServices)
 	if err != nil {
 		return nil, err
@@ -167,6 +172,7 @@ func (b *Bundle) fullMetadataRows(
 			currentFileServices,
 			deletedFileServices,
 			ipfsMultihashes,
+			ratingsByHashID,
 			tagsByHashID,
 			includeLegacyServiceKeysTags,
 		))
@@ -191,6 +197,7 @@ func buildFullMetadataRow(
 	currentFileServices map[int64][]currentFileServiceMembership,
 	deletedFileServices map[int64][]deletedFileServiceMembership,
 	ipfsMultihashes map[int64]map[string]string,
+	ratingsByHashID map[int64]map[string]any,
 	tagsByHashID map[int64]metadataTagsPayload,
 	includeLegacyServiceKeysTags bool,
 ) filemetadata.Row {
@@ -235,6 +242,12 @@ func buildFullMetadataRow(
 	row["has_icc_profile"] = containsHashID(iccProfileHashIDs, hashID)
 	row["known_urls"] = cloneStringSlice(knownURLs[hashID])
 	row["ipfs_multihashes"] = cloneStringMap(ipfsMultihashes[hashID])
+
+	ratings := ratingsByHashID[hashID]
+	if ratings == nil {
+		ratings = map[string]any{}
+	}
+	row["ratings"] = cloneAnyMap(ratings)
 
 	tagsPayload, ok := tagsByHashID[hashID]
 	if !ok {
@@ -922,6 +935,19 @@ func cloneStringMap(values map[string]string) map[string]string {
 	}
 
 	cloned := make(map[string]string, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+
+	return cloned
+}
+
+func cloneAnyMap(values map[string]any) map[string]any {
+	if len(values) == 0 {
+		return map[string]any{}
+	}
+
+	cloned := make(map[string]any, len(values))
 	for key, value := range values {
 		cloned[key] = value
 	}

@@ -1174,6 +1174,99 @@ func TestGetFileMetadata(t *testing.T) {
 		}
 	})
 
+	t.Run("services objects include hidden services referenced by metadata", func(t *testing.T) {
+		allowsZero := true
+		minStars := 0
+		maxStars := 7
+		hiddenRepoRating := services.Service{
+			Name:       "repo stars",
+			ServiceKey: "7265706f2d7374617273",
+			Type:       services.TypeRatingNumericalRepository,
+			TypePretty: services.TypePretty(services.TypeRatingNumericalRepository),
+			StarShape:  "circle",
+			AllowsZero: &allowsZero,
+			MinStars:   &minStars,
+			MaxStars:   &maxStars,
+		}
+
+		repoProvider := services.NewStaticProviderWithLookupCatalog(
+			services.DefaultCatalog(),
+			append(services.BootstrapCatalog(), hiddenRepoRating),
+		)
+		repoStore := &fakeMetadataStore{
+			handle: func(request filemetadata.Request) ([]filemetadata.Row, error) {
+				return []filemetadata.Row{{
+					"file_id": int64(1),
+					"hash":    strings.Repeat("a", 64),
+					"ratings": map[string]any{
+						hiddenRepoRating.ServiceKey: 6,
+					},
+				}}, nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, repoProvider, repoStore, false)
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/get_files/file_metadata?file_ids=%5B1%5D",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", accessKey)
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		servicesByKey, ok := payload["services"].(map[string]any)
+		if !ok {
+			t.Fatalf("services type = %T, want map[string]any", payload["services"])
+		}
+
+		if _, ok := servicesByKey[hiddenRepoRating.ServiceKey]; !ok {
+			t.Fatalf("services missing hidden repo rating %q", hiddenRepoRating.ServiceKey)
+		}
+
+		servicesValue, ok := payload["services_v2"].([]any)
+		if !ok {
+			t.Fatalf("services_v2 type = %T, want []any", payload["services_v2"])
+		}
+
+		var matched map[string]any
+		for _, item := range servicesValue {
+			service, ok := item.(map[string]any)
+			if !ok {
+				t.Fatalf("service item type = %T, want map[string]any", item)
+			}
+
+			if service["service_key"] == hiddenRepoRating.ServiceKey {
+				matched = service
+				break
+			}
+		}
+
+		if matched == nil {
+			t.Fatalf("services_v2 missing hidden repo rating %q", hiddenRepoRating.ServiceKey)
+		}
+
+		if got := matched["max_stars"]; got != float64(7) {
+			t.Fatalf("hidden repo rating max_stars = %v, want 7", got)
+		}
+
+		if got := matched["allows_zero"]; got != true {
+			t.Fatalf("hidden repo rating allows_zero = %v, want true", got)
+		}
+
+		if got := matched["star_shape"]; got != "circle" {
+			t.Fatalf("hidden repo rating star_shape = %v, want circle", got)
+		}
+	})
+
 	t.Run("passes through tags payload and hides legacy maps by default", func(t *testing.T) {
 		tagStore := &fakeMetadataStore{
 			handle: func(request filemetadata.Request) ([]filemetadata.Row, error) {

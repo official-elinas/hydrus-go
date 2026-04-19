@@ -1,15 +1,18 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 
 	"github.com/official-elinas/hydrus-go/internal/core/filemetadata"
+	"github.com/official-elinas/hydrus-go/internal/core/services"
 )
 
 const maxReasonableFileID = 1024 * 1024 * 1024 * 1024 * 1024
@@ -61,6 +64,16 @@ func (s *Server) handleGetFileMetadata(w http.ResponseWriter, r *http.Request) {
 
 	if request.IncludeServicesObject {
 		catalog, err := s.services.List(r.Context())
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, "could not load services")
+			return
+		}
+
+		catalog, err = s.augmentCatalogWithMetadataServices(
+			r.Context(),
+			catalog,
+			metadata,
+		)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "could not load services")
 			return
@@ -174,6 +187,152 @@ func parseFileMetadataRequest(r *http.Request) (filemetadata.Request, error) {
 		IncludeNotes:                 includeNotes,
 		CreateNewFileIDs:             createNewFileIDs,
 	}, nil
+}
+
+func (s *Server) augmentCatalogWithMetadataServices(
+	ctx context.Context,
+	catalog services.Catalog,
+	metadata []filemetadata.Row,
+) (services.Catalog, error) {
+	augmented := append(services.Catalog{}, catalog...)
+	seen := map[string]struct{}{}
+	for _, service := range augmented {
+		seen[service.ServiceKey] = struct{}{}
+	}
+
+	for _, serviceKey := range metadataReferencedServiceKeys(metadata) {
+		if _, ok := seen[serviceKey]; ok {
+			continue
+		}
+
+		service, ok, err := s.services.ByKey(ctx, serviceKey)
+		if err != nil {
+			return nil, err
+		}
+
+		if !ok {
+			continue
+		}
+
+		augmented = append(augmented, service)
+		seen[serviceKey] = struct{}{}
+	}
+
+	return augmented, nil
+}
+
+func metadataReferencedServiceKeys(metadata []filemetadata.Row) []string {
+	serviceKeys := []string{}
+	seen := map[string]struct{}{}
+	add := func(serviceKey string) {
+		serviceKey = strings.TrimSpace(serviceKey)
+		if serviceKey == "" {
+			return
+		}
+
+		if _, ok := seen[serviceKey]; ok {
+			return
+		}
+
+		seen[serviceKey] = struct{}{}
+		serviceKeys = append(serviceKeys, serviceKey)
+	}
+
+	for _, row := range metadata {
+		collectServiceKeysFromAnyMap(row["ratings"], add)
+		collectServiceKeysFromTags(row["tags"], add)
+		collectServiceKeysFromLegacyTags(
+			row["service_keys_to_statuses_to_tags"],
+			add,
+		)
+		collectServiceKeysFromLegacyTags(
+			row["service_keys_to_statuses_to_display_tags"],
+			add,
+		)
+		collectServiceKeysFromStringMap(row["ipfs_multihashes"], add)
+		collectServiceKeysFromFileServices(row["file_services"], add)
+	}
+
+	slices.Sort(serviceKeys)
+
+	return serviceKeys
+}
+
+func collectServiceKeysFromAnyMap(
+	value any,
+	add func(string),
+) {
+	entries, ok := value.(map[string]any)
+	if !ok {
+		return
+	}
+
+	for serviceKey := range entries {
+		add(serviceKey)
+	}
+}
+
+func collectServiceKeysFromTags(
+	value any,
+	add func(string),
+) {
+	entries, ok := value.(map[string]map[string]any)
+	if !ok {
+		return
+	}
+
+	for serviceKey := range entries {
+		add(serviceKey)
+	}
+}
+
+func collectServiceKeysFromLegacyTags(
+	value any,
+	add func(string),
+) {
+	entries, ok := value.(map[string]map[string][]string)
+	if !ok {
+		return
+	}
+
+	for serviceKey := range entries {
+		add(serviceKey)
+	}
+}
+
+func collectServiceKeysFromStringMap(
+	value any,
+	add func(string),
+) {
+	entries, ok := value.(map[string]string)
+	if !ok {
+		return
+	}
+
+	for serviceKey := range entries {
+		add(serviceKey)
+	}
+}
+
+func collectServiceKeysFromFileServices(
+	value any,
+	add func(string),
+) {
+	sections, ok := value.(map[string]any)
+	if !ok {
+		return
+	}
+
+	for _, sectionName := range []string{"current", "deleted"} {
+		entries, ok := sections[sectionName].(map[string]map[string]any)
+		if !ok {
+			continue
+		}
+
+		for serviceKey := range entries {
+			add(serviceKey)
+		}
+	}
 }
 
 func parseHashes(query map[string][]string) ([]string, error) {
