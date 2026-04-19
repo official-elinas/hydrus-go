@@ -383,6 +383,30 @@ func runImportRoundTripEndpointsTest(
 	}
 
 	assertAppServiceDiscovery(t, servicesRR.Body.Bytes(), expectBootstrapDiscovery)
+	assertAppGetServiceLookup(
+		t,
+		application.server.Handler,
+		cfg.AccessKey,
+		"/get_service?service_name=My%20FiLeS",
+		http.StatusOK,
+		"my files",
+	)
+	assertAppGetServiceError(
+		t,
+		application.server.Handler,
+		cfg.AccessKey,
+		"/get_service?service_key=636c69656e7420617069",
+		http.StatusBadRequest,
+		"service exists but is not available through this endpoint",
+	)
+	assertAppGetServiceError(
+		t,
+		application.server.Handler,
+		cfg.AccessKey,
+		"/get_service?service_name=client%20api",
+		http.StatusNotFound,
+		"service not found",
+	)
 
 	recentReq := httptest.NewRequest(http.MethodGet, "/v1/library/recent?limit=10", nil)
 	recentReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
@@ -658,12 +682,15 @@ func createThinClientBundle(t *testing.T) string {
 	mustExecApp(
 		t,
 		mainDB,
-		`INSERT INTO services (service_id, service_key, service_type, name, dictionary_string) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?);`,
+		`INSERT INTO services (service_id, service_key, service_type, name, dictionary_string) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?);`,
 		2, []byte("local-files"), 2, "my files", "{}",
 		3, []byte("all-local-files"), 15, "all local files", "{}",
 		4, []byte("all-local-media"), 21, "all local media", "{}",
 		5, []byte("combined-files"), 11, "all known files", "{}",
 		6, []byte("trash"), 14, "trash", "{}",
+		7, []byte("all deleted files"), 19, "deleted from anywhere", "{}",
+		8, []byte("local notes"), 17, "local notes", "{}",
+		9, []byte("client api"), 18, "client api", "{}",
 	)
 
 	masterDB, err := sql.Open("sqlite", masterPath)
@@ -725,6 +752,64 @@ func decodeAppJSON(t *testing.T, raw []byte, target any) {
 
 	if err := json.Unmarshal(raw, target); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+}
+
+func assertAppGetServiceLookup(
+	t *testing.T,
+	handler http.Handler,
+	accessKey string,
+	path string,
+	wantStatus int,
+	wantName string,
+) {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("Hydrus-Client-API-Access-Key", accessKey)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != wantStatus {
+		t.Fatalf("%s status = %d, want %d", path, rr.Code, wantStatus)
+	}
+
+	var payload map[string]any
+	decodeAppJSON(t, rr.Body.Bytes(), &payload)
+
+	service, ok := payload["service"].(map[string]any)
+	if !ok {
+		t.Fatalf("service type = %T, want map[string]any", payload["service"])
+	}
+
+	if service["name"] != wantName {
+		t.Fatalf("service.name = %v, want %q", service["name"], wantName)
+	}
+}
+
+func assertAppGetServiceError(
+	t *testing.T,
+	handler http.Handler,
+	accessKey string,
+	path string,
+	wantStatus int,
+	wantBody string,
+) {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("Hydrus-Client-API-Access-Key", accessKey)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != wantStatus {
+		t.Fatalf("%s status = %d, want %d", path, rr.Code, wantStatus)
+	}
+
+	if got := strings.TrimSpace(rr.Body.String()); got != wantBody {
+		t.Fatalf("%s body = %q, want %q", path, got, wantBody)
 	}
 }
 

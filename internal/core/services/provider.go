@@ -14,34 +14,53 @@ type Provider interface {
 
 // StaticProvider serves a fixed in-memory service catalog.
 type StaticProvider struct {
-	catalog Catalog
+	listCatalog   Catalog
+	lookupCatalog Catalog
 }
 
 // NewStaticProvider constructs an in-memory service provider.
 func NewStaticProvider(catalog Catalog) StaticProvider {
-	return StaticProvider{catalog: catalog}
+	return NewStaticProviderWithLookupCatalog(catalog, catalog)
+}
+
+// NewStaticProviderWithLookupCatalog constructs an in-memory service provider
+// whose discovery list and direct-lookup catalogs can differ.
+func NewStaticProviderWithLookupCatalog(listCatalog, lookupCatalog Catalog) StaticProvider {
+	return StaticProvider{
+		listCatalog:   cloneCatalog(listCatalog),
+		lookupCatalog: cloneCatalog(lookupCatalog),
+	}
 }
 
 // DefaultProvider constructs the bootstrap in-memory service provider.
+// Discovery remains limited to the visible default catalog, while direct
+// lookups can still resolve hidden bootstrap-only services for parity with the
+// DB-backed provider.
 func DefaultProvider() StaticProvider {
-	return NewStaticProvider(DefaultCatalog())
+	return NewStaticProviderWithLookupCatalog(DefaultCatalog(), BootstrapCatalog())
 }
 
 // List returns the static catalog.
 func (p StaticProvider) List(_ context.Context) (Catalog, error) {
-	return p.catalog, nil
+	return cloneCatalog(p.listCatalog), nil
 }
 
 // ByKey finds a service by service key.
 func (p StaticProvider) ByKey(_ context.Context, serviceKey string) (Service, bool, error) {
-	service, ok := p.catalog.ByKey(serviceKey)
+	service, ok := p.lookupCatalog.ByKey(serviceKey)
 	return service, ok, nil
 }
 
 // ByName finds a service by display name.
 func (p StaticProvider) ByName(_ context.Context, name string) (Service, bool, error) {
-	service, ok := p.catalog.ByName(name)
+	service, ok := p.lookupCatalog.ByName(name)
 	return service, ok, nil
+}
+
+func cloneCatalog(catalog Catalog) Catalog {
+	cloned := make(Catalog, len(catalog))
+	copy(cloned, catalog)
+	return cloned
 }
 
 var discoveryTypeOrder = []Type{

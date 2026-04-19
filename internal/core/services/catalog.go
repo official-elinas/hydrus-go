@@ -1,7 +1,10 @@
 // Package services defines the bootstrap Hydrus service catalog model.
 package services
 
-import "encoding/hex"
+import (
+	"encoding/hex"
+	"strings"
+)
 
 // Type describes a Hydrus service type identifier.
 type Type int
@@ -241,6 +244,12 @@ func (c Catalog) ByKey(serviceKey string) (Service, bool) {
 func (c Catalog) ByName(name string) (Service, bool) {
 	for _, service := range c {
 		if service.Name == name {
+			return service, true
+		}
+	}
+
+	for _, service := range c {
+		if strings.EqualFold(service.Name, name) {
 			return service, true
 		}
 	}

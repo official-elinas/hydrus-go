@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -259,18 +260,20 @@ func (s *Server) handleGetService(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	service, statusCode, err := s.lookupService(r)
+	request, statusCode, err := parseServiceLookupRequest(r)
 	if err != nil {
 		writeError(w, statusCode, err.Error())
 		return
 	}
 
-	if !services.IsDiscoveryAllowed(service.Type) {
-		writeError(
-			w,
-			http.StatusBadRequest,
-			"service exists but is not available through this endpoint",
-		)
+	var service services.Service
+	if request.serviceKey != "" {
+		service, statusCode, err = s.lookupServiceByKey(r.Context(), request.serviceKey)
+	} else {
+		service, statusCode, err = s.lookupPublicServiceByName(r.Context(), request.serviceName)
+	}
+	if err != nil {
+		writeError(w, statusCode, err.Error())
 		return
 	}
 
@@ -284,46 +287,77 @@ func (s *Server) handleGetService(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) lookupService(r *http.Request) (services.Service, int, error) {
+type serviceLookupRequest struct {
+	serviceKey  string
+	serviceName string
+}
+
+func parseServiceLookupRequest(r *http.Request) (serviceLookupRequest, int, error) {
 	serviceKey := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("service_key")))
 	serviceName := strings.TrimSpace(r.URL.Query().Get("service_name"))
 
 	if serviceKey == "" && serviceName == "" {
-		return services.Service{}, http.StatusBadRequest, fmt.Errorf(
+		return serviceLookupRequest{}, http.StatusBadRequest, fmt.Errorf(
 			"service_key or service_name is required",
 		)
 	}
 
 	if serviceKey != "" {
 		if _, err := hex.DecodeString(serviceKey); err != nil {
-			return services.Service{}, http.StatusBadRequest, fmt.Errorf(
+			return serviceLookupRequest{}, http.StatusBadRequest, fmt.Errorf(
 				"invalid service_key: %w",
 				err,
 			)
 		}
-
-		service, ok, err := s.services.ByKey(r.Context(), serviceKey)
-		if err != nil {
-			return services.Service{}, http.StatusInternalServerError, fmt.Errorf(
-				"load service by key: %w",
-				err,
-			)
-		}
-
-		if !ok {
-			return services.Service{}, http.StatusNotFound, fmt.Errorf("service not found")
-		}
-
-		return service, http.StatusOK, nil
 	}
 
-	service, ok, err := s.services.ByName(r.Context(), serviceName)
+	return serviceLookupRequest{
+		serviceKey:  serviceKey,
+		serviceName: serviceName,
+	}, http.StatusOK, nil
+}
+
+func (s *Server) lookupServiceByKey(
+	ctx context.Context,
+	serviceKey string,
+) (services.Service, int, error) {
+	service, ok, err := s.services.ByKey(ctx, serviceKey)
 	if err != nil {
 		return services.Service{}, http.StatusInternalServerError, fmt.Errorf(
-			"load service by name: %w",
+			"load service by key: %w",
 			err,
 		)
 	}
+
+	if !ok {
+		return services.Service{}, http.StatusNotFound, fmt.Errorf("service not found")
+	}
+
+	if !services.IsDiscoveryAllowed(service.Type) {
+		return services.Service{}, http.StatusBadRequest, fmt.Errorf(
+			"service exists but is not available through this endpoint",
+		)
+	}
+
+	return service, http.StatusOK, nil
+}
+
+func (s *Server) lookupPublicServiceByName(
+	ctx context.Context,
+	serviceName string,
+) (services.Service, int, error) {
+	// Public service-name lookup intentionally resolves only against the
+	// discovery-visible catalog so hidden bootstrap-only services stay masked as
+	// 404 even when direct provider lookups can resolve them.
+	catalog, err := s.services.List(ctx)
+	if err != nil {
+		return services.Service{}, http.StatusInternalServerError, fmt.Errorf(
+			"load service catalog: %w",
+			err,
+		)
+	}
+
+	service, ok := catalog.ByName(serviceName)
 
 	if !ok {
 		return services.Service{}, http.StatusNotFound, fmt.Errorf("service not found")

@@ -240,6 +240,106 @@ func TestProtectedEndpoints(t *testing.T) {
 		}
 	})
 
+	t.Run("get service by visible name returns service", func(t *testing.T) {
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/get_service?service_name=repository%20updates",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", access.AccessKey())
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		service, ok := payload["service"].(map[string]any)
+		if !ok {
+			t.Fatalf("service type = %T, want map[string]any", payload["service"])
+		}
+
+		if service["name"] != "repository updates" {
+			t.Fatalf("service.name = %v, want repository updates", service["name"])
+		}
+	})
+
+	t.Run("get service by visible name is case insensitive", func(t *testing.T) {
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/get_service?service_name=RePoSiToRy%20UpDaTeS",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", access.AccessKey())
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+	})
+
+	t.Run("hidden service key returns unavailable", func(t *testing.T) {
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/get_service?service_key=636c69656e7420617069",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", access.AccessKey())
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+		}
+
+		if got := strings.TrimSpace(rr.Body.String()); got != "service exists but is not available through this endpoint" {
+			t.Fatalf("body = %q, want unavailable message", got)
+		}
+	})
+
+	t.Run("hidden service name is masked as not found", func(t *testing.T) {
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/get_service?service_name=client%20api",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", access.AccessKey())
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotFound)
+		}
+
+		if got := strings.TrimSpace(rr.Body.String()); got != "service not found" {
+			t.Fatalf("body = %q, want service not found", got)
+		}
+	})
+
+	t.Run("hidden service mixed case name stays masked", func(t *testing.T) {
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/get_service?service_name=ClIeNt%20ApI",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", access.AccessKey())
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotFound)
+		}
+	})
+
 	t.Run("file metadata requires DB-backed store", func(t *testing.T) {
 		req := httptest.NewRequest(
 			http.MethodGet,
@@ -704,6 +804,107 @@ func TestThinClientEndpoints(t *testing.T) {
 			t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
 		}
 	})
+}
+
+func TestGetService_HiddenBootstrapOnlyServices(t *testing.T) {
+	access, handler := newAccessControlledHandler(t)
+
+	tests := []struct {
+		name       string
+		path       string
+		wantStatus int
+		wantBody   string
+	}{
+		{
+			name:       "deleted from anywhere by key is unavailable",
+			path:       "/get_service?service_key=616c6c2064656c657465642066696c6573",
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "service exists but is not available through this endpoint",
+		},
+		{
+			name:       "deleted from anywhere by name is masked",
+			path:       "/get_service?service_name=deleted%20from%20anywhere",
+			wantStatus: http.StatusNotFound,
+			wantBody:   "service not found",
+		},
+		{
+			name:       "local notes by key is unavailable",
+			path:       "/get_service?service_key=6c6f63616c206e6f746573",
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "service exists but is not available through this endpoint",
+		},
+		{
+			name:       "local notes by name is masked",
+			path:       "/get_service?service_name=local%20notes",
+			wantStatus: http.StatusNotFound,
+			wantBody:   "service not found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
+			req.Header.Set("Hydrus-Client-API-Access-Key", access.AccessKey())
+			rr := httptest.NewRecorder()
+
+			handler.ServeHTTP(rr, req)
+
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("status = %d, want %d", rr.Code, tt.wantStatus)
+			}
+
+			if got := strings.TrimSpace(rr.Body.String()); got != tt.wantBody {
+				t.Fatalf("body = %q, want %q", got, tt.wantBody)
+			}
+		})
+	}
+}
+
+func TestGetServiceByNameUsesDiscoveryVisibleCatalog(t *testing.T) {
+	visibleService := services.Service{
+		Name:       "client api",
+		ServiceKey: "76697369626c6520636c69656e7420617069",
+		Type:       services.TypeLocalFileDomain,
+		TypePretty: services.TypePretty(services.TypeLocalFileDomain),
+	}
+	hiddenService := services.Service{
+		Name:       "client api",
+		ServiceKey: "636c69656e7420617069",
+		Type:       services.TypeClientAPIService,
+		TypePretty: services.TypePretty(services.TypeClientAPIService),
+	}
+
+	provider := services.NewStaticProviderWithLookupCatalog(
+		services.Catalog{visibleService},
+		services.Catalog{hiddenService, visibleService},
+	)
+	handler := newHandlerWithDeps(t, provider, nil, false)
+
+	req := httptest.NewRequest(
+		http.MethodGet,
+		"/get_service?service_name=client%20api",
+		nil,
+	)
+	req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	var payload map[string]any
+	decodeJSON(t, rr.Body.Bytes(), &payload)
+
+	service, ok := payload["service"].(map[string]any)
+	if !ok {
+		t.Fatalf("service type = %T, want map[string]any", payload["service"])
+	}
+
+	if service["service_key"] != visibleService.ServiceKey {
+		t.Fatalf("service.service_key = %v, want %q", service["service_key"], visibleService.ServiceKey)
+	}
 }
 
 func TestGetFileMetadata(t *testing.T) {

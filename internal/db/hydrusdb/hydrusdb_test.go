@@ -73,6 +73,53 @@ func TestBundleServices(t *testing.T) {
 		)
 	}
 
+	lookupTests := []struct {
+		name     string
+		query    string
+		wantName string
+		wantType services.Type
+	}{
+		{
+			name:     "exact hidden service name lookup succeeds",
+			query:    "client api",
+			wantName: "client api",
+			wantType: services.TypeClientAPIService,
+		},
+		{
+			name:     "case insensitive hidden service name lookup succeeds",
+			query:    "CLIENT API",
+			wantName: "client api",
+			wantType: services.TypeClientAPIService,
+		},
+		{
+			name:     "case insensitive visible service name lookup succeeds",
+			query:    "MY STARS",
+			wantName: "my stars",
+			wantType: services.TypeLocalRatingNumerical,
+		},
+	}
+
+	for _, tt := range lookupTests {
+		t.Run(tt.name, func(t *testing.T) {
+			service, ok, err := bundle.ByName(context.Background(), tt.query)
+			if err != nil {
+				t.Fatalf("ByName() error = %v", err)
+			}
+
+			if !ok {
+				t.Fatal("ByName() ok = false, want true")
+			}
+
+			if service.Name != tt.wantName {
+				t.Fatalf("service.Name = %q, want %q", service.Name, tt.wantName)
+			}
+
+			if service.Type != tt.wantType {
+				t.Fatalf("service.Type = %d, want %d", service.Type, tt.wantType)
+			}
+		})
+	}
+
 	ratingService, ok := catalog.ByName("my stars")
 	if !ok {
 		t.Fatal("rating service missing from discovery catalog")
@@ -140,6 +187,67 @@ func TestBundleServices(t *testing.T) {
 		t.Fatalf(
 			"favourites mixed brush = %q, want #5F5F5F",
 			favourites.Colours["mixed"].Brush,
+		)
+	}
+}
+
+func TestBundleByName_PrefersExactMatchBeforeCaseInsensitiveFallback(t *testing.T) {
+	dir, fixture := createTestBundle(t)
+	mainDB, err := sql.Open("sqlite", filepath.Join(dir, "client.db"))
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer mainDB.Close()
+
+	exactCaseKey := []byte("client-api-exact")
+	mustExec(
+		t,
+		mainDB,
+		`INSERT INTO services (service_id, service_key, service_type, name, dictionary_string) VALUES (?, ?, ?, ?, ?);`,
+		12,
+		exactCaseKey,
+		int(services.TypeClientAPIService),
+		"Client API",
+		"{}",
+	)
+
+	bundle, err := Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer func() {
+		if err := bundle.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	exactMatch, ok, err := bundle.ByName(context.Background(), "Client API")
+	if err != nil {
+		t.Fatalf("ByName(exact) error = %v", err)
+	}
+
+	if !ok {
+		t.Fatal("ByName(exact) ok = false, want true")
+	}
+
+	if exactMatch.ServiceKey != hex.EncodeToString(exactCaseKey) {
+		t.Fatalf("exactMatch.ServiceKey = %q, want %q", exactMatch.ServiceKey, hex.EncodeToString(exactCaseKey))
+	}
+
+	foldedMatch, ok, err := bundle.ByName(context.Background(), "CLIENT API")
+	if err != nil {
+		t.Fatalf("ByName(folded) error = %v", err)
+	}
+
+	if !ok {
+		t.Fatal("ByName(folded) ok = false, want true")
+	}
+
+	if foldedMatch.ServiceKey != hex.EncodeToString(fixture.clientAPIServiceKey) {
+		t.Fatalf(
+			"foldedMatch.ServiceKey = %q, want %q",
+			foldedMatch.ServiceKey,
+			hex.EncodeToString(fixture.clientAPIServiceKey),
 		)
 	}
 }
