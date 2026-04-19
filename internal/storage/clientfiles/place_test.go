@@ -5,7 +5,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 )
@@ -102,8 +101,8 @@ func TestLayoutPlaceFileFromPath(t *testing.T) {
 			t.Fatal("PlaceFileFromPath() error = nil, want error")
 		}
 
-		if !strings.Contains(err.Error(), "managed destination already exists") {
-			t.Fatalf("error = %v, want managed destination conflict", err)
+		if !errors.Is(err, ErrManagedDestinationConflict) {
+			t.Fatalf("error = %v, want ErrManagedDestinationConflict", err)
 		}
 
 		assertFileContents(t, destinationPath, []byte("image-bytes"))
@@ -136,8 +135,8 @@ func TestLayoutPlaceFileFromPath(t *testing.T) {
 			t.Fatal("PlaceFileFromPath() error = nil, want error")
 		}
 
-		if !strings.Contains(err.Error(), "managed destination already exists") {
-			t.Fatalf("error = %v, want managed destination conflict", err)
+		if !errors.Is(err, ErrManagedDestinationConflict) {
+			t.Fatalf("error = %v, want ErrManagedDestinationConflict", err)
 		}
 
 		assertFileContents(t, conflictingPath, []byte("other-bytes"))

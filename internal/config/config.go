@@ -13,40 +13,67 @@ import (
 )
 
 const (
-	defaultListenAddr      = "127.0.0.1:45869"
-	defaultAccessName      = "hydrus-go"
-	defaultLogLevel        = "info"
-	defaultShutdownTimeout = 10 * time.Second
+	defaultListenAddr       = "127.0.0.1:45869"
+	defaultAccessName       = "hydrus-go"
+	defaultLogLevel         = "info"
+	defaultShutdownTimeout  = 10 * time.Second
+	defaultBootstrapTimeout = 2 * time.Minute
 )
 
 // Config holds the bootstrap hydrus-go daemon configuration.
 type Config struct {
-	ListenAddr               string
-	DBDir                    string
-	AccessKey                string
-	AccessName               string
-	LogLevel                 string
-	ShutdownTimeout          time.Duration
-	AllowNonLocalConnections bool
-	EnableCORS               bool
+	ListenAddr                 string
+	DBDir                      string
+	EnableFreshClientBootstrap bool
+	BootstrapTimeout           time.Duration
+	AccessKey                  string
+	AccessName                 string
+	LogLevel                   string
+	ShutdownTimeout            time.Duration
+	AllowNonLocalConnections   bool
+	EnableCORS                 bool
 }
 
 // LoadFromEnv loads and validates the bootstrap daemon configuration.
 func LoadFromEnv() (Config, error) {
+	cfg, err := LoadFromEnvUnvalidated()
+	if err != nil {
+		return Config{}, err
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return Config{}, err
+	}
+
+	return cfg, nil
+}
+
+// LoadFromEnvUnvalidated loads daemon configuration from environment variables
+// without final validation, so higher-precedence runtime overrides can be
+// applied before checks run.
+func LoadFromEnvUnvalidated() (Config, error) {
 	cfg := Config{
-		ListenAddr:               getEnv("HYDRUS_GO_LISTEN_ADDR", defaultListenAddr),
-		DBDir:                    strings.TrimSpace(os.Getenv("HYDRUS_GO_DB_DIR")),
-		AccessKey:                strings.TrimSpace(os.Getenv("HYDRUS_GO_ACCESS_KEY")),
-		AccessName:               getEnv("HYDRUS_GO_ACCESS_NAME", defaultAccessName),
-		LogLevel:                 getEnv("HYDRUS_GO_LOG_LEVEL", defaultLogLevel),
-		ShutdownTimeout:          defaultShutdownTimeout,
-		AllowNonLocalConnections: false,
-		EnableCORS:               false,
+		ListenAddr:                 getEnv("HYDRUS_GO_LISTEN_ADDR", defaultListenAddr),
+		DBDir:                      strings.TrimSpace(os.Getenv("HYDRUS_GO_DB_DIR")),
+		EnableFreshClientBootstrap: false,
+		BootstrapTimeout:           defaultBootstrapTimeout,
+		AccessKey:                  strings.TrimSpace(os.Getenv("HYDRUS_GO_ACCESS_KEY")),
+		AccessName:                 getEnv("HYDRUS_GO_ACCESS_NAME", defaultAccessName),
+		LogLevel:                   getEnv("HYDRUS_GO_LOG_LEVEL", defaultLogLevel),
+		ShutdownTimeout:            defaultShutdownTimeout,
+		AllowNonLocalConnections:   false,
+		EnableCORS:                 false,
 	}
 
 	if cfg.DBDir != "" {
 		cfg.DBDir = filepath.Clean(cfg.DBDir)
 	}
+
+	enableFreshClientBootstrap, err := getFreshBootstrapEnabled()
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.EnableFreshClientBootstrap = enableFreshClientBootstrap
 
 	allowNonLocal, err := getEnvBool(
 		"HYDRUS_GO_ALLOW_NON_LOCAL_CONNECTIONS",
@@ -72,17 +99,27 @@ func LoadFromEnv() (Config, error) {
 	}
 	cfg.ShutdownTimeout = shutdownTimeout
 
+	bootstrapTimeout, err := getEnvDuration(
+		"HYDRUS_GO_BOOTSTRAP_TIMEOUT",
+		defaultBootstrapTimeout,
+	)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.BootstrapTimeout = bootstrapTimeout
+
 	normalizedAccessKey, err := normalizeOptionalAccessKey(cfg.AccessKey)
 	if err != nil {
 		return Config{}, err
 	}
 	cfg.AccessKey = normalizedAccessKey
 
-	if err := cfg.validate(); err != nil {
-		return Config{}, err
-	}
-
 	return cfg, nil
+}
+
+// Validate applies the final daemon configuration checks.
+func (c Config) Validate() error {
+	return c.validate()
 }
 
 func (c Config) validate() error {
@@ -94,13 +131,29 @@ func (c Config) validate() error {
 		return fmt.Errorf("shutdown timeout must be greater than zero")
 	}
 
+	if c.EnableFreshClientBootstrap {
+		if strings.TrimSpace(c.DBDir) == "" {
+			return fmt.Errorf("HYDRUS_GO_DB_DIR is required when fresh-client bootstrap is enabled")
+		}
+
+		if c.BootstrapTimeout <= 0 {
+			return fmt.Errorf("bootstrap timeout must be greater than zero")
+		}
+	}
+
 	if c.DBDir != "" {
 		info, err := os.Stat(c.DBDir)
 		if err != nil {
-			return fmt.Errorf("stat HYDRUS_GO_DB_DIR: %w", err)
+			if os.IsNotExist(err) && c.EnableFreshClientBootstrap {
+				info = nil
+			} else {
+				return fmt.Errorf("stat HYDRUS_GO_DB_DIR: %w", err)
+			}
 		}
 
-		if !info.IsDir() {
+		if info == nil {
+			// fresh bootstrap is allowed to create the directory on first start
+		} else if !info.IsDir() {
 			return fmt.Errorf("HYDRUS_GO_DB_DIR must be a directory")
 		}
 	}
@@ -133,12 +186,28 @@ func getEnv(key, fallback string) string {
 	return value
 }
 
+func getFreshBootstrapEnabled() (bool, error) {
+	if raw := strings.TrimSpace(os.Getenv("HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP")); raw != "" {
+		return parseEnvBool("HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP", raw)
+	}
+
+	if raw := strings.TrimSpace(os.Getenv("HYDRUS_GO_ENABLE_PYTHON_FRESH_CLIENT_BOOTSTRAP")); raw != "" {
+		return parseEnvBool("HYDRUS_GO_ENABLE_PYTHON_FRESH_CLIENT_BOOTSTRAP", raw)
+	}
+
+	return false, nil
+}
+
 func getEnvBool(key string, fallback bool) (bool, error) {
 	raw := strings.TrimSpace(os.Getenv(key))
 	if raw == "" {
 		return fallback, nil
 	}
 
+	return parseEnvBool(key, raw)
+}
+
+func parseEnvBool(key string, raw string) (bool, error) {
 	value, err := strconv.ParseBool(raw)
 	if err != nil {
 		return false, fmt.Errorf("parse %s: %w", key, err)

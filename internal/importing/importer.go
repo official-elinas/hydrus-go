@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
 	"github.com/official-elinas/hydrus-go/internal/core/mimes"
 	"github.com/official-elinas/hydrus-go/internal/db/hydrusdb"
 	"github.com/official-elinas/hydrus-go/internal/storage/clientfiles"
@@ -44,8 +46,9 @@ type Result struct {
 // Importer composes managed file placement with the minimal Hydrus DB write
 // path.
 type Importer struct {
-	bundle *hydrusdb.Bundle
-	layout clientfiles.Layout
+	bundle           *hydrusdb.Bundle
+	defaultLayout    clientfiles.Layout
+	useManagedLayout bool
 }
 
 // NewImporter constructs an internal prepared-file importer.
@@ -62,21 +65,26 @@ func NewImporter(bundle *hydrusdb.Bundle, layout clientfiles.Layout) (*Importer,
 		return nil, fmt.Errorf("managed client_files prefix length must be greater than zero")
 	}
 
-	return &Importer{bundle: bundle, layout: layout}, nil
+	return &Importer{bundle: bundle, defaultLayout: layout}, nil
 }
 
 // NewDefaultImporter constructs an importer with the default Hydrus
 // `client_files` root derived from the bundle DB directory.
 func NewDefaultImporter(bundle *hydrusdb.Bundle, dbDir string) (*Importer, error) {
-	layout, err := clientfiles.NewLayout(
-		clientfiles.DefaultRoot(dbDir),
+	layout, err := clientfiles.NewSplitLayout(
+		clientfiles.DefaultFileRoot(dbDir),
+		clientfiles.DefaultThumbnailRoot(dbDir),
 		clientfiles.DefaultPrefixLength,
 	)
 	if err != nil {
 		return nil, err
 	}
 
-	return NewImporter(bundle, layout)
+	return &Importer{
+		bundle:           bundle,
+		defaultLayout:    layout,
+		useManagedLayout: true,
+	}, nil
 }
 
 // ImportPreparedFile performs the first internal import checkpoint: place a
@@ -102,7 +110,12 @@ func (i *Importer) ImportPreparedFile(
 		)
 	}
 
-	placement, err := i.layout.PlaceFileFromPath(
+	layout, err := i.managedLayout(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+
+	placement, err := layout.PlaceFileFromPath(
 		prepared.SourcePath,
 		prepared.HashHex,
 		mimeInfo.Ext,
@@ -150,6 +163,23 @@ func (i *Importer) ImportPreparedFile(
 	}, nil
 }
 
+func (i *Importer) managedLayout(ctx context.Context) (clientfiles.Layout, error) {
+	if i == nil {
+		return clientfiles.Layout{}, fmt.Errorf("importer is nil")
+	}
+
+	if !i.useManagedLayout {
+		return i.defaultLayout, nil
+	}
+
+	layout, err := i.bundle.ManagedLayout(ctx)
+	if err != nil {
+		return clientfiles.Layout{}, fmt.Errorf("load managed storage layout: %w", err)
+	}
+
+	return layout, nil
+}
+
 func (i *Importer) cleanupFailedPlacement(
 	ctx context.Context,
 	hashHex string,
@@ -169,4 +199,35 @@ func (i *Importer) cleanupFailedPlacement(
 	}
 
 	return nil
+}
+
+func (i *Importer) finalizeImportedFile(
+	ctx context.Context,
+	result Result,
+	hashHex string,
+	mimeEnum int,
+) fileimport.Result {
+	thumbnailCtx, cancelThumbnail := context.WithTimeout(
+		context.WithoutCancel(ctx),
+		20*time.Second,
+	)
+	defer cancelThumbnail()
+
+	if err := i.ensureManagedThumbnail(
+		thumbnailCtx,
+		result.ManagedPath,
+		hashHex,
+		mimeEnum,
+	); err != nil {
+		// Best-effort for the thin-client prototype: the import is already durable,
+		// and a missing thumbnail should not turn a successful import into a
+		// failed one.
+	}
+
+	return fileimport.Result{
+		FileID:                    result.FileID,
+		Hash:                      hashHex,
+		AlreadyImported:           result.AlreadyImported,
+		ManagedFileAlreadyPresent: result.ManagedFileAlreadyPresent,
+	}
 }

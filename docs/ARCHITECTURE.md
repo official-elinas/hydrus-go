@@ -44,7 +44,7 @@ Over time, the daemon is expected to absorb:
 
 ## What is not a primary target
 
-- a direct port of the legacy Hydrus desktop UI
+- a direct first-pass port of the legacy Hydrus desktop UI
 - legacy Hydrus Server parity
 
 The migration is centered on daemon ownership of a local library backend, not a
@@ -63,7 +63,7 @@ The `hydrusdb` package now also includes the first internal write foundation:
 - an explicit writable bundle open path for future import/mutation work
 - a serialized `BEGIN IMMEDIATE` transaction runner
 - fixture-backed proof of commit, rollback, and queued-write behavior
-- no public write API yet; the daemon runtime still opens the bundle read-only today
+- the daemon runtime now uses a separate writable bundle for public local-path imports while keeping reads on a read-only bundle
 
 The storage layer now also has a dedicated managed-files package:
 
@@ -78,11 +78,13 @@ The project now also has a small import-composition layer:
 - it places the file into managed `client_files`
 - it records the minimal Hydrus DB state through `Bundle.RecordPreparedLocalImport(...)`
 - it removes a newly placed managed file on DB failure as a best-effort cleanup step
-- it remains internal-only; there is still no public HTTP import endpoint or runtime write wiring yet
+- it now also powers the first public daemon-local import endpoint for the thin client MVP
 
 The DB-backed layer currently:
 
 - optionally opens a real Hydrus client DB bundle via `HYDRUS_GO_DB_DIR`
+- optionally bootstraps a fresh canonical client bundle natively in Go before
+  Go opens the bundle
 - attaches the external DBs on a single SQLite connection
 - keeps that connection read-only with `PRAGMA query_only = ON`
 - serves DB-backed service discovery
@@ -102,6 +104,43 @@ The current full/default metadata subset includes:
 - transparency/EXIF/human-readable/ICC metadata flags
 - explicit rejection of `include_notes=true` and `detailed_url_information=true`
 
+The current daemon startup flow for bundle-backed mode is:
+
+1. load config and runtime overrides
+2. inspect `HYDRUS_GO_DB_DIR`
+3. if fresh bootstrap is enabled and the target directory is missing, create it
+4. classify the bundle state as one of:
+   - `ready`
+   - `empty`
+   - `partial`
+   - `non-empty without bundle`
+5. only the `empty` state is eligible for fresh bootstrap
+6. if bootstrap runs, seed a native Go empty bundle with the canonical DB files,
+   `client.temp.db`, default managed-storage metadata, and the current built-in
+   service seed required by hydrus-go
+7. open the resulting bundle from Go and continue with normal read/write wiring
+
+Important boundary for this phase:
+
+- the fresh client bundle is now seeded by a narrow native Go
+  schema/bootstrap path aimed at current hydrus-go runtime expectations
+- that seed is now a little closer to a real Hydrus first-start bundle:
+  - service-list-visible built-ins now include `downloader tags` and
+    `favourites`
+  - `downloader tags` expands the grouped `local_tags` bucket, while
+    `favourites` remains visible through `services` / `services_v2` without a
+    new grouped rating bucket, matching current Hydrus behavior
+  - `favourites` now uses a real Hydrus-style rating dictionary seed so
+    discovery payloads expose the expected star-shape and colour metadata
+  - `version` is seeded to the current Hydrus compatibility target
+  - default managed `client_files` storage metadata and root are created
+  - a small hidden built-in service set is present (`deleted from anywhere`,
+    `local notes`, `client api`)
+- this first native slice intentionally targets the current Go feature set, not
+  full upstream Hydrus bootstrap parity yet
+- `hydrus-go` currently fails fast on partial or otherwise invalid bundle
+  directories instead of trying to repair or overwrite them
+
 The first internal import checkpoint now proves that a caller-prepared local file
 can:
 
@@ -109,17 +148,56 @@ can:
 - be recorded in the Hydrus bundle with serialized `BEGIN IMMEDIATE` writes
 - round-trip immediately through the existing metadata readers
 
-That checkpoint intentionally stops short of:
+That original internal checkpoint started without:
 
 - hashing or MIME sniffing the source file
 - thumbnail generation
 - public HTTP write endpoints
 - runtime daemon write enablement
 
+Those gaps are now partially closed by the public local-path import slice, which
+adds:
+
+- daemon-local hashing and MIME detection for `POST /v1/import/local_file`
+- runtime write enablement through a separate writable bundle when available
+- best-effort managed thumbnail generation for imported JPEG/PNG/GIF still images
+
+The project now also has the first thin-client-oriented browse surface:
+
+- `GET /v1/library/recent` for paged recent local file browsing
+- `GET /v1/files/content` for original-file streaming
+- `GET /v1/files/thumbnail` for managed thumbnail streaming when available
+- `POST /v1/files/trash` for moving one file into the local trash domain
+- `POST /v1/import/local_file` for single-file daemon-local imports
+
+These endpoints are intentionally thin-client-oriented rather than strict Hydrus
+Client API parity. They exist to validate local add/trash/browse workflows
+before the project expands into richer public write APIs and PTR sync.
+
+The planned desktop direction is now:
+
+- a thin Fyne prototype surfaced through `cmd/hydrus-desktop` and documented in `desktop/fyne/`
+- daemon remains the owner of SQLite, `client_files`, imports, and later PTR sync
+- the first client milestone stays closer to a simple image-browser shell than to full Hydrus workstation parity
+- the prototype is specifically meant to exercise `hydrusd` browse/add/trash behavior, selected-file metadata, and original-file serving, not to be a general-purpose Hydrus replacement yet
+
+The current selected-file preview behavior is intentionally narrow:
+
+- the desktop client uses `GET /v1/files/content` for selected JPEG/PNG/GIF items only
+- preview requests are bounded to 16 MiB payloads, 8192px maximum dimension, and 16,000,000 decoded pixels
+- those limits are deliberate thin-client safety rails so manual LAN testing can validate original-file serving without turning the prototype into an unrestricted media viewer
+
+The runtime storage/DB model for this phase is:
+
+- one read bundle opened with `PRAGMA query_only = ON`
+- one separate writable bundle used for public import and trash mutations when writable access is available
+- browse/metadata/asset handlers talk to the read bundle so they only observe committed state
+
 The deeper Hydrus client-core behaviors are still pending:
 
 - full media-result metadata parity, especially tags/ratings/viewing stats/notes/detailed URL info
-- broader DB-backed import orchestration beyond the prepared-file internal slice, especially hashing/sniffing, thumbnail generation, and a public write surface
+- broader DB-backed import orchestration beyond the single local-path slice, especially richer upload/batch flows and richer import metadata capture
+- thumbnail generation for additional media types beyond the current JPEG/PNG/GIF still-image subset
 - file serving and broader managed file-store lifecycle behavior
 - search/tagging engine behavior
 - richer stateful background processing

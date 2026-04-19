@@ -98,6 +98,57 @@ func TestLayoutResolvePaths(t *testing.T) {
 		}
 	})
 
+	t.Run("resolves split thumbnail root independently", func(t *testing.T) {
+		splitLayout, err := NewSplitLayout(
+			"/library/client_files",
+			"/library/thumbnails",
+			DefaultPrefixLength,
+		)
+		if err != nil {
+			t.Fatalf("NewSplitLayout() error = %v", err)
+		}
+
+		path, err := splitLayout.ResolveThumbnailPath(hash)
+		if err != nil {
+			t.Fatalf("ResolveThumbnailPath() error = %v", err)
+		}
+
+		expected := filepath.Join("/library/thumbnails", "tab", hash+".thumbnail")
+		if path != expected {
+			t.Fatalf("path = %q, want %q", path, expected)
+		}
+	})
+
+	t.Run("resolves DB-driven prefix roots", func(t *testing.T) {
+		prefixLayout, err := NewPrefixLayout(DefaultPrefixLength, map[string]string{
+			"fab": "/remote/client_files",
+			"tab": "/local/thumbnails",
+		})
+		if err != nil {
+			t.Fatalf("NewPrefixLayout() error = %v", err)
+		}
+
+		filePath, err := prefixLayout.ResolveFilePath(hash, ".png")
+		if err != nil {
+			t.Fatalf("ResolveFilePath() error = %v", err)
+		}
+
+		wantFilePath := filepath.Join("/remote/client_files", "fab", hash+".png")
+		if filePath != wantFilePath {
+			t.Fatalf("filePath = %q, want %q", filePath, wantFilePath)
+		}
+
+		thumbnailPath, err := prefixLayout.ResolveThumbnailPath(hash)
+		if err != nil {
+			t.Fatalf("ResolveThumbnailPath() error = %v", err)
+		}
+
+		wantThumbnailPath := filepath.Join("/local/thumbnails", "tab", hash+".thumbnail")
+		if thumbnailPath != wantThumbnailPath {
+			t.Fatalf("thumbnailPath = %q, want %q", thumbnailPath, wantThumbnailPath)
+		}
+	})
+
 	t.Run("resolves thumbnail path at default granularity", func(t *testing.T) {
 		path, err := layout.ResolveThumbnailPath(hash)
 		if err != nil {
@@ -168,6 +219,14 @@ func TestDefaultRoot(t *testing.T) {
 	}
 }
 
+func TestDefaultThumbnailRoot(t *testing.T) {
+	root := DefaultThumbnailRoot(" /hydrus/db/../db ")
+	expected := filepath.Join(filepath.Dir(filepath.Clean("/hydrus/db/../db")), "thumbnails")
+	if root != expected {
+		t.Fatalf("root = %q, want %q", root, expected)
+	}
+}
+
 func TestNewLayout(t *testing.T) {
 	t.Run("cleans root path", func(t *testing.T) {
 		layout, err := NewLayout("/hydrus/db/../db/client_files/", 2)
@@ -196,6 +255,22 @@ func TestNewLayout(t *testing.T) {
 	t.Run("rejects oversized prefix length", func(t *testing.T) {
 		if _, err := NewLayout("/hydrus/db/client_files", 65); err == nil {
 			t.Fatal("NewLayout() error = nil, want error")
+		}
+	})
+
+	t.Run("rejects empty thumbnail root in split layout", func(t *testing.T) {
+		if _, err := NewSplitLayout("/hydrus/db/client_files", "", 2); err == nil {
+			t.Fatal("NewSplitLayout() error = nil, want error")
+		}
+	})
+
+	t.Run("rejects invalid DB prefix layouts", func(t *testing.T) {
+		if _, err := NewPrefixLayout(2, map[string]string{"zzz": "/hydrus/db/client_files"}); err == nil {
+			t.Fatal("NewPrefixLayout() error = nil, want error")
+		}
+
+		if _, err := NewPrefixLayout(2, map[string]string{}); err == nil {
+			t.Fatal("NewPrefixLayout(empty) error = nil, want error")
 		}
 	})
 }

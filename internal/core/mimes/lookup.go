@@ -2,6 +2,8 @@
 // responses.
 package mimes
 
+import "strings"
+
 // Info is the Hydrus-facing metadata for a MIME enum.
 type Info struct {
 	Human    string
@@ -30,6 +32,22 @@ func Lookup(mime int) Info {
 	}
 
 	return info
+}
+
+// FromMIMEType resolves a supported import MIME type into the closest Hydrus
+// filetype enum used by the current migration slices.
+func FromMIMEType(value string) (int, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	mime, ok := importMIMETypeLookup[normalized]
+	return mime, ok
+}
+
+// FromExtension resolves a supported file extension into the closest Hydrus
+// filetype enum used by the current migration slices.
+func FromExtension(value string) (int, bool) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	mime, ok := importExtensionLookup[normalized]
+	return mime, ok
 }
 
 var humanLookup = map[int]string{
@@ -298,4 +316,41 @@ var extLookup = map[int]string{
 	89:  ".ora",
 	100: ".bin",
 	101: "",
+}
+
+var importMIMETypeLookup = map[string]int{
+	"application/pdf": 10,
+	"application/zip": 11,
+	"audio/flac":      16,
+	"audio/mpeg":      13,
+	"audio/mp3":       13,
+	"audio/wav":       46,
+	"image/bmp":       4,
+	"image/gif":       3,
+	"image/jpeg":      1,
+	"image/png":       2,
+	"image/svg+xml":   56,
+	"image/webp":      33,
+	"text/plain":      30,
+	"video/mp4":       14,
+	"video/webm":      21,
+}
+
+var importExtensionLookup = map[string]int{
+	".bmp":  4,
+	".flac": 16,
+	".gif":  3,
+	".jpeg": 1,
+	".jpg":  1,
+	".mkv":  20,
+	".mp3":  13,
+	".mp4":  14,
+	".pdf":  10,
+	".png":  2,
+	".svg":  56,
+	".txt":  30,
+	".wav":  46,
+	".webm": 21,
+	".webp": 33,
+	".zip":  11,
 }

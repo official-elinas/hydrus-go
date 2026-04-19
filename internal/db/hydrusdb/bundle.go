@@ -12,8 +12,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/official-elinas/hydrus-go/internal/core/services"
+	"github.com/official-elinas/hydrus-go/internal/storage/clientfiles"
 	_ "modernc.org/sqlite"
 )
 
@@ -38,6 +40,10 @@ type Bundle struct {
 	mode      openMode
 	writeGate chan struct{}
 	paths     bundlePaths
+
+	managedLayoutMu  sync.RWMutex
+	managedLayout    clientfiles.Layout
+	hasManagedLayout bool
 }
 
 type bundlePaths struct {
@@ -208,24 +214,20 @@ func (b *Bundle) ByName(
 	ctx context.Context,
 	name string,
 ) (services.Service, bool, error) {
-	row := b.conn.QueryRowContext(
+	service, ok, err := b.lookupServiceByName(
 		ctx,
 		`SELECT lower(hex(service_key)), service_type, name
 		FROM main.services
-		WHERE name = ?`,
+		WHERE name = ?
+		ORDER BY service_id ASC
+		LIMIT 1`,
 		name,
 	)
-
-	service, err := scanService(row)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return services.Service{}, false, nil
-		}
-
-		return services.Service{}, false, err
+	if err != nil || ok {
+		return service, ok, err
 	}
 
-	return service, true, nil
+	return b.lookupCaseInsensitiveServiceByName(ctx, name)
 }
 
 type scanner interface {
@@ -277,6 +279,61 @@ func scanService(s scanner) (services.Service, error) {
 		Type:       services.Type(serviceType),
 		TypePretty: services.TypePretty(services.Type(serviceType)),
 	}, nil
+}
+
+func (b *Bundle) lookupServiceByName(
+	ctx context.Context,
+	query string,
+	name string,
+) (services.Service, bool, error) {
+	row := b.conn.QueryRowContext(ctx, query, name)
+
+	service, err := scanService(row)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return services.Service{}, false, nil
+		}
+
+		return services.Service{}, false, err
+	}
+
+	return service, true, nil
+}
+
+func (b *Bundle) lookupCaseInsensitiveServiceByName(
+	ctx context.Context,
+	name string,
+) (services.Service, bool, error) {
+	// Scan in service_id order so the folded fallback stays deterministic and
+	// matches Go's Unicode-aware EqualFold semantics rather than SQLite's
+	// ASCII-oriented NOCASE collation.
+	rows, err := b.conn.QueryContext(
+		ctx,
+		`SELECT lower(hex(service_key)), service_type, name
+		FROM main.services
+		ORDER BY service_id ASC`,
+	)
+	if err != nil {
+		return services.Service{}, false, fmt.Errorf("query services by name: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		service, err := scanService(rows)
+		if err != nil {
+			return services.Service{}, false, err
+		}
+
+		if strings.EqualFold(service.Name, name) {
+			return service, true, nil
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return services.Service{}, false, fmt.Errorf("iterate services by name: %w", err)
+	}
+
+	return services.Service{}, false, nil
 }
 
 func resolveBundlePaths(dir string) (bundlePaths, error) {

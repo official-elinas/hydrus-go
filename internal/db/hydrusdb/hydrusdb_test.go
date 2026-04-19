@@ -13,6 +13,7 @@ import (
 
 	"github.com/official-elinas/hydrus-go/internal/core/filemetadata"
 	"github.com/official-elinas/hydrus-go/internal/core/services"
+	"github.com/official-elinas/hydrus-go/internal/storage/clientfiles"
 )
 
 func TestBundleServices(t *testing.T) {
@@ -33,12 +34,16 @@ func TestBundleServices(t *testing.T) {
 		t.Fatalf("List() error = %v", err)
 	}
 
-	if len(catalog) != 7 {
-		t.Fatalf("len(catalog) = %d, want 7", len(catalog))
+	if len(catalog) != 9 {
+		t.Fatalf("len(catalog) = %d, want 9", len(catalog))
 	}
 
 	if catalog[0].Name != "my tags" {
 		t.Fatalf("catalog[0].Name = %q, want my tags", catalog[0].Name)
+	}
+
+	if catalog[1].Name != "downloader tags" {
+		t.Fatalf("catalog[1].Name = %q, want downloader tags", catalog[1].Name)
 	}
 
 	if _, ok := catalog.ByName("client api"); ok {
@@ -69,6 +74,53 @@ func TestBundleServices(t *testing.T) {
 		)
 	}
 
+	lookupTests := []struct {
+		name     string
+		query    string
+		wantName string
+		wantType services.Type
+	}{
+		{
+			name:     "exact hidden service name lookup succeeds",
+			query:    "client api",
+			wantName: "client api",
+			wantType: services.TypeClientAPIService,
+		},
+		{
+			name:     "case insensitive hidden service name lookup succeeds",
+			query:    "CLIENT API",
+			wantName: "client api",
+			wantType: services.TypeClientAPIService,
+		},
+		{
+			name:     "case insensitive visible service name lookup succeeds",
+			query:    "MY STARS",
+			wantName: "my stars",
+			wantType: services.TypeLocalRatingNumerical,
+		},
+	}
+
+	for _, tt := range lookupTests {
+		t.Run(tt.name, func(t *testing.T) {
+			service, ok, err := bundle.ByName(context.Background(), tt.query)
+			if err != nil {
+				t.Fatalf("ByName() error = %v", err)
+			}
+
+			if !ok {
+				t.Fatal("ByName() ok = false, want true")
+			}
+
+			if service.Name != tt.wantName {
+				t.Fatalf("service.Name = %q, want %q", service.Name, tt.wantName)
+			}
+
+			if service.Type != tt.wantType {
+				t.Fatalf("service.Type = %d, want %d", service.Type, tt.wantType)
+			}
+		})
+	}
+
 	ratingService, ok := catalog.ByName("my stars")
 	if !ok {
 		t.Fatal("rating service missing from discovery catalog")
@@ -91,6 +143,112 @@ func TestBundleServices(t *testing.T) {
 		t.Fatalf(
 			"legacy like pen = %q, want #010203",
 			legacy.Colours["like"].Pen,
+		)
+	}
+
+	favourites, ok := catalog.ByName("favourites")
+	if !ok {
+		t.Fatal("favourites service missing from discovery catalog")
+	}
+
+	if favourites.StarShape != "fat star" {
+		t.Fatalf("favourites.StarShape = %q, want fat star", favourites.StarShape)
+	}
+
+	if favourites.ShowInThumbnail == nil || *favourites.ShowInThumbnail {
+		t.Fatal("favourites.ShowInThumbnail missing or true, want explicit false")
+	}
+
+	if favourites.ShowInThumbnailEvenWhenNull == nil || *favourites.ShowInThumbnailEvenWhenNull {
+		t.Fatal("favourites.ShowInThumbnailEvenWhenNull missing or true, want explicit false")
+	}
+
+	if favourites.Colours["like"].Brush != "#F0F041" {
+		t.Fatalf(
+			"favourites like brush = %q, want #F0F041",
+			favourites.Colours["like"].Brush,
+		)
+	}
+
+	if favourites.Colours["dislike"].Brush != "#C85078" {
+		t.Fatalf(
+			"favourites dislike brush = %q, want #C85078",
+			favourites.Colours["dislike"].Brush,
+		)
+	}
+
+	if favourites.Colours["null"].Brush != "#BFBFBF" {
+		t.Fatalf(
+			"favourites null brush = %q, want #BFBFBF",
+			favourites.Colours["null"].Brush,
+		)
+	}
+
+	if favourites.Colours["mixed"].Brush != "#5F5F5F" {
+		t.Fatalf(
+			"favourites mixed brush = %q, want #5F5F5F",
+			favourites.Colours["mixed"].Brush,
+		)
+	}
+}
+
+func TestBundleByName_PrefersExactMatchBeforeCaseInsensitiveFallback(t *testing.T) {
+	dir, fixture := createTestBundle(t)
+	mainDB, err := sql.Open("sqlite", filepath.Join(dir, "client.db"))
+	if err != nil {
+		t.Fatalf("sql.Open() error = %v", err)
+	}
+	defer mainDB.Close()
+
+	exactCaseKey := []byte("client-api-exact")
+	mustExec(
+		t,
+		mainDB,
+		`INSERT INTO services (service_id, service_key, service_type, name, dictionary_string) VALUES (?, ?, ?, ?, ?);`,
+		12,
+		exactCaseKey,
+		int(services.TypeClientAPIService),
+		"Client API",
+		"{}",
+	)
+
+	bundle, err := Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer func() {
+		if err := bundle.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	exactMatch, ok, err := bundle.ByName(context.Background(), "Client API")
+	if err != nil {
+		t.Fatalf("ByName(exact) error = %v", err)
+	}
+
+	if !ok {
+		t.Fatal("ByName(exact) ok = false, want true")
+	}
+
+	if exactMatch.ServiceKey != hex.EncodeToString(exactCaseKey) {
+		t.Fatalf("exactMatch.ServiceKey = %q, want %q", exactMatch.ServiceKey, hex.EncodeToString(exactCaseKey))
+	}
+
+	foldedMatch, ok, err := bundle.ByName(context.Background(), "CLIENT API")
+	if err != nil {
+		t.Fatalf("ByName(folded) error = %v", err)
+	}
+
+	if !ok {
+		t.Fatal("ByName(folded) ok = false, want true")
+	}
+
+	if foldedMatch.ServiceKey != hex.EncodeToString(fixture.clientAPIServiceKey) {
+		t.Fatalf(
+			"foldedMatch.ServiceKey = %q, want %q",
+			foldedMatch.ServiceKey,
+			hex.EncodeToString(fixture.clientAPIServiceKey),
 		)
 	}
 }
@@ -797,6 +955,17 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 			[[0,"show_fraction_beside_stars"],[0,0]]
 		]
 	]`
+	favouritesDictionary := `[
+		21,
+		2,
+		[
+			[[0,"colours"],[2,[26,3,[[0,[0,[[0,0,0],[240,240,65]]]],[0,[1,[[0,0,0],[200,80,120]]]],[0,[2,[[0,0,0],[191,191,191]]]],[0,[4,[[0,0,0],[95,95,95]]]]]]]],
+			[[0,"show_in_thumbnail"],[0,false]],
+			[[0,"show_in_thumbnail_even_when_null"],[0,false]],
+			[[0,"shape"],[0,2]],
+			[[0,"rating_svg"],[0,null]]
+		]
+	]`
 
 	localTagKey := []byte("local-tags")
 	localFilesKey := []byte("local-files")
@@ -806,6 +975,8 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 	trashKey := []byte("trash")
 	ipfsKey := []byte("my-ipfs")
 	clientAPIKey := []byte("client-api")
+	downloaderTagsKey := []byte("downloader tags")
+	favouritesKey := []byte("favourites")
 
 	mainDB := openSQLiteForTest(t, mainPath)
 	defer mainDB.Close()
@@ -849,6 +1020,11 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 	mustExec(t, mainDB, `CREATE TABLE has_exif (hash_id INTEGER PRIMARY KEY);`)
 	mustExec(t, mainDB, `CREATE TABLE has_human_readable_embedded_metadata (hash_id INTEGER PRIMARY KEY);`)
 	mustExec(t, mainDB, `CREATE TABLE has_icc_profile (hash_id INTEGER PRIMARY KEY);`)
+	mustExec(t, mainDB, `CREATE TABLE current_client_files_locations (location_id INTEGER PRIMARY KEY, location TEXT UNIQUE);`)
+	mustExec(t, mainDB, `CREATE TABLE client_files_subfolders (prefix TEXT, location_id INTEGER, PRIMARY KEY (prefix, location_id));`)
+	mustExec(t, mainDB, `CREATE TABLE ideal_client_files_locations (location_id INTEGER PRIMARY KEY, weight INTEGER, max_num_bytes INTEGER);`)
+	mustExec(t, mainDB, `CREATE TABLE ideal_thumbnail_override_location (location_id INTEGER);`)
+	mustExec(t, mainDB, `CREATE TABLE current_storage_granularity (granularity INTEGER);`)
 	mustExec(t, mainDB, `CREATE TABLE current_files_2 (hash_id INTEGER PRIMARY KEY, timestamp_ms INTEGER);`)
 	mustExec(t, mainDB, `CREATE TABLE current_files_3 (hash_id INTEGER PRIMARY KEY, timestamp_ms INTEGER);`)
 	mustExec(t, mainDB, `CREATE TABLE current_files_4 (hash_id INTEGER PRIMARY KEY, timestamp_ms INTEGER);`)
@@ -857,11 +1033,12 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 	mustExec(t, mainDB, `CREATE TABLE deleted_files_4 (hash_id INTEGER PRIMARY KEY, timestamp_ms INTEGER, original_timestamp_ms INTEGER);`)
 	mustExec(t, mainDB, `CREATE TABLE current_files_6 (hash_id INTEGER PRIMARY KEY, timestamp_ms INTEGER);`)
 	mustExec(t, mainDB, `CREATE TABLE current_files_8 (hash_id INTEGER PRIMARY KEY, timestamp_ms INTEGER);`)
+	seedHydrusDBTestStorage(t, mainDB, dir)
 
 	mustExec(
 		t,
 		mainDB,
-		`INSERT INTO services (service_id, service_key, service_type, name, dictionary_string) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?);`,
+		`INSERT INTO services (service_id, service_key, service_type, name, dictionary_string) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?);`,
 		1, localTagKey, int(services.TypeLocalTag), "my tags", "{}",
 		2, localFilesKey, int(services.TypeLocalFileDomain), "my files", "{}",
 		3, hydrusLocalFilesKey, int(services.TypeHydrusLocalFileStorage), "all local files", "{}",
@@ -871,6 +1048,8 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 		7, []byte("my-stars"), int(services.TypeLocalRatingNumerical), "my stars", ratingDictionary,
 		8, ipfsKey, int(services.TypeIPFS), "my ipfs", "{}",
 		9, clientAPIKey, int(services.TypeClientAPIService), "client api", "{}",
+		10, downloaderTagsKey, int(services.TypeLocalTag), "downloader tags", "{}",
+		11, favouritesKey, int(services.TypeLocalRatingLike), "favourites", favouritesDictionary,
 	)
 	mustExec(
 		t,
@@ -1030,6 +1209,52 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 		combinedLocalMediaServiceKeyHex: hex.EncodeToString(combinedLocalMediaKey),
 		ipfsServiceKeyHex:               hex.EncodeToString(ipfsKey),
 	}
+}
+
+func seedHydrusDBTestStorage(t *testing.T, db *sql.DB, dbDir string) {
+	t.Helper()
+
+	fileRoot := clientfiles.DefaultFileRoot(dbDir)
+	thumbnailRoot := clientfiles.DefaultThumbnailRoot(dbDir)
+
+	mustExec(t, db, `INSERT INTO current_storage_granularity (granularity) VALUES (?);`, clientfiles.DefaultPrefixLength)
+	mustExec(t, db, `INSERT INTO current_client_files_locations (location_id, location) VALUES (?, ?), (?, ?);`, 1, fileRoot, 2, thumbnailRoot)
+	mustExec(t, db, `INSERT INTO ideal_client_files_locations (location_id, weight, max_num_bytes) VALUES (?, ?, NULL);`, 1, 1)
+	mustExec(t, db, `INSERT INTO ideal_thumbnail_override_location (location_id) VALUES (?);`, 2)
+
+	for _, prefix := range hydrusDBTestStoragePrefixes(clientfiles.KindFile, clientfiles.DefaultPrefixLength) {
+		mustExec(t, db, `INSERT INTO client_files_subfolders (prefix, location_id) VALUES (?, ?);`, prefix, 1)
+	}
+
+	for _, prefix := range hydrusDBTestStoragePrefixes(clientfiles.KindThumbnail, clientfiles.DefaultPrefixLength) {
+		mustExec(t, db, `INSERT INTO client_files_subfolders (prefix, location_id) VALUES (?, ?);`, prefix, 2)
+	}
+
+	if err := os.MkdirAll(fileRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(fileRoot) error = %v", err)
+	}
+
+	if err := os.MkdirAll(thumbnailRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(thumbnailRoot) error = %v", err)
+	}
+}
+
+func hydrusDBTestStoragePrefixes(kind clientfiles.Kind, prefixLength int) []string {
+	prefixes := []string{}
+	var build func(string, int)
+	build = func(prefix string, remaining int) {
+		if remaining == 0 {
+			prefixes = append(prefixes, string(kind)+prefix)
+			return
+		}
+
+		for _, digit := range "0123456789abcdef" {
+			build(prefix+string(digit), remaining-1)
+		}
+	}
+
+	build("", prefixLength)
+	return prefixes
 }
 
 func createEmptySQLiteFile(t *testing.T, path string) {

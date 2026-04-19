@@ -1,7 +1,12 @@
 /bin/
 /dist/
 /hydrusd
+/hydrus-desktop
+/personal_notes.md
 /coverage.out
 *.test
 *.out
+*.pprof
+*.prof
 .DS_Store
+image-tests/

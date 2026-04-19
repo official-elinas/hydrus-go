@@ -249,3 +249,113 @@ The project now has an internal prepared-file import path that places files in
 managed `client_files`, records the minimal Hydrus DB rows for a fresh local
 import, and reads that state back through the existing metadata APIs. Runtime
 daemon wiring and public write endpoints remain read-only for now.
+
+---
+
+## 2026-04-16 — thin desktop client comes before PTR, and it used Qt 6 Widgets initially (superseded)
+
+**Decision (superseded on 2026-04-17 by the Fyne pivot below)**
+
+Prioritize a thin multi-platform desktop client before PTR work, and make Qt 6
+Widgets in C++ the first client stack.
+
+**Why**
+
+- the immediate product need was to validate import, browse, preview, export, and trash-first workflows against the Go daemon
+- SQLite and managed `client_files` performance should be proven through a real client before PTR synchronization work begins
+- Qt aligns with Hydrus's desktop direction without pulling the project into JS/TS or Python UI runtime decisions
+- a thin native client is a better first validation target than attempting full Hydrus UI parity immediately
+
+**Consequence**
+
+The roadmap first prioritized thin-client-facing daemon APIs and a Qt desktop
+MVP before PTR. That client-stack choice is now superseded, but the
+daemon-before-PTR sequencing still stands.
+
+---
+
+## 2026-04-16 — public import runtime uses separate read and write bundles
+
+**Decision**
+
+When the daemon exposes public local-path imports, keep read handlers on a
+read-only Hydrus bundle and route mutations through a separate writable bundle.
+
+**Why**
+
+- a Hydrus bundle is tied to one dedicated SQLite connection with attached database aliases
+- if reads and writes share the same writable connection, browse/metadata handlers can observe uncommitted transaction state
+- a split read/write bundle model preserves the current read-oriented behavior while still allowing serialized public imports
+
+**Consequence**
+
+The daemon now opens two bundle connections when `HYDRUS_GO_DB_DIR` is set:
+one query-only read bundle for service discovery, metadata, browse, and asset
+streaming; and one writable bundle for public import and trash mutations. This
+becomes the basis for thin-client workflow testing before PTR work begins.
+
+---
+
+## 2026-04-17 — thin desktop client pivots from Qt to Fyne
+
+**Decision**
+
+Supersede the earlier Qt client direction and make a Go-native Fyne prototype the
+active desktop path.
+
+**Why**
+
+- the project goal for the first client is to validate `hydrusd` add/trash behavior, not to begin a long-term full workstation UI rewrite
+- keeping the thin client in Go avoids a split toolchain across Go + C++/CMake for this prototype phase
+- the user explicitly wants to avoid C/C++ and keep the first client native and cross-platform in the Go stack
+- the prototype UI can stay intentionally closer to `image-tests/comfyui-image-browser.png` than to full Hydrus parity
+
+**Consequence**
+
+The active tree now removes the Qt scaffold, adds a Fyne desktop entrypoint, and
+documents the prototype as a daemon-first test harness for browse, add, and
+trash validation against `hydrusd`.
+
+---
+
+## 2026-04-17 — first desktop deliverable is a mutation-testing prototype
+
+**Decision**
+
+Treat the first Fyne desktop client as a prototype for validating daemon and DB
+mutation workflows rather than as a broader end-user app milestone.
+
+**Why**
+
+- the immediate technical risk is whether import and trash flows behave correctly against a real Hydrus bundle under Go ownership
+- a focused prototype keeps the UI small enough to validate SQLite and managed `client_files` behavior without overcommitting to Hydrus parity too early
+- the image references in `image-tests/` point toward a simple thumbnail-browser shell with a narrow utility sidebar, which fits this validation role well
+
+**Consequence**
+
+The first Fyne window prioritizes connect, refresh, add file, trash selected,
+recent grid browsing, selected-file metadata, and bounded selected-file original
+preview. Export/search/tagging polish remains later work.
+
+---
+
+## 2026-04-17 — selected original preview stays image-only and bounded in the first prototype
+
+**Decision**
+
+Use the existing `GET /v1/files/content` endpoint for selected-file preview in
+the Fyne prototype, but keep that preview limited to JPEG/PNG/GIF and enforce
+strict payload and decoded-image limits.
+
+**Why**
+
+- validating daemon-served original files is high value for the thin-client MVP
+- unrestricted full-original preview would create avoidable memory and bandwidth risk during Windows-over-LAN testing
+- the first prototype only needs enough preview capability to prove the content-serving contract, not to become a full media viewer
+
+**Consequence**
+
+The desktop client now previews selected JPEG/PNG/GIF originals through
+`/v1/files/content`, but it rejects oversized payloads and very large decoded
+images to keep the thin client responsive while broader preview/export behavior
+remains later work.

@@ -13,7 +13,7 @@ over the LAN, with broader remote access considered later.
 
 ## Current status
 
-This repository currently provides two early slices:
+This repository currently provides the following early migration slices:
 
 - standalone Go module and daemon entrypoint
 - environment-based configuration
@@ -25,12 +25,19 @@ This repository currently provides two early slices:
 - access key and session key flow for the initial compatibility endpoints
 - initial DB-backed file metadata compatibility, including a first full/default non-tag slice
 - an internal prepared-file import checkpoint that composes managed placement with serialized DB writes
+- first thin-client browse/asset endpoints for recent local files, originals, and thumbnails
+- public local-path import and trash endpoints for thin-client-driven library testing
+- an initial Fyne-based desktop prototype for `hydrusd`, including selected JPEG/PNG/GIF original preview through daemon APIs
+- real `hydrusd --listen host:port` runtime overrides for temporary LAN testing
+- explicit Linux/Windows desktop build targets, including a Windows GUI-subsystem executable for Explorer launches
+- an opt-in native-Go fresh Hydrus client bundle bootstrap for empty or missing DB directories
 
 Project notes live in:
 
 - [`docs/STATUS.md`](docs/STATUS.md) — what is done, active, and next
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — current system shape
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — important architectural decisions
+- [`docs/thin-client-mvp.md`](docs/thin-client-mvp.md) — first desktop client scope and daemon contract
 
 ## Implemented endpoints
 
@@ -44,6 +51,11 @@ Project notes live in:
   - `GET /get_services`
   - `GET /get_service`
   - `GET /get_files/file_metadata`
+  - `GET /v1/library/recent`
+  - `GET /v1/files/content`
+  - `GET /v1/files/thumbnail`
+  - `POST /v1/files/trash`
+  - `POST /v1/import/local_file`
 
 Protected endpoints accept either of these credentials:
 
@@ -58,15 +70,21 @@ API. They are intentionally narrow and are meant to establish a stable daemon
 foundation before broader database, import, storage, and search behavior are
 added.
 
-## Read-only DB-backed mode
+## DB-backed daemon mode
 
-If `HYDRUS_GO_DB_DIR` points at an existing Hydrus client database directory,
-the daemon will open the client bundle read-only and switch these endpoints to
-live DB-backed behavior:
+If `HYDRUS_GO_DB_DIR` points at a valid Hydrus client database directory, the
+daemon will open a read bundle and attempt to open a separate writable bundle.
+When the writable bundle is available, these endpoints switch to live DB-backed
+behavior:
 
 - `GET /get_services`
 - `GET /get_service`
 - `GET /get_files/file_metadata`
+- `GET /v1/library/recent`
+- `GET /v1/files/content`
+- `GET /v1/files/thumbnail`
+- `POST /v1/files/trash`
+- `POST /v1/import/local_file`
 
 Expected bundle files today:
 
@@ -76,13 +94,72 @@ Expected bundle files today:
 - `client.mappings.db`
 - optional: `client.temp.db`
 
-Implementation notes for this first slice:
+Implementation notes for this slice:
 
 - uses `modernc.org/sqlite`
-- forces a single SQLite connection so attached DB aliases remain stable
-- opens the bundle read-only and enables `PRAGMA query_only = ON`
-- does not write new file identifiers or mutate the Hydrus DB
+- uses one dedicated connection per bundle so attached DB aliases remain stable
+- keeps the read bundle in `PRAGMA query_only = ON`
+- uses a separate writable bundle for public local-path imports and trash writes when writable access is available
+- degrades safely to read-only daemon mode when the writable bundle cannot be opened
 - expands `GET /get_files/file_metadata` in safe read-only vertical slices rather than attempting full parity at once
+
+## Fresh first-start bundle bootstrap
+
+`hydrusd` can now create a fresh canonical client bundle in Go instead of
+requiring an existing library bundle.
+
+Enable it with:
+
+- `HYDRUS_GO_DB_DIR=/path/to/new/or/existing/db`
+- `HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP=true` or
+  `--bootstrap-fresh-client`
+- optional `HYDRUS_GO_BOOTSTRAP_TIMEOUT` or `--bootstrap-timeout`
+
+`HYDRUS_GO_DB_DIR` is required when fresh bootstrap is enabled.
+
+Bundle-state behavior today:
+
+- missing DB dir: created if fresh bootstrap is enabled
+- empty DB dir: bootstraps a fresh canonical bundle only if enabled
+- existing valid bundle: bootstrap is skipped and the bundle is opened normally
+- partial bundle: startup fails; `hydrus-go` does not repair or overwrite it
+- non-empty dir without a canonical bundle: startup fails; fresh bootstrap only
+  runs against an empty dir
+
+One concrete first-start example:
+
+```bash
+export HYDRUS_GO_DB_DIR=/tmp/hydrus-go-smoke-db
+./bin/hydrusd \
+  --bootstrap-fresh-client
+```
+
+Platform notes for this bootstrap path:
+
+- the current native bootstrap seeds a minimal empty bundle that is sufficient
+  for current service discovery, recent browse, import, and trash flows
+- fresh native bundle service-list responses now also include `downloader tags`
+  and `favourites`
+- `downloader tags` expands the grouped `local_tags` discovery bucket, while
+  `favourites` stays visible through `services` / `services_v2` like Hydrus's
+  rating services rather than introducing a new grouped bucket
+- the seeded `favourites` service now carries a real Hydrus-style rating
+  dictionary so `services` / `services_v2` expose the expected star-shape and
+  colour fields on first start
+- it also creates `client.temp.db`, the managed `client_files` root, default
+  client-files storage metadata, a `version` row seeded to the current Hydrus
+  compatibility target, and a small set of hidden built-ins (`deleted from
+  anywhere`, `local notes`, `client api`)
+- it does not yet claim full upstream Hydrus bootstrap parity
+
+If you are updating older shell scripts or service units:
+
+- `HYDRUS_GO_ENABLE_PYTHON_FRESH_CLIENT_BOOTSTRAP` was renamed to
+  `HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP`
+- `HYDRUS_GO_BOOTSTRAP_PYTHON` and `HYDRUS_GO_BOOTSTRAP_HYDRUS_ROOT` were removed
+  because the first-start bootstrap no longer shells out to Python
+- `--bootstrap-python` and `--bootstrap-hydrus-root` were removed for the same
+  reason; keep using `--bootstrap-fresh-client` and `--bootstrap-timeout`
 
 ## Bootstrap auth flow
 
@@ -124,9 +201,11 @@ This is still an early migration milestone, not feature parity.
 
 Important current limitations:
 
-- DB-backed daemon/runtime mode is still read-only only
-- an internal prepared-file import checkpoint now exists, but there is still no public import/write API
-- deterministic managed `client_files` path resolution and internal file placement are now composed with minimal DB writes for internal round-trip testing only
+- the daemon now exposes public local-path import and trash APIs, but there is still no permanent delete flow
+- deterministic managed `client_files` path resolution and internal file placement are now composed into both the internal prepared-file checkpoint and the first public local-path import flow
+- the first thin client prototype is now a Fyne-based shell aimed at testing browse/add/trash/original-preview behavior against `hydrusd`, not a fuller desktop app
+- selected-file original preview currently supports JPEG/PNG/GIF only and is intentionally bounded to 16 MiB payloads, 8192px maximum dimension, and 16,000,000 decoded pixels
+- selected-file preview is not cached yet, so refresh/reconnect cycles can redownload the same original over LAN while testing
 - `GET /get_files/file_metadata` currently supports:
   - `only_return_identifiers=true`
   - `only_return_basic_information=true`
@@ -150,8 +229,9 @@ Important current limitations:
   - `detailed_url_information=true`
   - exact thumbnail-dimension parity
 - `create_new_file_ids=true` is intentionally rejected in read-only mode
-- no public DB-backed local import flow yet
-- no hashing/sniffing import pipeline yet
+- no public batch/upload import flow yet
+- no public permanent delete flow yet
+- no rich public import pipeline yet beyond single local-path imports with basic hashing/sniffing
 - no search/tagging engine yet
 - no downloader/subscription/parsing system yet
 
@@ -189,14 +269,101 @@ make run
 The daemon defaults to `127.0.0.1:45869`, matching Hydrus's default Client API
 port.
 
+For temporary LAN testing, use:
+
+```bash
+make run-lan
+./bin/hydrusd --listen 0.0.0.0:5555
+```
+
+The `--listen` runtime flag overrides `HYDRUS_GO_LISTEN_ADDR` for that
+invocation and explicitly permits the requested bind address, so
+`0.0.0.0:5555` works without separately exporting
+`HYDRUS_GO_ALLOW_NON_LOCAL_CONNECTIONS=true`. You can also override the listen
+address through the Makefile helper, for example:
+
+```bash
+make run-lan LAN_LISTEN_ADDR=0.0.0.0:9999
+```
+
 If no API access key is configured, one will be generated on startup and written
 to the daemon logs.
 
-To run in DB-backed read-only mode, also set:
+To run in DB-backed daemon mode, also set:
 
 ```bash
 export HYDRUS_GO_DB_DIR=/path/to/hydrus/db
 ```
+
+If you do not already have a Hydrus bundle, point `HYDRUS_GO_DB_DIR` at a new
+or empty directory and launch with the fresh-bootstrap flags instead:
+
+```bash
+./bin/hydrusd \
+  --listen 0.0.0.0:5555 \
+	--bootstrap-fresh-client
+```
+
+When the configured Hydrus bundle is writable, `hydrusd` will also enable the
+public import/trash mutation paths. If the writable bundle cannot be opened, the
+daemon degrades safely to read-only behavior.
+
+Fresh daemon-local imports now also attempt best-effort managed thumbnail
+generation for JPEG, PNG, and GIF still images so the prototype grid can show
+immediate previews. Other formats may still import successfully without a
+thumbnail.
+
+## Fyne prototype
+
+The first desktop client is a thin Fyne prototype that connects to `hydrusd`.
+It is deliberately closer to `image-tests/comfyui-image-browser.png` than to the
+full Hydrus workstation UI, and it exists to validate daemon/database
+browse/add/trash behavior plus bounded selected-file original preview through a
+real local UI.
+
+Run it with:
+
+```bash
+go run -tags fyne ./cmd/hydrus-desktop
+```
+
+Or use:
+
+```bash
+make run-desktop
+```
+
+To build desktop binaries instead of running in-place:
+
+```bash
+make build-desktop-linux
+make build-desktop-windows
+```
+
+Notes:
+
+- the desktop prototype talks to `hydrusd`; it never touches SQLite or
+  `client_files` directly
+- for cross-machine LAN testing, point the connect dialog at the daemon host
+  (for example `http://<linux-host>:45869`) rather than the default localhost
+  URL
+- `make build-desktop` keeps the old behavior of building a desktop binary for
+  the current host platform
+- the current Linux desktop build depends on native windowing/OpenGL headers in
+  addition to the Go toolchain
+- `make build-desktop-linux` now emits an explicit `linux/amd64` build by
+  default and uses `LINUX_CC` (default: `gcc`); if you override
+  `LINUX_GOARCH`, provide a matching Linux toolchain via `LINUX_CC`
+- the Windows desktop build uses the MinGW cross-compiler configured by
+  `WINDOWS_CC` and defaults to `windows/amd64`; override the target
+  architecture with `WINDOWS_GOARCH` and use a matching compiler as needed;
+  `make build-desktop-windows` links the executable as a GUI app so launching it
+  from Explorer does not spawn an extra terminal window
+- the current environment in this repo can type-check the Fyne code via WASM,
+  but a native Linux build still requires the usual X11/GL development packages
+- `make check-desktop` is the canonical non-native validation path for the tagged
+  desktop code in environments that do not have those headers installed; it now
+  writes `bin/hydrus-desktop.wasm` instead of a misleading repo-root binary
 
 ## Developer loop
 
@@ -205,6 +372,11 @@ make fmt
 make test
 make build
 make run
+make build-desktop
+make build-desktop-linux
+make build-desktop-windows
+make check-desktop
+make run-desktop
 ```
 
 This bootstrap currently targets the Go toolchain declared in `go.mod`
@@ -213,7 +385,9 @@ This bootstrap currently targets the Go toolchain declared in `go.mod`
 ## Environment variables
 
 - `HYDRUS_GO_LISTEN_ADDR` (default: `127.0.0.1:45869`)
-- `HYDRUS_GO_DB_DIR` (optional path to a Hydrus client DB directory)
+- `HYDRUS_GO_DB_DIR` (optional path to a Hydrus client DB directory; required when fresh bootstrap is enabled)
+- `HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP` (default: `false`)
+- `HYDRUS_GO_BOOTSTRAP_TIMEOUT` (default: `2m`)
 - `HYDRUS_GO_ACCESS_KEY` (optional 64-char hex access key)
 - `HYDRUS_GO_ACCESS_NAME` (default: `hydrus-go`)
 - `HYDRUS_GO_LOG_LEVEL` (default: `info`)
@@ -232,9 +406,10 @@ This bootstrap currently targets the Go toolchain declared in `go.mod`
 
 ## Immediate next milestones
 
-- extend the internal prepared-file import checkpoint into a broader public import flow
-- add hashing/sniffing and thumbnail work on top of the new managed-placement + DB-write path
-- PTR integration so imported files can participate in repository tag/update flows
-- broader default/full metadata parity for `GET /get_files/file_metadata`
+- iterate on the Fyne prototype's preview caching, paging, reconnect behavior, and metadata ergonomics now that the first connect/browse/add/trash/original-preview loop is wired
+- run real Windows-over-LAN smoke tests against a live `hydrusd` + Hydrus library and tighten any failures quickly
+- validate add/trash latency and recent-grid refresh behavior on a real Hydrus library through the prototype
+- validate SQLite and managed `client_files` performance through the thin client before PTR work begins
+- implement PTR in the backend daemon after the local workflow contract is proven
+- broaden default/full metadata parity for `GET /get_files/file_metadata`
 - search/tagging model on top of imported and PTR-synced data
-- broader Client API compatibility

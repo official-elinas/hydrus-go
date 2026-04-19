@@ -4,10 +4,14 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/official-elinas/hydrus-go/internal/app"
 	"github.com/official-elinas/hydrus-go/internal/config"
@@ -22,7 +26,10 @@ func main() {
 	)
 	defer stop()
 
-	cfg, err := config.LoadFromEnv()
+	cfg, err := loadRuntimeConfig(os.Args[1:], os.Stderr)
+	if errors.Is(err, flag.ErrHelp) {
+		return
+	}
 	if err != nil {
 		exitf("load config: %v", err)
 	}
@@ -32,7 +39,7 @@ func main() {
 		exitf("configure logger: %v", err)
 	}
 
-	application, err := app.New(cfg, logger)
+	application, err := app.New(ctx, cfg, logger)
 	if err != nil {
 		exitf("create app: %v", err)
 	}
@@ -41,6 +48,103 @@ func main() {
 	if err != nil && !errors.Is(err, context.Canceled) {
 		exitf("run hydrus-go: %v", err)
 	}
+}
+
+type cliOptions struct {
+	listenAddr              string
+	listenSet               bool
+	bootstrapFreshClient    bool
+	bootstrapFreshClientSet bool
+	bootstrapTimeout        time.Duration
+	bootstrapTimeoutSet     bool
+}
+
+func loadRuntimeConfig(args []string, stderr io.Writer) (config.Config, error) {
+	options, err := parseCLIOptions(args, stderr)
+	if err != nil {
+		return config.Config{}, err
+	}
+
+	cfg, err := config.LoadFromEnvUnvalidated()
+	if err != nil {
+		return config.Config{}, err
+	}
+
+	if options.listenSet {
+		cfg.ListenAddr = options.listenAddr
+		cfg.AllowNonLocalConnections = true
+	}
+
+	if options.bootstrapFreshClientSet {
+		cfg.EnableFreshClientBootstrap = options.bootstrapFreshClient
+	}
+
+	if options.bootstrapTimeoutSet {
+		cfg.BootstrapTimeout = options.bootstrapTimeout
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return config.Config{}, err
+	}
+
+	return cfg, nil
+}
+
+func parseCLIOptions(args []string, stderr io.Writer) (cliOptions, error) {
+	flagSet := flag.NewFlagSet("hydrusd", flag.ContinueOnError)
+	flagSet.SetOutput(stderr)
+	flagSet.Usage = func() {
+		_, _ = fmt.Fprintln(
+			stderr,
+			"Usage: hydrusd [--listen host:port] [--bootstrap-fresh-client] [--bootstrap-timeout duration]",
+		)
+		flagSet.PrintDefaults()
+	}
+
+	var options cliOptions
+	flagSet.StringVar(
+		&options.listenAddr,
+		"listen",
+		"",
+		"override daemon listen address for this invocation (for example 0.0.0.0:5555)",
+	)
+	flagSet.BoolVar(
+		&options.bootstrapFreshClient,
+		"bootstrap-fresh-client",
+		false,
+		"if HYDRUS_GO_DB_DIR is empty or missing, create a fresh canonical client bundle using the native hydrus-go bootstrap",
+	)
+	flagSet.DurationVar(
+		&options.bootstrapTimeout,
+		"bootstrap-timeout",
+		0,
+		"override the timeout for fresh-client bootstrap (for example 2m)",
+	)
+
+	if err := flagSet.Parse(args); err != nil {
+		return cliOptions{}, err
+	}
+
+	flagSet.Visit(func(f *flag.Flag) {
+		if f.Name == "listen" {
+			options.listenSet = true
+		}
+
+		if f.Name == "bootstrap-fresh-client" {
+			options.bootstrapFreshClientSet = true
+		}
+
+		if f.Name == "bootstrap-timeout" {
+			options.bootstrapTimeoutSet = true
+		}
+	})
+	options.listenAddr = strings.TrimSpace(options.listenAddr)
+
+	if flagSet.NArg() > 0 {
+		return cliOptions{}, fmt.Errorf("unexpected arguments: %s", strings.Join(flagSet.Args(), " "))
+	}
+
+	return options, nil
 }
 
 func exitf(format string, args ...any) {

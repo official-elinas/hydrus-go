@@ -1,7 +1,10 @@
 // Package services defines the bootstrap Hydrus service catalog model.
 package services
 
-import "encoding/hex"
+import (
+	"encoding/hex"
+	"strings"
+)
 
 // Type describes a Hydrus service type identifier.
 type Type int
@@ -71,13 +74,19 @@ type LegacyService struct {
 // Catalog is an ordered collection of Hydrus services.
 type Catalog []Service
 
-// DefaultCatalog returns the fixed bootstrap service catalog used before a real
-// database-backed service manager exists.
+// DefaultCatalog returns the discovery-visible bootstrap service catalog used
+// before a real database-backed service manager exists.
 func DefaultCatalog() Catalog {
 	return Catalog{
 		{
 			Name:       "my tags",
 			ServiceKey: keyHex("local tags"),
+			Type:       TypeLocalTag,
+			TypePretty: TypePretty(TypeLocalTag),
+		},
+		{
+			Name:       "downloader tags",
+			ServiceKey: keyHex("downloader tags"),
 			Type:       TypeLocalTag,
 			TypePretty: TypePretty(TypeLocalTag),
 		},
@@ -117,11 +126,74 @@ func DefaultCatalog() Catalog {
 			Type:       TypeCombinedTag,
 			TypePretty: TypePretty(TypeCombinedTag),
 		},
+		favouritesService(),
 		{
 			Name:       "trash",
 			ServiceKey: keyHex("trash"),
 			Type:       TypeLocalFileTrashDomain,
 			TypePretty: TypePretty(TypeLocalFileTrashDomain),
+		},
+	}
+}
+
+// BootstrapCatalog returns the service catalog seeded into fresh native client
+// bundles, including hidden built-ins that are not currently exposed through
+// service discovery.
+func BootstrapCatalog() Catalog {
+	catalog := append(Catalog{}, DefaultCatalog()...)
+
+	return append(
+		catalog,
+		Service{
+			Name:       "deleted from anywhere",
+			ServiceKey: keyHex("all deleted files"),
+			Type:       TypeCombinedDeletedFile,
+			TypePretty: TypePretty(TypeCombinedDeletedFile),
+		},
+		Service{
+			Name:       "local notes",
+			ServiceKey: keyHex("local notes"),
+			Type:       TypeLocalNotes,
+			TypePretty: TypePretty(TypeLocalNotes),
+		},
+		Service{
+			Name:       "client api",
+			ServiceKey: keyHex("client api"),
+			Type:       TypeClientAPIService,
+			TypePretty: TypePretty(TypeClientAPIService),
+		},
+	)
+}
+
+func favouritesService() Service {
+	showInThumbnail := false
+	showInThumbnailEvenWhenNull := false
+
+	return Service{
+		Name:                        "favourites",
+		ServiceKey:                  keyHex("favourites"),
+		Type:                        TypeLocalRatingLike,
+		TypePretty:                  TypePretty(TypeLocalRatingLike),
+		ShowInThumbnail:             &showInThumbnail,
+		ShowInThumbnailEvenWhenNull: &showInThumbnailEvenWhenNull,
+		StarShape:                   "fat star",
+		Colours: map[string]RatingColour{
+			"like": {
+				Pen:   "#000000",
+				Brush: "#F0F041",
+			},
+			"dislike": {
+				Pen:   "#000000",
+				Brush: "#C85078",
+			},
+			"null": {
+				Pen:   "#000000",
+				Brush: "#BFBFBF",
+			},
+			"mixed": {
+				Pen:   "#000000",
+				Brush: "#5F5F5F",
+			},
 		},
 	}
 }
@@ -172,6 +244,12 @@ func (c Catalog) ByKey(serviceKey string) (Service, bool) {
 func (c Catalog) ByName(name string) (Service, bool) {
 	for _, service := range c {
 		if service.Name == name {
+			return service, true
+		}
+	}
+
+	for _, service := range c {
+		if strings.EqualFold(service.Name, name) {
 			return service, true
 		}
 	}
