@@ -31,9 +31,9 @@ Last updated: 2026-04-19
   - transparency/EXIF/human-readable/ICC metadata booleans
   - `include_milliseconds=true` support for the implemented full-mode timestamps
 - expanded full/default DB-backed `file_metadata` with a first daemon-served `tags` slice:
-  - service-keyed `tags` payloads with per-service `storage_tags`
-  - compatibility `service_keys_to_statuses_to_tags` and `service_keys_to_statuses_to_display_tags` behind `hide_service_keys_tags=false`
-  - a documented temporary `display_tags` approximation that mirrors storage until display-cache parity lands
+  - service-keyed `tags` payloads with per-service `storage_tags` and Hydrus-like `display_tags`
+  - compatibility `service_keys_to_statuses_to_tags` and `service_keys_to_statuses_to_display_tags` behind `hide_service_keys_tags=false`, with legacy display values matching `tags[*].display_tags`
+  - `display_tags` now prefer specific display cache tables when available, otherwise fall back to sibling/parent-expanded storage tags, with deleted/petitioned display copied from storage
 - explicitly rejects `include_notes=true` and `detailed_url_information=true` in the current full-mode slice
 - added an internal writable Hydrus bundle mode with a serialized `BEGIN IMMEDIATE` transaction runner
 - added a pure managed `client_files` layout package for deterministic file and thumbnail path resolution
@@ -266,8 +266,8 @@ Last updated: 2026-04-19
 ### 2026-04-19 — Milestone 15: DB-backed metadata tags slice
 
 - expanded full/default `GET /get_files/file_metadata` rows with Hydrus-like `tags` objects keyed by service key
-- added DB-backed storage-tag reads from `client.mappings.db` for local/tag-repository services and combined-tag unioning when the virtual combined tag service is present
-- restored the deprecated `service_keys_to_statuses_to_tags` and `service_keys_to_statuses_to_display_tags` maps behind `hide_service_keys_tags=false`
+- added DB-backed storage-tag reads from `client.mappings.db` for local/tag-repository services, combined-tag unioning when the virtual combined tag service is present, and matching display-tag payloads
+- restored the deprecated `service_keys_to_statuses_to_tags` and `service_keys_to_statuses_to_display_tags` maps behind `hide_service_keys_tags=false`, with the legacy display map matching `tags[*].display_tags`
 - kept the daemon-first boundary intact; desktop clients still receive tags only through daemon-served metadata
-- documented the current gap that `display_tags` still mirrors storage tags until Hydrus display-cache parity is wired
+- added display-tag parity that prefers specific display cache tables when available and otherwise derives display tags through sibling/parent fallback
 - verified with targeted DB/API/app/daemonclient package tests

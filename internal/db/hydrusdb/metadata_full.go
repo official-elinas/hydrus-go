@@ -138,7 +138,7 @@ func (b *Bundle) fullMetadataRows(
 		return nil, err
 	}
 
-	tagsByHashID, err := b.lookupFileTags(ctx, knownFileIDs)
+	tagsByHashID, err := b.lookupFileTags(ctx, knownFileIDs, currentFileServices)
 	if err != nil {
 		return nil, err
 	}

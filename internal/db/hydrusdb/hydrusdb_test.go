@@ -396,12 +396,21 @@ func TestBundleMetadata(t *testing.T) {
 			t.Fatalf("rows[0][tags][local][storage_tags] type = %T, want map[string][]string", localTagService["storage_tags"])
 		}
 
+		localDisplayTags, ok := localTagService["display_tags"].(map[string][]string)
+		if !ok {
+			t.Fatalf("rows[0][tags][local][display_tags] type = %T, want map[string][]string", localTagService["display_tags"])
+		}
+
 		if got := localStorageTags["0"]; !slices.Equal(got, []string{"creator:alice", "series:zeta"}) {
 			t.Fatalf("rows[0][tags][local][storage_tags][0] = %v, want [creator:alice series:zeta]", got)
 		}
 
 		if got := localStorageTags["2"]; !slices.Equal(got, []string{"old:tag"}) {
 			t.Fatalf("rows[0][tags][local][storage_tags][2] = %v, want [old:tag]", got)
+		}
+
+		if got := localDisplayTags["2"]; !slices.Equal(got, []string{"old:tag"}) {
+			t.Fatalf("rows[0][tags][local][display_tags][2] = %v, want [old:tag]", got)
 		}
 
 		downloaderTagService, ok := tags[fixture.downloaderTagsServiceKeyHex]
@@ -414,6 +423,11 @@ func TestBundleMetadata(t *testing.T) {
 			t.Fatalf("rows[0][tags][downloader][storage_tags] type = %T, want map[string][]string", downloaderTagService["storage_tags"])
 		}
 
+		downloaderDisplayTags, ok := downloaderTagService["display_tags"].(map[string][]string)
+		if !ok {
+			t.Fatalf("rows[0][tags][downloader][display_tags] type = %T, want map[string][]string", downloaderTagService["display_tags"])
+		}
+
 		if got := downloaderStorageTags["0"]; !slices.Equal(got, []string{"character:bob", "series:zeta"}) {
 			t.Fatalf("rows[0][tags][downloader][storage_tags][0] = %v, want [character:bob series:zeta]", got)
 		}
@@ -424,6 +438,18 @@ func TestBundleMetadata(t *testing.T) {
 
 		if got := downloaderStorageTags["3"]; !slices.Equal(got, []string{"petitioned:cleanup"}) {
 			t.Fatalf("rows[0][tags][downloader][storage_tags][3] = %v, want [petitioned:cleanup]", got)
+		}
+
+		if got := downloaderDisplayTags["0"]; !slices.Equal(got, []string{"character:robert", "group:cast", "series:zeta"}) {
+			t.Fatalf("rows[0][tags][downloader][display_tags][0] = %v, want [character:robert group:cast series:zeta]", got)
+		}
+
+		if got := downloaderDisplayTags["1"]; !slices.Equal(got, []string{"meta:pending", "workflow:review"}) {
+			t.Fatalf("rows[0][tags][downloader][display_tags][1] = %v, want [meta:pending workflow:review]", got)
+		}
+
+		if got := downloaderDisplayTags["3"]; !slices.Equal(got, []string{"petitioned:cleanup"}) {
+			t.Fatalf("rows[0][tags][downloader][display_tags][3] = %v, want [petitioned:cleanup]", got)
 		}
 
 		combinedTagService, ok := tags[fixture.combinedTagServiceKeyHex]
@@ -445,8 +471,20 @@ func TestBundleMetadata(t *testing.T) {
 			t.Fatalf("rows[0][tags][combined][display_tags] type = %T, want map[string][]string", combinedTagService["display_tags"])
 		}
 
-		if got := combinedDisplayTags["1"]; !slices.Equal(got, []string{"pending:review"}) {
-			t.Fatalf("rows[0][tags][combined][display_tags][1] = %v, want [pending:review]", got)
+		if got := combinedDisplayTags["0"]; !slices.Equal(got, []string{"character:robert", "creator:alice", "group:cast", "series:zeta"}) {
+			t.Fatalf("rows[0][tags][combined][display_tags][0] = %v, want [character:robert creator:alice group:cast series:zeta]", got)
+		}
+
+		if got := combinedDisplayTags["1"]; !slices.Equal(got, []string{"meta:pending", "workflow:review"}) {
+			t.Fatalf("rows[0][tags][combined][display_tags][1] = %v, want [meta:pending workflow:review]", got)
+		}
+
+		if got := combinedDisplayTags["2"]; !slices.Equal(got, []string{"old:tag"}) {
+			t.Fatalf("rows[0][tags][combined][display_tags][2] = %v, want [old:tag]", got)
+		}
+
+		if got := combinedDisplayTags["3"]; !slices.Equal(got, []string{"petitioned:cleanup"}) {
+			t.Fatalf("rows[0][tags][combined][display_tags][3] = %v, want [petitioned:cleanup]", got)
 		}
 
 		if _, ok := row1["service_keys_to_statuses_to_tags"]; ok {
@@ -566,6 +604,102 @@ func TestBundleMetadata(t *testing.T) {
 		}
 	})
 
+	t.Run("full mode prefers specific display caches for single-file groups", func(t *testing.T) {
+		rows, err := bundle.GetMetadata(context.Background(), filemetadata.Request{
+			Hashes: []string{fixture.hash1Hex},
+		})
+		if err != nil {
+			t.Fatalf("GetMetadata() error = %v", err)
+		}
+
+		tags, ok := rows[0]["tags"].(map[string]map[string]any)
+		if !ok {
+			t.Fatalf("rows[0][tags] type = %T, want map[string]map[string]any", rows[0]["tags"])
+		}
+
+		downloaderTagService, ok := tags[fixture.downloaderTagsServiceKeyHex]
+		if !ok {
+			t.Fatalf("rows[0][tags] missing downloader tag service %q", fixture.downloaderTagsServiceKeyHex)
+		}
+
+		downloaderStorageTags, ok := downloaderTagService["storage_tags"].(map[string][]string)
+		if !ok {
+			t.Fatalf("rows[0][tags][downloader][storage_tags] type = %T, want map[string][]string", downloaderTagService["storage_tags"])
+		}
+
+		downloaderDisplayTags, ok := downloaderTagService["display_tags"].(map[string][]string)
+		if !ok {
+			t.Fatalf("rows[0][tags][downloader][display_tags] type = %T, want map[string][]string", downloaderTagService["display_tags"])
+		}
+
+		if got := downloaderStorageTags["0"]; !slices.Equal(got, []string{"storage:downloader-current"}) {
+			t.Fatalf("rows[0][tags][downloader][storage_tags][0] = %v, want [storage:downloader-current]", got)
+		}
+
+		if got := downloaderStorageTags["1"]; !slices.Equal(got, []string{"storage:downloader-pending"}) {
+			t.Fatalf("rows[0][tags][downloader][storage_tags][1] = %v, want [storage:downloader-pending]", got)
+		}
+
+		if got := downloaderStorageTags["2"]; !slices.Equal(got, []string{"storage:downloader-deleted"}) {
+			t.Fatalf("rows[0][tags][downloader][storage_tags][2] = %v, want [storage:downloader-deleted]", got)
+		}
+
+		if got := downloaderDisplayTags["0"]; !slices.Equal(got, []string{"cache:downloader-current"}) {
+			t.Fatalf("rows[0][tags][downloader][display_tags][0] = %v, want [cache:downloader-current]", got)
+		}
+
+		if got := downloaderDisplayTags["1"]; !slices.Equal(got, []string{"cache:downloader-pending"}) {
+			t.Fatalf("rows[0][tags][downloader][display_tags][1] = %v, want [cache:downloader-pending]", got)
+		}
+
+		if got := downloaderDisplayTags["2"]; !slices.Equal(got, []string{"storage:downloader-deleted"}) {
+			t.Fatalf("rows[0][tags][downloader][display_tags][2] = %v, want [storage:downloader-deleted]", got)
+		}
+
+		if got := downloaderDisplayTags["3"]; !slices.Equal(got, []string{"petitioned:cleanup"}) {
+			t.Fatalf("rows[0][tags][downloader][display_tags][3] = %v, want [petitioned:cleanup]", got)
+		}
+
+		combinedTagService, ok := tags[fixture.combinedTagServiceKeyHex]
+		if !ok {
+			t.Fatalf("rows[0][tags] missing combined tag service %q", fixture.combinedTagServiceKeyHex)
+		}
+
+		combinedStorageTags, ok := combinedTagService["storage_tags"].(map[string][]string)
+		if !ok {
+			t.Fatalf("rows[0][tags][combined][storage_tags] type = %T, want map[string][]string", combinedTagService["storage_tags"])
+		}
+
+		combinedDisplayTags, ok := combinedTagService["display_tags"].(map[string][]string)
+		if !ok {
+			t.Fatalf("rows[0][tags][combined][display_tags] type = %T, want map[string][]string", combinedTagService["display_tags"])
+		}
+
+		if got := combinedStorageTags["0"]; !slices.Equal(got, []string{"creator:alice", "series:zeta", "storage:downloader-current"}) {
+			t.Fatalf("rows[0][tags][combined][storage_tags][0] = %v, want [creator:alice series:zeta storage:downloader-current]", got)
+		}
+
+		if got := combinedStorageTags["1"]; !slices.Equal(got, []string{"storage:downloader-pending"}) {
+			t.Fatalf("rows[0][tags][combined][storage_tags][1] = %v, want [storage:downloader-pending]", got)
+		}
+
+		if got := combinedStorageTags["2"]; !slices.Equal(got, []string{"old:tag", "storage:downloader-deleted"}) {
+			t.Fatalf("rows[0][tags][combined][storage_tags][2] = %v, want [old:tag storage:downloader-deleted]", got)
+		}
+
+		if got := combinedDisplayTags["0"]; !slices.Equal(got, []string{"cache:downloader-current", "creator:alice", "series:zeta"}) {
+			t.Fatalf("rows[0][tags][combined][display_tags][0] = %v, want [cache:downloader-current creator:alice series:zeta]", got)
+		}
+
+		if got := combinedDisplayTags["1"]; !slices.Equal(got, []string{"cache:downloader-pending"}) {
+			t.Fatalf("rows[0][tags][combined][display_tags][1] = %v, want [cache:downloader-pending]", got)
+		}
+
+		if got := combinedDisplayTags["2"]; !slices.Equal(got, []string{"old:tag", "storage:downloader-deleted"}) {
+			t.Fatalf("rows[0][tags][combined][display_tags][2] = %v, want [old:tag storage:downloader-deleted]", got)
+		}
+	})
+
 	t.Run("full mode can include legacy service-key tag maps", func(t *testing.T) {
 		rows, err := bundle.GetMetadata(context.Background(), filemetadata.Request{
 			Hashes:                       []string{fixture.hash1Hex},
@@ -580,8 +714,8 @@ func TestBundleMetadata(t *testing.T) {
 			t.Fatalf("rows[0][service_keys_to_statuses_to_tags] type = %T, want map[string]map[string][]string", rows[0]["service_keys_to_statuses_to_tags"])
 		}
 
-		if got := storageByService[fixture.combinedTagServiceKeyHex]["0"]; !slices.Equal(got, []string{"character:bob", "creator:alice", "series:zeta"}) {
-			t.Fatalf("rows[0][service_keys_to_statuses_to_tags][combined][0] = %v, want [character:bob creator:alice series:zeta]", got)
+		if got := storageByService[fixture.combinedTagServiceKeyHex]["0"]; !slices.Equal(got, []string{"creator:alice", "series:zeta", "storage:downloader-current"}) {
+			t.Fatalf("rows[0][service_keys_to_statuses_to_tags][combined][0] = %v, want [creator:alice series:zeta storage:downloader-current]", got)
 		}
 
 		displayByService, ok := rows[0]["service_keys_to_statuses_to_display_tags"].(map[string]map[string][]string)
@@ -591,6 +725,10 @@ func TestBundleMetadata(t *testing.T) {
 
 		if got := displayByService[fixture.downloaderTagsServiceKeyHex]["3"]; !slices.Equal(got, []string{"petitioned:cleanup"}) {
 			t.Fatalf("rows[0][service_keys_to_statuses_to_display_tags][downloader][3] = %v, want [petitioned:cleanup]", got)
+		}
+
+		if got := displayByService[fixture.downloaderTagsServiceKeyHex]["0"]; !slices.Equal(got, []string{"cache:downloader-current"}) {
+			t.Fatalf("rows[0][service_keys_to_statuses_to_display_tags][downloader][0] = %v, want [cache:downloader-current]", got)
 		}
 	})
 
@@ -1290,13 +1428,24 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 	mustExec(
 		t,
 		masterDB,
-		`INSERT INTO tags (tag_id, tag) VALUES (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?);`,
+		`INSERT INTO tags (tag_id, tag) VALUES (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?);`,
 		1, "creator:alice",
 		2, "series:zeta",
 		3, "old:tag",
 		4, "character:bob",
 		5, "pending:review",
 		6, "petitioned:cleanup",
+		7, "character:robert",
+		8, "group:cast",
+		9, "workflow:review",
+		10, "meta:pending",
+		11, "history:retired",
+		12, "history:archive",
+		13, "cache:downloader-current",
+		14, "cache:downloader-pending",
+		15, "storage:downloader-current",
+		16, "storage:downloader-pending",
+		17, "storage:downloader-deleted",
 	)
 	mustExec(
 		t,
@@ -1314,6 +1463,112 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 	)
 
 	createEmptySQLiteFile(t, cachesPath)
+	cachesDB := openSQLiteForTest(t, cachesPath)
+	defer cachesDB.Close()
+
+	mustExec(
+		t,
+		cachesDB,
+		`CREATE TABLE specific_current_mappings_cache_2_10 (tag_id INTEGER, hash_id INTEGER, PRIMARY KEY (tag_id, hash_id));`,
+	)
+	mustExec(
+		t,
+		cachesDB,
+		`CREATE TABLE specific_deleted_mappings_cache_2_10 (tag_id INTEGER, hash_id INTEGER, PRIMARY KEY (tag_id, hash_id));`,
+	)
+	mustExec(
+		t,
+		cachesDB,
+		`CREATE TABLE specific_pending_mappings_cache_2_10 (tag_id INTEGER, hash_id INTEGER, PRIMARY KEY (tag_id, hash_id));`,
+	)
+	mustExec(
+		t,
+		cachesDB,
+		`CREATE TABLE specific_display_current_mappings_cache_2_10 (tag_id INTEGER, hash_id INTEGER, PRIMARY KEY (tag_id, hash_id));`,
+	)
+	mustExec(
+		t,
+		cachesDB,
+		`CREATE TABLE specific_display_pending_mappings_cache_2_10 (tag_id INTEGER, hash_id INTEGER, PRIMARY KEY (tag_id, hash_id));`,
+	)
+	mustExec(
+		t,
+		cachesDB,
+		`CREATE TABLE actual_tag_siblings_lookup_cache_1 (bad_tag_id INTEGER PRIMARY KEY, ideal_tag_id INTEGER);`,
+	)
+	mustExec(
+		t,
+		cachesDB,
+		`CREATE TABLE actual_tag_parents_lookup_cache_1 (child_tag_id INTEGER, ancestor_tag_id INTEGER, PRIMARY KEY (child_tag_id, ancestor_tag_id));`,
+	)
+	mustExec(
+		t,
+		cachesDB,
+		`CREATE TABLE actual_tag_siblings_lookup_cache_10 (bad_tag_id INTEGER PRIMARY KEY, ideal_tag_id INTEGER);`,
+	)
+	mustExec(
+		t,
+		cachesDB,
+		`CREATE TABLE actual_tag_parents_lookup_cache_10 (child_tag_id INTEGER, ancestor_tag_id INTEGER, PRIMARY KEY (child_tag_id, ancestor_tag_id));`,
+	)
+	mustExec(
+		t,
+		cachesDB,
+		`INSERT INTO specific_current_mappings_cache_2_10 (tag_id, hash_id) VALUES (?, ?);`,
+		15, 1,
+	)
+	mustExec(
+		t,
+		cachesDB,
+		`INSERT INTO specific_deleted_mappings_cache_2_10 (tag_id, hash_id) VALUES (?, ?);`,
+		17, 1,
+	)
+	mustExec(
+		t,
+		cachesDB,
+		`INSERT INTO specific_pending_mappings_cache_2_10 (tag_id, hash_id) VALUES (?, ?);`,
+		16, 1,
+	)
+	mustExec(
+		t,
+		cachesDB,
+		`INSERT INTO specific_display_current_mappings_cache_2_10 (tag_id, hash_id) VALUES (?, ?);`,
+		13, 1,
+	)
+	mustExec(
+		t,
+		cachesDB,
+		`INSERT INTO specific_display_pending_mappings_cache_2_10 (tag_id, hash_id) VALUES (?, ?);`,
+		14, 1,
+	)
+	mustExec(
+		t,
+		cachesDB,
+		`INSERT INTO actual_tag_siblings_lookup_cache_1 (bad_tag_id, ideal_tag_id) VALUES (?, ?);`,
+		3, 11,
+	)
+	mustExec(
+		t,
+		cachesDB,
+		`INSERT INTO actual_tag_parents_lookup_cache_1 (child_tag_id, ancestor_tag_id) VALUES (?, ?);`,
+		11, 12,
+	)
+	mustExec(
+		t,
+		cachesDB,
+		`INSERT INTO actual_tag_siblings_lookup_cache_10 (bad_tag_id, ideal_tag_id) VALUES (?, ?), (?, ?), (?, ?);`,
+		4, 7,
+		5, 9,
+		6, 11,
+	)
+	mustExec(
+		t,
+		cachesDB,
+		`INSERT INTO actual_tag_parents_lookup_cache_10 (child_tag_id, ancestor_tag_id) VALUES (?, ?), (?, ?), (?, ?);`,
+		7, 8,
+		9, 10,
+		11, 12,
+	)
 
 	mappingsDB := openSQLiteForTest(t, mappingsPath)
 	defer mappingsDB.Close()
