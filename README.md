@@ -317,9 +317,10 @@ thumbnail.
 
 The first desktop client is a thin Fyne prototype that connects to `hydrusd`.
 It is deliberately closer to `image-tests/comfyui-image-browser.png` than to the
-full Hydrus workstation UI, and it exists to validate daemon/database
-browse/add/trash behavior plus bounded selected-file original preview through a
-real local UI.
+full Hydrus workstation UI, and it exists to validate daemon/database browse,
+queued import, trash, and bounded selected-file original preview behavior
+through a real local UI while the layout gradually moves toward a more
+Hydrus-like multi-pane shell.
 
 Run it with:
 
@@ -344,6 +345,15 @@ Notes:
 
 - the desktop prototype talks to `hydrusd`; it never touches SQLite or
   `client_files` directly
+- current import testing can be driven through a single-file picker, a folder
+  picker, or drag-and-drop into the desktop window; queued items are uploaded
+  sequentially through the daemon's remote-safe upload endpoint
+- the left import pane now includes queue review controls for retrying failed
+  items, removing selected entries, and pruning finished work without touching
+  the daemon/API contract
+- the queue can be staged while disconnected and will start or resume processing
+  when a usable daemon connection is available; the same pane also exposes a
+  full `Clear Queue` reset when processing is idle
 - for cross-machine LAN testing, point the connect dialog at the daemon host
   (for example `http://<linux-host>:45869`) rather than the default localhost
   URL
