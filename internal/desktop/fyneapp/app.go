@@ -12,6 +12,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1451,7 +1452,7 @@ func formatMetadata(metadata daemonclient.FileMetadata) string {
 		dimensions = fmt.Sprintf("%dx%d", *metadata.Width, *metadata.Height)
 	}
 
-	return strings.Join([]string{
+	lines := []string{
 		fmt.Sprintf("file_id: %d", metadata.FileID),
 		fmt.Sprintf("hash: %s", metadata.Hash),
 		fmt.Sprintf("mime: %s", metadata.MIME),
@@ -1460,7 +1461,179 @@ func formatMetadata(metadata daemonclient.FileMetadata) string {
 		fmt.Sprintf("local: %t", metadata.IsLocal),
 		fmt.Sprintf("trashed: %t", metadata.IsTrashed),
 		fmt.Sprintf("deleted: %t", metadata.IsDeleted),
-	}, "\n")
+	}
+
+	tagLines := formatMetadataTags(metadata.Tags)
+	if len(tagLines) > 0 {
+		lines = append(lines, "", "tags:")
+		lines = append(lines, tagLines...)
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func formatMetadataTags(tags map[string]daemonclient.FileMetadataTagService) []string {
+	if len(tags) == 0 {
+		return nil
+	}
+
+	serviceKeys := []string{}
+	for serviceKey, service := range tags {
+		if !metadataTagServiceHasVisibleTags(service) {
+			continue
+		}
+
+		serviceKeys = append(serviceKeys, serviceKey)
+	}
+
+	if len(serviceKeys) == 0 {
+		return nil
+	}
+
+	sort.Slice(serviceKeys, func(i, j int) bool {
+		leftLabel := metadataTagServiceHeading(serviceKeys[i], tags[serviceKeys[i]])
+		rightLabel := metadataTagServiceHeading(serviceKeys[j], tags[serviceKeys[j]])
+		if leftLabel == rightLabel {
+			return serviceKeys[i] < serviceKeys[j]
+		}
+
+		return leftLabel < rightLabel
+	})
+
+	lines := []string{}
+	for _, serviceKey := range serviceKeys {
+		lines = append(lines, formatMetadataTagService(serviceKey, tags[serviceKey])...)
+	}
+
+	return lines
+}
+
+func formatMetadataTagService(
+	serviceKey string,
+	service daemonclient.FileMetadataTagService,
+) []string {
+	tagsByStatus := metadataTagPreferredTagsByStatus(service)
+
+	statusKeys := metadataTagStatusKeys(tagsByStatus)
+	if len(statusKeys) == 0 {
+		return nil
+	}
+
+	lines := []string{fmt.Sprintf("- %s", metadataTagServiceHeading(serviceKey, service))}
+	for _, statusKey := range statusKeys {
+		serviceTags := tagsByStatus[statusKey]
+		if len(serviceTags) == 0 {
+			continue
+		}
+
+		lines = append(
+			lines,
+			fmt.Sprintf(
+				"  %s: %s",
+				metadataTagStatusLabel(statusKey),
+				strings.Join(serviceTags, ", "),
+			),
+		)
+	}
+
+	return lines
+}
+
+func metadataTagServiceHasVisibleTags(service daemonclient.FileMetadataTagService) bool {
+	return len(metadataTagStatusKeys(metadataTagPreferredTagsByStatus(service))) > 0
+}
+
+func metadataTagPreferredTagsByStatus(
+	service daemonclient.FileMetadataTagService,
+) map[string][]string {
+	preferred := map[string][]string{}
+	for statusKey, tags := range service.StorageTags {
+		if len(tags) == 0 {
+			continue
+		}
+
+		preferred[statusKey] = tags
+	}
+
+	for statusKey, tags := range service.DisplayTags {
+		if len(tags) == 0 {
+			continue
+		}
+
+		preferred[statusKey] = tags
+	}
+
+	return preferred
+}
+
+func metadataTagServiceHeading(
+	serviceKey string,
+	service daemonclient.FileMetadataTagService,
+) string {
+	name := strings.TrimSpace(service.Name)
+	if name == "" {
+		name = serviceKey
+	}
+
+	typePretty := strings.TrimSpace(service.TypePretty)
+	if typePretty == "" {
+		return name
+	}
+
+	return name + " (" + typePretty + ")"
+}
+
+func metadataTagStatusKeys(tagsByStatus map[string][]string) []string {
+	statusKeys := []string{}
+	for statusKey, tags := range tagsByStatus {
+		if len(tags) == 0 {
+			continue
+		}
+
+		statusKeys = append(statusKeys, statusKey)
+	}
+
+	sort.Slice(statusKeys, func(i, j int) bool {
+		leftRank := metadataTagStatusRank(statusKeys[i])
+		rightRank := metadataTagStatusRank(statusKeys[j])
+		if leftRank == rightRank {
+			return statusKeys[i] < statusKeys[j]
+		}
+
+		return leftRank < rightRank
+	})
+
+	return statusKeys
+}
+
+func metadataTagStatusRank(statusKey string) int {
+	switch statusKey {
+	case "0":
+		return 0
+	case "1":
+		return 1
+	case "2":
+		return 2
+	case "3":
+		return 3
+	default:
+		return 100
+	}
+}
+
+func metadataTagStatusLabel(statusKey string) string {
+	switch statusKey {
+	case "0":
+		return "current"
+	case "1":
+		return "pending"
+	case "2":
+		return "deleted"
+	case "3":
+		return "petitioned"
+	default:
+		return "status " + statusKey
+	}
 }
 
 func shortCredential(value string) string {

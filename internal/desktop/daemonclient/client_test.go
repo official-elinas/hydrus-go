@@ -193,7 +193,7 @@ func TestClientCreateSessionRejectsBlankSessionKey(t *testing.T) {
 }
 
 func TestClientGetFileMetadata(t *testing.T) {
-	t.Run("returns selected metadata row", func(t *testing.T) {
+	t.Run("returns selected metadata row with decoded tags", func(t *testing.T) {
 		accessKey := strings.Repeat("c", 64)
 		sessionKey := "metadata-session"
 
@@ -216,6 +216,24 @@ func TestClientGetFileMetadata(t *testing.T) {
 						"is_local":   true,
 						"is_trashed": false,
 						"is_deleted": false,
+						"tags": map[string]any{
+							"74616773": map[string]any{
+								"name":        "my tags",
+								"type":        5,
+								"type_pretty": "local tag domain",
+								"storage_tags": map[string][]string{
+									"0": {"creator:alice"},
+								},
+								"display_tags": map[string][]string{
+									"0": {"creator:alice"},
+								},
+							},
+						},
+						"service_keys_to_statuses_to_tags": map[string]any{
+							"74616773": map[string][]string{
+								"0": {"creator:alice"},
+							},
+						},
 					}},
 				}), nil
 			}),
@@ -229,6 +247,19 @@ func TestClientGetFileMetadata(t *testing.T) {
 
 		if metadata.FileID != 42 || metadata.MIME != "image/png" || metadata.Size != 1234 {
 			t.Fatalf("metadata = %#v, want decoded file_id/mime/size", metadata)
+		}
+
+		tagService, ok := metadata.Tags["74616773"]
+		if !ok {
+			t.Fatalf("metadata.Tags = %#v, want decoded service-keyed tag payload", metadata.Tags)
+		}
+
+		if tagService.Name != "my tags" || tagService.TypePretty != "local tag domain" {
+			t.Fatalf("tagService = %#v, want decoded name/type_pretty", tagService)
+		}
+
+		if got := tagService.DisplayTags["0"]; len(got) != 1 || got[0] != "creator:alice" {
+			t.Fatalf("tagService.DisplayTags[0] = %v, want [creator:alice]", got)
 		}
 	})
 

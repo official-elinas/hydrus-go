@@ -27,7 +27,7 @@ The prototype is intentionally narrow:
 - preview selected JPEG/PNG/GIF originals through the daemon's content endpoint
   - preview is intentionally bounded to keep the thin client responsive
   - current limits: 16 MiB payload, 8192px maximum dimension, 16,000,000 decoded pixels
-- inspect selected-file metadata
+- inspect selected-file metadata, including daemon-served tag groups grouped by service/status in the details pane
 - clear the queue when idle or prune/retry finished items from the queue review pane
 - trash one selected file through the daemon's trash endpoint
 

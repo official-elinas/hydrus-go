@@ -43,7 +43,7 @@ The first prototype iteration is intentionally narrow:
 - preview selected JPEG/PNG/GIF originals through the daemon's `/v1/files/content` endpoint
   - keep preview bounded for thin-client responsiveness (currently 16 MiB payload,
     8192px maximum dimension, 16,000,000 decoded pixels)
-- show selected-file metadata in a left-side details pane
+- show selected-file metadata in a left-side details pane, including daemon-served tag groups for the selected file
 - trash one selected file through the daemon's trash endpoint
 - refresh the grid and metadata state after each mutation
 
