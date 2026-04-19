@@ -32,18 +32,13 @@ The daemon should already be running separately, typically at
 `http://127.0.0.1:45869`.
 
 If you do not already have a Hydrus client bundle, you can start the daemon
-against a new or empty `HYDRUS_GO_DB_DIR` and let it bootstrap one through the
-upstream Python Hydrus path:
+against a new or empty `HYDRUS_GO_DB_DIR` and let it bootstrap one natively:
 
 ```bash
+export HYDRUS_GO_DB_DIR=/tmp/hydrus-go-fyne-smoke-db
 ./bin/hydrusd \
-  --bootstrap-fresh-client \
-  --bootstrap-hydrus-root /path/to/hydrus \
-  --bootstrap-python python3
+  --bootstrap-fresh-client
 ```
-
-That bootstrap runs on the daemon host, so the upstream Hydrus Python checkout
-must exist on that machine.
 
 For temporary LAN testing, `make run-lan` starts `hydrusd` with the runtime flag
 `--listen 0.0.0.0:45869`. Override the port with

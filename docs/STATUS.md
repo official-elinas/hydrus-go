@@ -45,8 +45,11 @@ Last updated: 2026-04-18
 - added explicit Linux and Windows desktop build targets, plus a Windows GUI-subsystem build so Explorer launches do not spawn an extra terminal
 - added selected-file original preview in the Fyne client for JPEG/PNG/GIF files through `/v1/files/content`
 - bounded selected-file preview work to keep the thin client responsive (16 MiB payload, 8192px maximum dimension, 16,000,000 decoded pixels)
-- added an opt-in Python-backed fresh client bundle bootstrap for empty or missing `HYDRUS_GO_DB_DIR` targets
-- added runtime bootstrap flags and validation for Python interpreter, Hydrus root, timeout, and bundle-state safety checks
+- added an opt-in native-Go fresh client bundle bootstrap for empty or missing `HYDRUS_GO_DB_DIR` targets
+- added runtime bootstrap timeout and bundle-state safety checks for first-start initialization
+- removed the obsolete Python-interpreter / Hydrus-root bootstrap knobs from the active config and CLI surface
+- expanded the native first-start seed with `client.temp.db`, default managed-storage metadata/root, a seeded `version` row, and hidden built-in services needed for closer Hydrus bootstrap shape
+- expanded the native first-start service-list seed with `downloader tags` and `favourites`, including a Hydrus-style favourites rating dictionary
 - added DB and app-wiring tests using a copied minimal SQLite fixture bundle
 - added tests for config validation, HTTP/auth behavior, and shutdown lifecycle
 - documented the daemon-first migration direction and current bootstrap limits
@@ -64,7 +67,7 @@ Last updated: 2026-04-18
 - transaction behavior is centered around `BEGIN IMMEDIATE` and savepoints
 - the current daemon runtime now splits reads and writes across separate bundle connections so public local-path imports do not share a connection with browse/read handlers
 - the packaged Linux Hydrus release exposes `hydrus_client -d/--db_dir`, and a headless first-start probe created the canonical client DB bundle plus `client_files` in a fresh directory
-- next exploration is expected to branch from the current thin-client state and evaluate a fully Go-native client-bundle bootstrap path
+- the daemon now has a fully native first-start bundle path, but upstream bootstrap parity remains intentionally partial
 
 ## Next
 
@@ -249,10 +252,9 @@ Last updated: 2026-04-18
 - bounded preview payload and decoded image size to keep the thin client responsive during Windows/LAN testing
 - verified with `go test ./...`, `make build-desktop`, `make build-desktop-windows`, and `make check-desktop`
 
-### 2026-04-18 — Milestone 14: Python-backed fresh bundle bootstrap
+### 2026-04-18 — Milestone 14: native-Go fresh bundle bootstrap
 
-- added opt-in daemon startup bootstrap for empty or missing `HYDRUS_GO_DB_DIR` targets using the upstream Python Hydrus client bundle creation path
-- added runtime flags and env validation for bootstrap enablement, interpreter selection, Hydrus root resolution, and timeout control
-- made startup bootstrap/open work honor the daemon's signal-aware startup context instead of using an uncancelable background context
-- added fail-fast bundle-state handling for `ready`, `empty`, `partial`, and `non-empty without bundle` directory states
-- verified with targeted bootstrap/config/app/runtime tests plus `go test ./...`
+- started with an opt-in daemon startup bootstrap for empty or missing `HYDRUS_GO_DB_DIR` targets
+- shifted the implementation on `feat/go-bootstrap-branch` to a native-Go empty-bundle initializer aligned to current hydrus-go runtime expectations
+- preserved fail-fast bundle-state handling for `ready`, `empty`, `partial`, and `non-empty without bundle` directory states
+- verified native first-start behavior with targeted bootstrap/config/app tests plus `go test ./...`

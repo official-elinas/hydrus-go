@@ -385,21 +385,29 @@ func TestBundleRecordPreparedLocalImport(t *testing.T) {
 		}()
 
 		otherLocalKey := []byte("other-local-files")
-		if _, err := bundle.conn.ExecContext(
+		inserted, err := bundle.conn.ExecContext(
 			context.Background(),
-			`INSERT INTO main.services (service_id, service_key, service_type, name, dictionary_string) VALUES (?, ?, ?, ?, ?)`,
-			10,
+			`INSERT INTO main.services (service_key, service_type, name, dictionary_string) VALUES (?, ?, ?, ?)`,
 			otherLocalKey,
 			int(services.TypeLocalFileDomain),
 			"other files",
 			"{}",
-		); err != nil {
+		)
+		if err != nil {
 			t.Fatalf("insert second local file service error = %v", err)
+		}
+
+		otherLocalServiceID, err := inserted.LastInsertId()
+		if err != nil {
+			t.Fatalf("LastInsertId() error = %v", err)
 		}
 
 		if _, err := bundle.conn.ExecContext(
 			context.Background(),
-			`CREATE TABLE main.current_files_10 (hash_id INTEGER PRIMARY KEY, timestamp_ms INTEGER)`,
+			fmt.Sprintf(
+				`CREATE TABLE main.current_files_%d (hash_id INTEGER PRIMARY KEY, timestamp_ms INTEGER)`,
+				otherLocalServiceID,
+			),
 		); err != nil {
 			t.Fatalf("create second local current table error = %v", err)
 		}

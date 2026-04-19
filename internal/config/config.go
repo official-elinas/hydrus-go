@@ -7,7 +7,6 @@ import (
 	"net"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -26,8 +25,6 @@ type Config struct {
 	ListenAddr                 string
 	DBDir                      string
 	EnableFreshClientBootstrap bool
-	BootstrapPythonCommand     string
-	BootstrapHydrusRoot        string
 	BootstrapTimeout           time.Duration
 	AccessKey                  string
 	AccessName                 string
@@ -59,8 +56,6 @@ func LoadFromEnvUnvalidated() (Config, error) {
 		ListenAddr:                 getEnv("HYDRUS_GO_LISTEN_ADDR", defaultListenAddr),
 		DBDir:                      strings.TrimSpace(os.Getenv("HYDRUS_GO_DB_DIR")),
 		EnableFreshClientBootstrap: false,
-		BootstrapPythonCommand:     getEnv("HYDRUS_GO_BOOTSTRAP_PYTHON", defaultBootstrapPythonCommand()),
-		BootstrapHydrusRoot:        strings.TrimSpace(os.Getenv("HYDRUS_GO_BOOTSTRAP_HYDRUS_ROOT")),
 		BootstrapTimeout:           defaultBootstrapTimeout,
 		AccessKey:                  strings.TrimSpace(os.Getenv("HYDRUS_GO_ACCESS_KEY")),
 		AccessName:                 getEnv("HYDRUS_GO_ACCESS_NAME", defaultAccessName),
@@ -74,14 +69,7 @@ func LoadFromEnvUnvalidated() (Config, error) {
 		cfg.DBDir = filepath.Clean(cfg.DBDir)
 	}
 
-	if cfg.BootstrapHydrusRoot != "" {
-		cfg.BootstrapHydrusRoot = filepath.Clean(cfg.BootstrapHydrusRoot)
-	}
-
-	enableFreshClientBootstrap, err := getEnvBool(
-		"HYDRUS_GO_ENABLE_PYTHON_FRESH_CLIENT_BOOTSTRAP",
-		false,
-	)
+	enableFreshClientBootstrap, err := getFreshBootstrapEnabled()
 	if err != nil {
 		return Config{}, err
 	}
@@ -145,21 +133,11 @@ func (c Config) validate() error {
 
 	if c.EnableFreshClientBootstrap {
 		if strings.TrimSpace(c.DBDir) == "" {
-			return fmt.Errorf("HYDRUS_GO_DB_DIR is required when Python fresh-client bootstrap is enabled")
-		}
-
-		if strings.TrimSpace(c.BootstrapPythonCommand) == "" {
-			return fmt.Errorf("bootstrap python command must not be empty")
+			return fmt.Errorf("HYDRUS_GO_DB_DIR is required when fresh-client bootstrap is enabled")
 		}
 
 		if c.BootstrapTimeout <= 0 {
 			return fmt.Errorf("bootstrap timeout must be greater than zero")
-		}
-
-		if c.BootstrapHydrusRoot != "" {
-			if err := validateHydrusRootPath(c.BootstrapHydrusRoot); err != nil {
-				return fmt.Errorf("validate HYDRUS_GO_BOOTSTRAP_HYDRUS_ROOT: %w", err)
-			}
 		}
 	}
 
@@ -208,12 +186,16 @@ func getEnv(key, fallback string) string {
 	return value
 }
 
-func defaultBootstrapPythonCommand() string {
-	if runtime.GOOS == "windows" {
-		return "python"
+func getFreshBootstrapEnabled() (bool, error) {
+	if raw := strings.TrimSpace(os.Getenv("HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP")); raw != "" {
+		return parseEnvBool("HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP", raw)
 	}
 
-	return "python3"
+	if raw := strings.TrimSpace(os.Getenv("HYDRUS_GO_ENABLE_PYTHON_FRESH_CLIENT_BOOTSTRAP")); raw != "" {
+		return parseEnvBool("HYDRUS_GO_ENABLE_PYTHON_FRESH_CLIENT_BOOTSTRAP", raw)
+	}
+
+	return false, nil
 }
 
 func getEnvBool(key string, fallback bool) (bool, error) {
@@ -222,6 +204,10 @@ func getEnvBool(key string, fallback bool) (bool, error) {
 		return fallback, nil
 	}
 
+	return parseEnvBool(key, raw)
+}
+
+func parseEnvBool(key string, raw string) (bool, error) {
 	value, err := strconv.ParseBool(raw)
 	if err != nil {
 		return false, fmt.Errorf("parse %s: %w", key, err)
@@ -274,39 +260,4 @@ func normalizeOptionalAccessKey(accessKey string) (string, error) {
 	}
 
 	return normalized, nil
-}
-
-func validateHydrusRootPath(root string) error {
-	info, err := os.Stat(root)
-	if err != nil {
-		return err
-	}
-
-	if !info.IsDir() {
-		return fmt.Errorf("must be a directory")
-	}
-
-	for _, requiredPath := range []string{
-		filepath.Join(root, "hydrus"),
-		filepath.Join(root, "hydrus_client.py"),
-		filepath.Join(root, "hydrus", "client", "db", "ClientDB.py"),
-	} {
-		requiredInfo, statErr := os.Stat(requiredPath)
-		if statErr != nil {
-			return statErr
-		}
-
-		if strings.HasSuffix(requiredPath, ".py") {
-			if requiredInfo.IsDir() {
-				return fmt.Errorf("%q must be a file", requiredPath)
-			}
-			continue
-		}
-
-		if !requiredInfo.IsDir() {
-			return fmt.Errorf("%q must be a directory", requiredPath)
-		}
-	}
-
-	return nil
 }

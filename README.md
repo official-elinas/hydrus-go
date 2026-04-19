@@ -30,7 +30,7 @@ This repository currently provides the following early migration slices:
 - an initial Fyne-based desktop prototype for `hydrusd`, including selected JPEG/PNG/GIF original preview through daemon APIs
 - real `hydrusd --listen host:port` runtime overrides for temporary LAN testing
 - explicit Linux/Windows desktop build targets, including a Windows GUI-subsystem executable for Explorer launches
-- an opt-in Python-backed fresh Hydrus client bundle bootstrap for empty or missing DB directories
+- an opt-in native-Go fresh Hydrus client bundle bootstrap for empty or missing DB directories
 
 Project notes live in:
 
@@ -105,16 +105,14 @@ Implementation notes for this slice:
 
 ## Fresh first-start bundle bootstrap
 
-`hydrusd` can now create a fresh canonical client bundle through the upstream
-Python Hydrus bootstrap path instead of requiring an existing library bundle.
+`hydrusd` can now create a fresh canonical client bundle in Go instead of
+requiring an existing library bundle.
 
 Enable it with:
 
 - `HYDRUS_GO_DB_DIR=/path/to/new/or/existing/db`
-- `HYDRUS_GO_ENABLE_PYTHON_FRESH_CLIENT_BOOTSTRAP=true` or
+- `HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP=true` or
   `--bootstrap-fresh-client`
-- optional `HYDRUS_GO_BOOTSTRAP_PYTHON` or `--bootstrap-python`
-- optional `HYDRUS_GO_BOOTSTRAP_HYDRUS_ROOT` or `--bootstrap-hydrus-root`
 - optional `HYDRUS_GO_BOOTSTRAP_TIMEOUT` or `--bootstrap-timeout`
 
 `HYDRUS_GO_DB_DIR` is required when fresh bootstrap is enabled.
@@ -128,35 +126,40 @@ Bundle-state behavior today:
 - non-empty dir without a canonical bundle: startup fails; fresh bootstrap only
   runs against an empty dir
 
-The upstream Hydrus root must be a Python checkout containing:
-
-- `hydrus_client.py`
-- `hydrus/`
-- `hydrus/client/db/ClientDB.py`
-
-When `hydrus-go` is launched from inside the Hydrus checkout, root detection may
-work automatically. Otherwise, set `HYDRUS_GO_BOOTSTRAP_HYDRUS_ROOT` or pass
-`--bootstrap-hydrus-root` explicitly.
-
 One concrete first-start example:
 
 ```bash
 export HYDRUS_GO_DB_DIR=/tmp/hydrus-go-smoke-db
 ./bin/hydrusd \
-  --bootstrap-fresh-client \
-  --bootstrap-hydrus-root /path/to/hydrus \
-  --bootstrap-python python3
+  --bootstrap-fresh-client
 ```
 
 Platform notes for this bootstrap path:
 
-- the default bootstrap interpreter is `python3` on non-Windows and `python` on
-  Windows
-- launcher-style overrides such as `py -3` are accepted through
-  `HYDRUS_GO_BOOTSTRAP_PYTHON` or `--bootstrap-python`
-- the Python environment must be able to import Hydrus and its Qt stack
-- the bootstrap subprocess forces `QT_QPA_PLATFORM=offscreen`, so it is intended
-  to run headless on the daemon host
+- the current native bootstrap seeds a minimal empty bundle that is sufficient
+  for current service discovery, recent browse, import, and trash flows
+- fresh native bundle service-list responses now also include `downloader tags`
+  and `favourites`
+- `downloader tags` expands the grouped `local_tags` discovery bucket, while
+  `favourites` stays visible through `services` / `services_v2` like Hydrus's
+  rating services rather than introducing a new grouped bucket
+- the seeded `favourites` service now carries a real Hydrus-style rating
+  dictionary so `services` / `services_v2` expose the expected star-shape and
+  colour fields on first start
+- it also creates `client.temp.db`, the managed `client_files` root, default
+  client-files storage metadata, a `version` row seeded to the current Hydrus
+  compatibility target, and a small set of hidden built-ins (`deleted from
+  anywhere`, `local notes`, `client api`)
+- it does not yet claim full upstream Hydrus bootstrap parity
+
+If you are updating older shell scripts or service units:
+
+- `HYDRUS_GO_ENABLE_PYTHON_FRESH_CLIENT_BOOTSTRAP` was renamed to
+  `HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP`
+- `HYDRUS_GO_BOOTSTRAP_PYTHON` and `HYDRUS_GO_BOOTSTRAP_HYDRUS_ROOT` were removed
+  because the first-start bootstrap no longer shells out to Python
+- `--bootstrap-python` and `--bootstrap-hydrus-root` were removed for the same
+  reason; keep using `--bootstrap-fresh-client` and `--bootstrap-timeout`
 
 ## Bootstrap auth flow
 
@@ -298,9 +301,7 @@ or empty directory and launch with the fresh-bootstrap flags instead:
 ```bash
 ./bin/hydrusd \
   --listen 0.0.0.0:5555 \
-  --bootstrap-fresh-client \
-  --bootstrap-hydrus-root /path/to/hydrus \
-  --bootstrap-python python3
+	--bootstrap-fresh-client
 ```
 
 When the configured Hydrus bundle is writable, `hydrusd` will also enable the
@@ -385,9 +386,7 @@ This bootstrap currently targets the Go toolchain declared in `go.mod`
 
 - `HYDRUS_GO_LISTEN_ADDR` (default: `127.0.0.1:45869`)
 - `HYDRUS_GO_DB_DIR` (optional path to a Hydrus client DB directory; required when fresh bootstrap is enabled)
-- `HYDRUS_GO_ENABLE_PYTHON_FRESH_CLIENT_BOOTSTRAP` (default: `false`)
-- `HYDRUS_GO_BOOTSTRAP_PYTHON` (default: `python3` on non-Windows, `python` on Windows)
-- `HYDRUS_GO_BOOTSTRAP_HYDRUS_ROOT` (optional upstream Hydrus Python checkout root)
+- `HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP` (default: `false`)
 - `HYDRUS_GO_BOOTSTRAP_TIMEOUT` (default: `2m`)
 - `HYDRUS_GO_ACCESS_KEY` (optional 64-char hex access key)
 - `HYDRUS_GO_ACCESS_NAME` (default: `hydrus-go`)

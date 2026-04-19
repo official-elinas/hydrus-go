@@ -76,9 +76,8 @@ Important note:
 - the prototype can now be tested against either an existing Hydrus client
   bundle or an empty/missing `HYDRUS_GO_DB_DIR` that `hydrusd` bootstraps on
   first start
-- fresh bootstrap runs on the daemon host, so
-  `HYDRUS_GO_BOOTSTRAP_HYDRUS_ROOT` or `--bootstrap-hydrus-root` must point at
-  an upstream Hydrus Python checkout on that host
+- the current first-start bootstrap on this branch is native Go rather than a
+  Python checkout/runtime dependency
 - immediate thumbnail availability should currently only be expected for JPEG,
   PNG, and GIF still-image imports; other media types may browse without a
   thumbnail until broader generation support lands

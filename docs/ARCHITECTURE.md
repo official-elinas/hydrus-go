@@ -83,8 +83,8 @@ The project now also has a small import-composition layer:
 The DB-backed layer currently:
 
 - optionally opens a real Hydrus client DB bundle via `HYDRUS_GO_DB_DIR`
-- optionally bootstraps a fresh canonical client bundle through the upstream
-  Python Hydrus path before Go opens the bundle
+- optionally bootstraps a fresh canonical client bundle natively in Go before
+  Go opens the bundle
 - attaches the external DBs on a single SQLite connection
 - keeps that connection read-only with `PRAGMA query_only = ON`
 - serves DB-backed service discovery
@@ -115,14 +115,29 @@ The current daemon startup flow for bundle-backed mode is:
    - `partial`
    - `non-empty without bundle`
 5. only the `empty` state is eligible for fresh bootstrap
-6. if bootstrap runs, invoke the upstream Python Hydrus client bootstrap path to
-   create the canonical bundle
+6. if bootstrap runs, seed a native Go empty bundle with the canonical DB files,
+   `client.temp.db`, default managed-storage metadata, and the current built-in
+   service seed required by hydrus-go
 7. open the resulting bundle from Go and continue with normal read/write wiring
 
 Important boundary for this phase:
 
-- the fresh client bundle is created by upstream Python code, not by a
-  handwritten native Go schema/bootstrap path
+- the fresh client bundle is now seeded by a narrow native Go
+  schema/bootstrap path aimed at current hydrus-go runtime expectations
+- that seed is now a little closer to a real Hydrus first-start bundle:
+  - service-list-visible built-ins now include `downloader tags` and
+    `favourites`
+  - `downloader tags` expands the grouped `local_tags` bucket, while
+    `favourites` remains visible through `services` / `services_v2` without a
+    new grouped rating bucket, matching current Hydrus behavior
+  - `favourites` now uses a real Hydrus-style rating dictionary seed so
+    discovery payloads expose the expected star-shape and colour metadata
+  - `version` is seeded to the current Hydrus compatibility target
+  - default managed `client_files` storage metadata and root are created
+  - a small hidden built-in service set is present (`deleted from anywhere`,
+    `local notes`, `client api`)
+- this first native slice intentionally targets the current Go feature set, not
+  full upstream Hydrus bootstrap parity yet
 - `hydrus-go` currently fails fast on partial or otherwise invalid bundle
   directories instead of trying to repair or overwrite them
 

@@ -208,6 +208,8 @@ func TestProtectedEndpoints(t *testing.T) {
 		if _, ok := servicesPayload["local_files"]; !ok {
 			t.Fatal("local_files missing from response")
 		}
+
+		assertDefaultServiceDiscoveryPayload(t, servicesPayload)
 	})
 
 	t.Run("get service by key returns service", func(t *testing.T) {
@@ -1233,6 +1235,110 @@ func (s *fakeMetadataStore) TrashFile(
 	}
 
 	return filetrash.Result{}, nil
+}
+
+func assertDefaultServiceDiscoveryPayload(t *testing.T, payload map[string]any) {
+	t.Helper()
+
+	servicesValue, ok := payload["services_v2"].([]any)
+	if !ok {
+		t.Fatalf("services_v2 type = %T, want []any", payload["services_v2"])
+	}
+
+	serviceByName := map[string]map[string]any{}
+	for _, item := range servicesValue {
+		service, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("service item type = %T, want map[string]any", item)
+		}
+
+		name, ok := service["name"].(string)
+		if !ok {
+			t.Fatalf("service name type = %T, want string", service["name"])
+		}
+
+		serviceByName[name] = service
+	}
+
+	localTagsValue, ok := payload["local_tags"].([]any)
+	if !ok {
+		t.Fatalf("local_tags type = %T, want []any", payload["local_tags"])
+	}
+
+	if len(localTagsValue) != 2 {
+		t.Fatalf("len(local_tags) = %d, want 2", len(localTagsValue))
+	}
+
+	if _, ok := serviceByName["downloader tags"]; !ok {
+		t.Fatal("downloader tags missing from discovery payload")
+	}
+
+	favourites, ok := serviceByName["favourites"]
+	if !ok {
+		t.Fatal("favourites missing from discovery payload")
+	}
+
+	if _, ok := payload["local_ratings"]; ok {
+		t.Fatal("local_ratings unexpectedly present in grouped discovery payload")
+	}
+
+	if got, _ := favourites["star_shape"].(string); got != "fat star" {
+		t.Fatalf("favourites star_shape = %q, want %q", got, "fat star")
+	}
+
+	showInThumbnail, ok := favourites["show_in_thumbnail"].(bool)
+	if !ok || showInThumbnail {
+		t.Fatalf("favourites show_in_thumbnail = %v, want explicit false", favourites["show_in_thumbnail"])
+	}
+
+	showInThumbnailEvenWhenNull, ok := favourites["show_in_thumbnail_even_when_null"].(bool)
+	if !ok || showInThumbnailEvenWhenNull {
+		t.Fatalf(
+			"favourites show_in_thumbnail_even_when_null = %v, want explicit false",
+			favourites["show_in_thumbnail_even_when_null"],
+		)
+	}
+
+	colours, ok := favourites["colours"].(map[string]any)
+	if !ok {
+		t.Fatalf("favourites colours type = %T, want map[string]any", favourites["colours"])
+	}
+
+	likeColour, ok := colours["like"].(map[string]any)
+	if !ok {
+		t.Fatalf("favourites like colour type = %T, want map[string]any", colours["like"])
+	}
+
+	if got, _ := likeColour["brush"].(string); got != "#F0F041" {
+		t.Fatalf("favourites like brush = %q, want %q", got, "#F0F041")
+	}
+
+	dislikeColour, ok := colours["dislike"].(map[string]any)
+	if !ok {
+		t.Fatalf("favourites dislike colour type = %T, want map[string]any", colours["dislike"])
+	}
+
+	if got, _ := dislikeColour["brush"].(string); got != "#C85078" {
+		t.Fatalf("favourites dislike brush = %q, want %q", got, "#C85078")
+	}
+
+	nullColour, ok := colours["null"].(map[string]any)
+	if !ok {
+		t.Fatalf("favourites null colour type = %T, want map[string]any", colours["null"])
+	}
+
+	if got, _ := nullColour["brush"].(string); got != "#BFBFBF" {
+		t.Fatalf("favourites null brush = %q, want %q", got, "#BFBFBF")
+	}
+
+	mixedColour, ok := colours["mixed"].(map[string]any)
+	if !ok {
+		t.Fatalf("favourites mixed colour type = %T, want map[string]any", colours["mixed"])
+	}
+
+	if got, _ := mixedColour["brush"].(string); got != "#5F5F5F" {
+		t.Fatalf("favourites mixed brush = %q, want %q", got, "#5F5F5F")
+	}
 }
 
 func decodeJSON(t *testing.T, raw []byte, target any) {

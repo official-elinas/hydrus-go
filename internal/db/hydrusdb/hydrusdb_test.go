@@ -33,12 +33,16 @@ func TestBundleServices(t *testing.T) {
 		t.Fatalf("List() error = %v", err)
 	}
 
-	if len(catalog) != 7 {
-		t.Fatalf("len(catalog) = %d, want 7", len(catalog))
+	if len(catalog) != 9 {
+		t.Fatalf("len(catalog) = %d, want 9", len(catalog))
 	}
 
 	if catalog[0].Name != "my tags" {
 		t.Fatalf("catalog[0].Name = %q, want my tags", catalog[0].Name)
+	}
+
+	if catalog[1].Name != "downloader tags" {
+		t.Fatalf("catalog[1].Name = %q, want downloader tags", catalog[1].Name)
 	}
 
 	if _, ok := catalog.ByName("client api"); ok {
@@ -91,6 +95,51 @@ func TestBundleServices(t *testing.T) {
 		t.Fatalf(
 			"legacy like pen = %q, want #010203",
 			legacy.Colours["like"].Pen,
+		)
+	}
+
+	favourites, ok := catalog.ByName("favourites")
+	if !ok {
+		t.Fatal("favourites service missing from discovery catalog")
+	}
+
+	if favourites.StarShape != "fat star" {
+		t.Fatalf("favourites.StarShape = %q, want fat star", favourites.StarShape)
+	}
+
+	if favourites.ShowInThumbnail == nil || *favourites.ShowInThumbnail {
+		t.Fatal("favourites.ShowInThumbnail missing or true, want explicit false")
+	}
+
+	if favourites.ShowInThumbnailEvenWhenNull == nil || *favourites.ShowInThumbnailEvenWhenNull {
+		t.Fatal("favourites.ShowInThumbnailEvenWhenNull missing or true, want explicit false")
+	}
+
+	if favourites.Colours["like"].Brush != "#F0F041" {
+		t.Fatalf(
+			"favourites like brush = %q, want #F0F041",
+			favourites.Colours["like"].Brush,
+		)
+	}
+
+	if favourites.Colours["dislike"].Brush != "#C85078" {
+		t.Fatalf(
+			"favourites dislike brush = %q, want #C85078",
+			favourites.Colours["dislike"].Brush,
+		)
+	}
+
+	if favourites.Colours["null"].Brush != "#BFBFBF" {
+		t.Fatalf(
+			"favourites null brush = %q, want #BFBFBF",
+			favourites.Colours["null"].Brush,
+		)
+	}
+
+	if favourites.Colours["mixed"].Brush != "#5F5F5F" {
+		t.Fatalf(
+			"favourites mixed brush = %q, want #5F5F5F",
+			favourites.Colours["mixed"].Brush,
 		)
 	}
 }
@@ -797,6 +846,17 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 			[[0,"show_fraction_beside_stars"],[0,0]]
 		]
 	]`
+	favouritesDictionary := `[
+		21,
+		2,
+		[
+			[[0,"colours"],[2,[26,3,[[0,[0,[[0,0,0],[240,240,65]]]],[0,[1,[[0,0,0],[200,80,120]]]],[0,[2,[[0,0,0],[191,191,191]]]],[0,[4,[[0,0,0],[95,95,95]]]]]]]],
+			[[0,"show_in_thumbnail"],[0,false]],
+			[[0,"show_in_thumbnail_even_when_null"],[0,false]],
+			[[0,"shape"],[0,2]],
+			[[0,"rating_svg"],[0,null]]
+		]
+	]`
 
 	localTagKey := []byte("local-tags")
 	localFilesKey := []byte("local-files")
@@ -806,6 +866,8 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 	trashKey := []byte("trash")
 	ipfsKey := []byte("my-ipfs")
 	clientAPIKey := []byte("client-api")
+	downloaderTagsKey := []byte("downloader tags")
+	favouritesKey := []byte("favourites")
 
 	mainDB := openSQLiteForTest(t, mainPath)
 	defer mainDB.Close()
@@ -861,7 +923,7 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 	mustExec(
 		t,
 		mainDB,
-		`INSERT INTO services (service_id, service_key, service_type, name, dictionary_string) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?);`,
+		`INSERT INTO services (service_id, service_key, service_type, name, dictionary_string) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?);`,
 		1, localTagKey, int(services.TypeLocalTag), "my tags", "{}",
 		2, localFilesKey, int(services.TypeLocalFileDomain), "my files", "{}",
 		3, hydrusLocalFilesKey, int(services.TypeHydrusLocalFileStorage), "all local files", "{}",
@@ -871,6 +933,8 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 		7, []byte("my-stars"), int(services.TypeLocalRatingNumerical), "my stars", ratingDictionary,
 		8, ipfsKey, int(services.TypeIPFS), "my ipfs", "{}",
 		9, clientAPIKey, int(services.TypeClientAPIService), "client api", "{}",
+		10, downloaderTagsKey, int(services.TypeLocalTag), "downloader tags", "{}",
+		11, favouritesKey, int(services.TypeLocalRatingLike), "favourites", favouritesDictionary,
 	)
 	mustExec(
 		t,

@@ -9,7 +9,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -56,10 +55,6 @@ type cliOptions struct {
 	listenSet               bool
 	bootstrapFreshClient    bool
 	bootstrapFreshClientSet bool
-	bootstrapPython         string
-	bootstrapPythonSet      bool
-	bootstrapHydrusRoot     string
-	bootstrapHydrusRootSet  bool
 	bootstrapTimeout        time.Duration
 	bootstrapTimeoutSet     bool
 }
@@ -84,17 +79,6 @@ func loadRuntimeConfig(args []string, stderr io.Writer) (config.Config, error) {
 		cfg.EnableFreshClientBootstrap = options.bootstrapFreshClient
 	}
 
-	if options.bootstrapPythonSet {
-		cfg.BootstrapPythonCommand = strings.TrimSpace(options.bootstrapPython)
-	}
-
-	if options.bootstrapHydrusRootSet {
-		cfg.BootstrapHydrusRoot = strings.TrimSpace(options.bootstrapHydrusRoot)
-		if cfg.BootstrapHydrusRoot != "" {
-			cfg.BootstrapHydrusRoot = filepath.Clean(cfg.BootstrapHydrusRoot)
-		}
-	}
-
 	if options.bootstrapTimeoutSet {
 		cfg.BootstrapTimeout = options.bootstrapTimeout
 	}
@@ -112,7 +96,7 @@ func parseCLIOptions(args []string, stderr io.Writer) (cliOptions, error) {
 	flagSet.Usage = func() {
 		_, _ = fmt.Fprintln(
 			stderr,
-			"Usage: hydrusd [--listen host:port] [--bootstrap-fresh-client] [--bootstrap-python path] [--bootstrap-hydrus-root path] [--bootstrap-timeout duration]",
+			"Usage: hydrusd [--listen host:port] [--bootstrap-fresh-client] [--bootstrap-timeout duration]",
 		)
 		flagSet.PrintDefaults()
 	}
@@ -128,19 +112,7 @@ func parseCLIOptions(args []string, stderr io.Writer) (cliOptions, error) {
 		&options.bootstrapFreshClient,
 		"bootstrap-fresh-client",
 		false,
-		"if HYDRUS_GO_DB_DIR is empty, create a fresh canonical client bundle via the upstream Python bootstrap",
-	)
-	flagSet.StringVar(
-		&options.bootstrapPython,
-		"bootstrap-python",
-		"",
-		"override the Python interpreter used for fresh-client bootstrap (for example /path/to/python3)",
-	)
-	flagSet.StringVar(
-		&options.bootstrapHydrusRoot,
-		"bootstrap-hydrus-root",
-		"",
-		"override the upstream Hydrus Python root used for fresh-client bootstrap",
+		"if HYDRUS_GO_DB_DIR is empty or missing, create a fresh canonical client bundle using the native hydrus-go bootstrap",
 	)
 	flagSet.DurationVar(
 		&options.bootstrapTimeout,
@@ -162,21 +134,11 @@ func parseCLIOptions(args []string, stderr io.Writer) (cliOptions, error) {
 			options.bootstrapFreshClientSet = true
 		}
 
-		if f.Name == "bootstrap-python" {
-			options.bootstrapPythonSet = true
-		}
-
-		if f.Name == "bootstrap-hydrus-root" {
-			options.bootstrapHydrusRootSet = true
-		}
-
 		if f.Name == "bootstrap-timeout" {
 			options.bootstrapTimeoutSet = true
 		}
 	})
 	options.listenAddr = strings.TrimSpace(options.listenAddr)
-	options.bootstrapPython = strings.TrimSpace(options.bootstrapPython)
-	options.bootstrapHydrusRoot = strings.TrimSpace(options.bootstrapHydrusRoot)
 
 	if flagSet.NArg() > 0 {
 		return cliOptions{}, fmt.Errorf("unexpected arguments: %s", strings.Join(flagSet.Args(), " "))

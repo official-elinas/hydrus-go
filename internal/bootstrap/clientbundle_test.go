@@ -2,26 +2,32 @@ package bootstrap
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/official-elinas/hydrus-go/internal/buildinfo"
+	"github.com/official-elinas/hydrus-go/internal/core/services"
+	"github.com/official-elinas/hydrus-go/internal/db/hydrusdb"
+	"github.com/official-elinas/hydrus-go/internal/storage/clientfiles"
+	_ "modernc.org/sqlite"
 )
 
 func TestEnsureFreshClientBundle_ReadyBundleSkipsBootstrap(t *testing.T) {
 	dbDir := t.TempDir()
-	createBundleFiles(t, dbDir)
+	createReadyNativeBundle(t, dbDir)
 
-	originalRunner := runPythonFreshClientBootstrap
-	runPythonFreshClientBootstrap = func(context.Context, runRequest) error {
-		t.Fatal("runPythonFreshClientBootstrap() called, want skip for existing bundle")
+	originalCreate := createFreshClientBundle
+	createFreshClientBundle = func(context.Context, string) error {
+		t.Fatal("createFreshClientBundle() called, want skip for existing bundle")
 		return nil
 	}
 	defer func() {
-		runPythonFreshClientBootstrap = originalRunner
+		createFreshClientBundle = originalCreate
 	}()
 
 	result, err := EnsureFreshClientBundle(context.Background(), Options{
@@ -40,10 +46,6 @@ func TestEnsureFreshClientBundle_ReadyBundleSkipsBootstrap(t *testing.T) {
 	if result.Bootstrapped {
 		t.Fatal("result.Bootstrapped = true, want false")
 	}
-
-	if result.HydrusRoot != "" {
-		t.Fatalf("result.HydrusRoot = %q, want empty", result.HydrusRoot)
-	}
 }
 
 func TestEnsureFreshClientBundle_EmptyDirRequiresOptIn(t *testing.T) {
@@ -60,6 +62,10 @@ func TestEnsureFreshClientBundle_EmptyDirRequiresOptIn(t *testing.T) {
 		t.Fatalf("EnsureFreshClientBundle() error = %v, want empty-dir guidance", err)
 	}
 
+	if !strings.Contains(err.Error(), "HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP") {
+		t.Fatalf("EnsureFreshClientBundle() error = %v, want env guidance", err)
+	}
+
 	if !strings.Contains(err.Error(), "--bootstrap-fresh-client") {
 		t.Fatalf("EnsureFreshClientBundle() error = %v, want runtime flag guidance", err)
 	}
@@ -67,54 +73,47 @@ func TestEnsureFreshClientBundle_EmptyDirRequiresOptIn(t *testing.T) {
 
 func TestEnsureFreshClientBundle_EmptyDirBootstrapsAndVerifies(t *testing.T) {
 	dbDir := t.TempDir()
-	hydrusRoot := createFakeHydrusRoot(t)
 
-	originalRunner := runPythonFreshClientBootstrap
+	originalCreate := createFreshClientBundle
+	originalVerify := verifyFreshClientBundle
 	defer func() {
-		runPythonFreshClientBootstrap = originalRunner
+		createFreshClientBundle = originalCreate
+		verifyFreshClientBundle = originalVerify
 	}()
 
 	called := false
-	runPythonFreshClientBootstrap = func(_ context.Context, request runRequest) error {
+	createFreshClientBundle = func(_ context.Context, dir string) error {
 		called = true
 
-		if request.DBDir != dbDir {
-			t.Fatalf("request.DBDir = %q, want %q", request.DBDir, dbDir)
+		if dir != dbDir {
+			t.Fatalf("dir = %q, want %q", dir, dbDir)
 		}
 
-		if request.HydrusRoot != hydrusRoot {
-			t.Fatalf("request.HydrusRoot = %q, want %q", request.HydrusRoot, hydrusRoot)
+		mustWriteFile(t, filepath.Join(dir, "client.db"))
+		mustWriteFile(t, filepath.Join(dir, "client.master.db"))
+		mustWriteFile(t, filepath.Join(dir, "client.caches.db"))
+		mustWriteFile(t, filepath.Join(dir, "client.mappings.db"))
+		return nil
+	}
+	verifyFreshClientBundle = func(_ context.Context, dir string) error {
+		if dir != dbDir {
+			t.Fatalf("verify dir = %q, want %q", dir, dbDir)
 		}
 
-		if request.PythonCommand != "/usr/bin/python-custom" {
-			t.Fatalf(
-				"request.PythonCommand = %q, want %q",
-				request.PythonCommand,
-				"/usr/bin/python-custom",
-			)
-		}
-
-		if request.Timeout != 45*time.Second {
-			t.Fatalf("request.Timeout = %v, want %v", request.Timeout, 45*time.Second)
-		}
-
-		createBundleFiles(t, request.DBDir)
 		return nil
 	}
 
 	result, err := EnsureFreshClientBundle(context.Background(), Options{
-		DBDir:         dbDir,
-		Enabled:       true,
-		PythonCommand: "/usr/bin/python-custom",
-		HydrusRoot:    hydrusRoot,
-		Timeout:       45 * time.Second,
+		DBDir:   dbDir,
+		Enabled: true,
+		Timeout: 45 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("EnsureFreshClientBundle() error = %v", err)
 	}
 
 	if !called {
-		t.Fatal("runPythonFreshClientBootstrap() was not called")
+		t.Fatal("createFreshClientBundle() was not called")
 	}
 
 	if !result.Bootstrapped {
@@ -124,41 +123,41 @@ func TestEnsureFreshClientBundle_EmptyDirBootstrapsAndVerifies(t *testing.T) {
 	if result.State != StateReady {
 		t.Fatalf("result.State = %q, want %q", result.State, StateReady)
 	}
-
-	if result.HydrusRoot != hydrusRoot {
-		t.Fatalf("result.HydrusRoot = %q, want %q", result.HydrusRoot, hydrusRoot)
-	}
 }
 
 func TestEnsureFreshClientBundle_CreatesMissingDBDirWhenBootstrapEnabled(t *testing.T) {
 	parentDir := t.TempDir()
 	dbDir := filepath.Join(parentDir, "fresh-bundle")
-	hydrusRoot := createFakeHydrusRoot(t)
 
-	originalRunner := runPythonFreshClientBootstrap
+	originalCreate := createFreshClientBundle
+	originalVerify := verifyFreshClientBundle
 	defer func() {
-		runPythonFreshClientBootstrap = originalRunner
+		createFreshClientBundle = originalCreate
+		verifyFreshClientBundle = originalVerify
 	}()
 
-	runPythonFreshClientBootstrap = func(_ context.Context, request runRequest) error {
-		info, err := os.Stat(request.DBDir)
+	createFreshClientBundle = func(_ context.Context, dir string) error {
+		info, err := os.Stat(dir)
 		if err != nil {
-			t.Fatalf("Stat(%q) error = %v", request.DBDir, err)
+			t.Fatalf("Stat(%q) error = %v", dir, err)
 		}
 
 		if !info.IsDir() {
-			t.Fatalf("request.DBDir %q is not a directory", request.DBDir)
+			t.Fatalf("dir %q is not a directory", dir)
 		}
 
-		createBundleFiles(t, request.DBDir)
+		mustWriteFile(t, filepath.Join(dir, "client.db"))
+		mustWriteFile(t, filepath.Join(dir, "client.master.db"))
+		mustWriteFile(t, filepath.Join(dir, "client.caches.db"))
+		mustWriteFile(t, filepath.Join(dir, "client.mappings.db"))
 		return nil
 	}
+	verifyFreshClientBundle = func(context.Context, string) error { return nil }
 
 	result, err := EnsureFreshClientBundle(context.Background(), Options{
-		DBDir:      dbDir,
-		Enabled:    true,
-		HydrusRoot: hydrusRoot,
-		Timeout:    time.Minute,
+		DBDir:   dbDir,
+		Enabled: true,
+		Timeout: time.Minute,
 	})
 	if err != nil {
 		t.Fatalf("EnsureFreshClientBundle() error = %v", err)
@@ -171,51 +170,47 @@ func TestEnsureFreshClientBundle_CreatesMissingDBDirWhenBootstrapEnabled(t *test
 
 func TestEnsureFreshClientBundle_PropagatesRunnerFailure(t *testing.T) {
 	dbDir := t.TempDir()
-	hydrusRoot := createFakeHydrusRoot(t)
 
-	originalRunner := runPythonFreshClientBootstrap
+	originalCreate := createFreshClientBundle
 	defer func() {
-		runPythonFreshClientBootstrap = originalRunner
+		createFreshClientBundle = originalCreate
 	}()
 
-	runPythonFreshClientBootstrap = func(context.Context, runRequest) error {
-		return errors.New("forced python bootstrap failure")
+	createFreshClientBundle = func(context.Context, string) error {
+		return errors.New("forced native bootstrap failure")
 	}
 
 	_, err := EnsureFreshClientBundle(context.Background(), Options{
-		DBDir:      dbDir,
-		Enabled:    true,
-		HydrusRoot: hydrusRoot,
-		Timeout:    time.Minute,
+		DBDir:   dbDir,
+		Enabled: true,
+		Timeout: time.Minute,
 	})
 	if err == nil {
 		t.Fatal("EnsureFreshClientBundle() error = nil, want error")
 	}
 
-	if !strings.Contains(err.Error(), "forced python bootstrap failure") {
+	if !strings.Contains(err.Error(), "forced native bootstrap failure") {
 		t.Fatalf("EnsureFreshClientBundle() error = %v, want runner failure", err)
 	}
 }
 
 func TestEnsureFreshClientBundle_VerifiesRunnerCreatedBundle(t *testing.T) {
 	dbDir := t.TempDir()
-	hydrusRoot := createFakeHydrusRoot(t)
 
-	originalRunner := runPythonFreshClientBootstrap
+	originalCreate := createFreshClientBundle
 	defer func() {
-		runPythonFreshClientBootstrap = originalRunner
+		createFreshClientBundle = originalCreate
 	}()
 
-	runPythonFreshClientBootstrap = func(context.Context, runRequest) error {
+	createFreshClientBundle = func(context.Context, string) error {
 		mustWriteFile(t, filepath.Join(dbDir, "client.db"))
 		return nil
 	}
 
 	_, err := EnsureFreshClientBundle(context.Background(), Options{
-		DBDir:      dbDir,
-		Enabled:    true,
-		HydrusRoot: hydrusRoot,
-		Timeout:    time.Minute,
+		DBDir:   dbDir,
+		Enabled: true,
+		Timeout: time.Minute,
 	})
 	if err == nil {
 		t.Fatal("EnsureFreshClientBundle() error = nil, want error")
@@ -226,24 +221,79 @@ func TestEnsureFreshClientBundle_VerifiesRunnerCreatedBundle(t *testing.T) {
 	}
 }
 
+func TestEnsureFreshClientBundle_CleansUpFailedSemanticVerification(t *testing.T) {
+	dbDir := t.TempDir()
+
+	originalCreate := createFreshClientBundle
+	originalVerify := verifyFreshClientBundle
+	defer func() {
+		createFreshClientBundle = originalCreate
+		verifyFreshClientBundle = originalVerify
+	}()
+
+	createFreshClientBundle = func(_ context.Context, dir string) error {
+		for _, filename := range append(requiredBundleFiles, "client.temp.db") {
+			mustWriteFile(t, filepath.Join(dir, filename))
+		}
+
+		if err := os.MkdirAll(filepath.Join(dir, "client_files"), 0o755); err != nil {
+			t.Fatalf("MkdirAll(client_files) error = %v", err)
+		}
+
+		return nil
+	}
+	verifyFreshClientBundle = func(context.Context, string) error {
+		return errors.New("forced semantic verification failure")
+	}
+
+	_, err := EnsureFreshClientBundle(context.Background(), Options{
+		DBDir:   dbDir,
+		Enabled: true,
+		Timeout: time.Minute,
+	})
+	if err == nil {
+		t.Fatal("EnsureFreshClientBundle() error = nil, want error")
+	}
+
+	if !strings.Contains(err.Error(), "forced semantic verification failure") {
+		t.Fatalf("EnsureFreshClientBundle() error = %v, want verification failure", err)
+	}
+
+	observed, inspectErr := inspectBundleDir(dbDir)
+	if inspectErr != nil {
+		t.Fatalf("inspectBundleDir() error = %v", inspectErr)
+	}
+
+	if observed.State != StateEmpty {
+		t.Fatalf("observed.State = %q, want %q after cleanup", observed.State, StateEmpty)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(dbDir, "client.temp.db")); !os.IsNotExist(statErr) {
+		t.Fatalf("client.temp.db stat error = %v, want not exists", statErr)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(dbDir, "client_files")); !os.IsNotExist(statErr) {
+		t.Fatalf("client_files stat error = %v, want not exists", statErr)
+	}
+}
+
 func TestEnsureFreshClientBundle_PartialBundleFailsWithoutRunningBootstrap(t *testing.T) {
 	dbDir := t.TempDir()
 	mustWriteFile(t, filepath.Join(dbDir, "client.db"))
 
-	originalRunner := runPythonFreshClientBootstrap
-	runPythonFreshClientBootstrap = func(context.Context, runRequest) error {
-		t.Fatal("runPythonFreshClientBootstrap() called, want skip for partial bundle")
+	originalCreate := createFreshClientBundle
+	createFreshClientBundle = func(context.Context, string) error {
+		t.Fatal("createFreshClientBundle() called, want skip for partial bundle")
 		return nil
 	}
 	defer func() {
-		runPythonFreshClientBootstrap = originalRunner
+		createFreshClientBundle = originalCreate
 	}()
 
 	_, err := EnsureFreshClientBundle(context.Background(), Options{
-		DBDir:      dbDir,
-		Enabled:    true,
-		HydrusRoot: createFakeHydrusRoot(t),
-		Timeout:    time.Minute,
+		DBDir:   dbDir,
+		Enabled: true,
+		Timeout: time.Minute,
 	})
 	if err == nil {
 		t.Fatal("EnsureFreshClientBundle() error = nil, want error")
@@ -259,10 +309,9 @@ func TestEnsureFreshClientBundle_NonEmptyDirWithoutBundleFails(t *testing.T) {
 	mustWriteFile(t, filepath.Join(dbDir, "notes.txt"))
 
 	_, err := EnsureFreshClientBundle(context.Background(), Options{
-		DBDir:      dbDir,
-		Enabled:    true,
-		HydrusRoot: createFakeHydrusRoot(t),
-		Timeout:    time.Minute,
+		DBDir:   dbDir,
+		Enabled: true,
+		Timeout: time.Minute,
 	})
 	if err == nil {
 		t.Fatal("EnsureFreshClientBundle() error = nil, want error")
@@ -271,98 +320,186 @@ func TestEnsureFreshClientBundle_NonEmptyDirWithoutBundleFails(t *testing.T) {
 	if !strings.Contains(err.Error(), "not empty") {
 		t.Fatalf("EnsureFreshClientBundle() error = %v, want non-empty directory error", err)
 	}
+
 	if !strings.Contains(err.Error(), "notes.txt") {
 		t.Fatalf("EnsureFreshClientBundle() error = %v, want extra entry details", err)
 	}
 }
 
-func TestResolveHydrusRoot_AutoDetectsParentOfWorkingDirectory(t *testing.T) {
-	originalWD, err := os.Getwd()
-	if err != nil {
-		t.Fatalf("Getwd() error = %v", err)
-	}
+func TestEnsureFreshClientBundle_NativeBootstrapCreatesUsableBundle(t *testing.T) {
+	dbDir := t.TempDir()
 
-	hydrusRoot := createFakeHydrusRoot(t)
-	hydrusGoDir := filepath.Join(hydrusRoot, "hydrus-go")
-	if err := os.MkdirAll(hydrusGoDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(%q) error = %v", hydrusGoDir, err)
-	}
-
-	if err := os.Chdir(hydrusGoDir); err != nil {
-		t.Fatalf("Chdir(%q) error = %v", hydrusGoDir, err)
-	}
-	t.Cleanup(func() {
-		if restoreErr := os.Chdir(originalWD); restoreErr != nil {
-			t.Fatalf("Chdir(%q) restore error = %v", originalWD, restoreErr)
-		}
+	result, err := EnsureFreshClientBundle(context.Background(), Options{
+		DBDir:   dbDir,
+		Enabled: true,
+		Timeout: time.Minute,
 	})
-
-	resolvedRoot, err := resolveHydrusRoot("")
 	if err != nil {
-		t.Fatalf("resolveHydrusRoot() error = %v", err)
+		t.Fatalf("EnsureFreshClientBundle() error = %v", err)
 	}
 
-	if resolvedRoot != hydrusRoot {
-		t.Fatalf("resolvedRoot = %q, want %q", resolvedRoot, hydrusRoot)
-	}
-}
-
-func TestDefaultPythonCommand_IsPlatformAware(t *testing.T) {
-	want := "python3"
-	if runtime.GOOS == "windows" {
-		want = "python"
+	if !result.Bootstrapped {
+		t.Fatal("result.Bootstrapped = false, want true")
 	}
 
-	if got := defaultPythonCommand(); got != want {
-		t.Fatalf("defaultPythonCommand() = %q, want %q", got, want)
+	if result.State != StateReady {
+		t.Fatalf("result.State = %q, want %q", result.State, StateReady)
 	}
-}
 
-func TestSplitCommandLine_PreservesLauncherArguments(t *testing.T) {
-	args, err := splitCommandLine(`py -3`)
+	for _, filename := range append(requiredBundleFiles, "client.temp.db") {
+		info, err := os.Stat(filepath.Join(dbDir, filename))
+		if err != nil {
+			t.Fatalf("Stat(%q) error = %v", filename, err)
+		}
+
+		if info.IsDir() {
+			t.Fatalf("%q is a directory, want file", filename)
+		}
+	}
+
+	clientFilesRoot := clientfiles.DefaultRoot(dbDir)
+	info, err := os.Stat(clientFilesRoot)
 	if err != nil {
-		t.Fatalf("splitCommandLine() error = %v", err)
+		t.Fatalf("Stat(client_files) error = %v", err)
 	}
 
-	if len(args) != 2 || args[0] != "py" || args[1] != "-3" {
-		t.Fatalf("splitCommandLine() = %#v, want [\"py\", \"-3\"]", args)
+	if !info.IsDir() {
+		t.Fatalf("client_files root %q is not a directory", clientFilesRoot)
 	}
-}
 
-func TestSplitCommandLine_PreservesExistingPathWithSpaces(t *testing.T) {
-	executablePath := filepath.Join(t.TempDir(), "python with spaces.exe")
-	mustWriteFile(t, executablePath)
-
-	args, err := splitCommandLine(executablePath)
+	mainDB, err := sql.Open("sqlite", filepath.Join(dbDir, "client.db"))
 	if err != nil {
-		t.Fatalf("splitCommandLine() error = %v", err)
+		t.Fatalf("sql.Open(client.db) error = %v", err)
+	}
+	defer mainDB.Close()
+
+	var version int
+	if err := mainDB.QueryRow(`SELECT version FROM version LIMIT 1`).Scan(&version); err != nil {
+		t.Fatalf("QueryRow(version) error = %v", err)
 	}
 
-	if len(args) != 1 || args[0] != executablePath {
-		t.Fatalf("splitCommandLine() = %#v, want [%q]", args, executablePath)
+	if version != buildinfo.ReferenceHydrusVersion {
+		t.Fatalf("version = %d, want %d", version, buildinfo.ReferenceHydrusVersion)
+	}
+
+	var serviceCount int
+	if err := mainDB.QueryRow(`SELECT COUNT(*) FROM services`).Scan(&serviceCount); err != nil {
+		t.Fatalf("QueryRow(service count) error = %v", err)
+	}
+
+	if serviceCount != len(services.BootstrapCatalog()) {
+		t.Fatalf("service count = %d, want %d", serviceCount, len(services.BootstrapCatalog()))
+	}
+
+	var visibleServiceCount int
+	if err := mainDB.QueryRow(
+		`SELECT COUNT(*) FROM services WHERE name IN (?, ?)`,
+		"downloader tags",
+		"favourites",
+	).Scan(&visibleServiceCount); err != nil {
+		t.Fatalf("QueryRow(visible service count) error = %v", err)
+	}
+
+	if visibleServiceCount != 2 {
+		t.Fatalf("visible service count = %d, want 2", visibleServiceCount)
+	}
+
+	var hiddenServiceCount int
+	if err := mainDB.QueryRow(
+		`SELECT COUNT(*) FROM services WHERE name IN (?, ?, ?)`,
+		"deleted from anywhere",
+		"local notes",
+		"client api",
+	).Scan(&hiddenServiceCount); err != nil {
+		t.Fatalf("QueryRow(hidden service count) error = %v", err)
+	}
+
+	if hiddenServiceCount != 3 {
+		t.Fatalf("hidden service count = %d, want 3", hiddenServiceCount)
+	}
+
+	var favouritesDictionary string
+	if err := mainDB.QueryRow(
+		`SELECT dictionary_string FROM services WHERE name = ? LIMIT 1`,
+		"favourites",
+	).Scan(&favouritesDictionary); err != nil {
+		t.Fatalf("QueryRow(favourites dictionary) error = %v", err)
+	}
+
+	if favouritesDictionary != favouritesServiceDictionaryString {
+		t.Fatalf("favourites dictionary = %q, want %q", favouritesDictionary, favouritesServiceDictionaryString)
+	}
+
+	readBundle, err := hydrusdb.Open(context.Background(), dbDir)
+	if err != nil {
+		t.Fatalf("hydrusdb.Open() error = %v", err)
+	}
+	defer func() {
+		if closeErr := readBundle.Close(); closeErr != nil {
+			t.Fatalf("readBundle.Close() error = %v", closeErr)
+		}
+	}()
+
+	for _, hiddenServiceName := range []string{
+		"deleted from anywhere",
+		"local notes",
+		"client api",
+	} {
+		service, ok, lookupErr := readBundle.ByName(context.Background(), hiddenServiceName)
+		if lookupErr != nil {
+			t.Fatalf("readBundle.ByName(%q) error = %v", hiddenServiceName, lookupErr)
+		}
+
+		if !ok {
+			t.Fatalf("readBundle.ByName(%q) ok = false, want true", hiddenServiceName)
+		}
+
+		if service.Name != hiddenServiceName {
+			t.Fatalf("service.Name = %q, want %q", service.Name, hiddenServiceName)
+		}
+	}
+
+	var granularity int
+	if err := mainDB.QueryRow(`SELECT granularity FROM current_storage_granularity LIMIT 1`).Scan(&granularity); err != nil {
+		t.Fatalf("QueryRow(storage granularity) error = %v", err)
+	}
+
+	if granularity != clientfiles.DefaultPrefixLength {
+		t.Fatalf(
+			"storage granularity = %d, want %d",
+			granularity,
+			clientfiles.DefaultPrefixLength,
+		)
+	}
+
+	var location string
+	if err := mainDB.QueryRow(
+		`SELECT location FROM current_client_files_locations ORDER BY location_id ASC LIMIT 1`,
+	).Scan(&location); err != nil {
+		t.Fatalf("QueryRow(client-files location) error = %v", err)
+	}
+
+	if location != clientFilesRoot {
+		t.Fatalf("client-files location = %q, want %q", location, clientFilesRoot)
+	}
+
+	var prefixCount int
+	if err := mainDB.QueryRow(`SELECT COUNT(*) FROM client_files_subfolders`).Scan(&prefixCount); err != nil {
+		t.Fatalf("QueryRow(client-files prefix count) error = %v", err)
+	}
+
+	wantPrefixCount := expectedPrefixCount(clientfiles.DefaultPrefixLength) * 2
+	if prefixCount != wantPrefixCount {
+		t.Fatalf("client-files prefix count = %d, want %d", prefixCount, wantPrefixCount)
 	}
 }
 
-func createBundleFiles(t *testing.T, dir string) {
+func createReadyNativeBundle(t *testing.T, dir string) {
 	t.Helper()
 
-	for _, filename := range requiredBundleFiles {
-		mustWriteFile(t, filepath.Join(dir, filename))
+	if err := defaultCreateFreshClientBundle(context.Background(), dir); err != nil {
+		t.Fatalf("defaultCreateFreshClientBundle() error = %v", err)
 	}
-}
-
-func createFakeHydrusRoot(t *testing.T) string {
-	t.Helper()
-
-	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "hydrus", "client", "db"), 0o755); err != nil {
-		t.Fatalf("MkdirAll(fake hydrus root) error = %v", err)
-	}
-
-	mustWriteFile(t, filepath.Join(root, "hydrus_client.py"))
-	mustWriteFile(t, filepath.Join(root, "hydrus", "client", "db", "ClientDB.py"))
-
-	return root
 }
 
 func mustWriteFile(t *testing.T, path string) {

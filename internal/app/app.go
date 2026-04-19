@@ -58,11 +58,9 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 
 	if cfg.DBDir != "" {
 		bootstrapResult, err := ensureFreshClientBundle(startupCtx, bootstrap.Options{
-			DBDir:         cfg.DBDir,
-			Enabled:       cfg.EnableFreshClientBootstrap,
-			PythonCommand: cfg.BootstrapPythonCommand,
-			HydrusRoot:    cfg.BootstrapHydrusRoot,
-			Timeout:       cfg.BootstrapTimeout,
+			DBDir:   cfg.DBDir,
+			Enabled: cfg.EnableFreshClientBootstrap,
+			Timeout: cfg.BootstrapTimeout,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("prepare hydrus DB bundle: %w", err)
@@ -70,11 +68,9 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 
 		if bootstrapResult.Bootstrapped {
 			logger.Info(
-				"bootstrapped fresh hydrus client bundle via Python",
+				"bootstrapped fresh hydrus client bundle",
 				"db_dir",
 				cfg.DBDir,
-				"hydrus_root",
-				bootstrapResult.HydrusRoot,
 			)
 		}
 

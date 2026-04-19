@@ -112,18 +112,6 @@ func TestNew_BootstrapsEmptyConfiguredDBBundleWhenEnabled(t *testing.T) {
 			t.Fatal("options.Enabled = false, want true")
 		}
 
-		if options.PythonCommand != "/usr/bin/python-custom" {
-			t.Fatalf(
-				"options.PythonCommand = %q, want %q",
-				options.PythonCommand,
-				"/usr/bin/python-custom",
-			)
-		}
-
-		if options.HydrusRoot != "/hydrus/root" {
-			t.Fatalf("options.HydrusRoot = %q, want %q", options.HydrusRoot, "/hydrus/root")
-		}
-
 		if options.Timeout != time.Minute {
 			t.Fatalf("options.Timeout = %v, want %v", options.Timeout, time.Minute)
 		}
@@ -133,7 +121,7 @@ func TestNew_BootstrapsEmptyConfiguredDBBundleWhenEnabled(t *testing.T) {
 		createEmptySQLiteDB(t, filepath.Join(options.DBDir, "client.caches.db"))
 		createEmptySQLiteDB(t, filepath.Join(options.DBDir, "client.mappings.db"))
 
-		return bootstrap.Result{Bootstrapped: true, HydrusRoot: "/hydrus/root"}, nil
+		return bootstrap.Result{Bootstrapped: true}, nil
 	}
 	defer func() {
 		ensureFreshClientBundle = originalEnsureFreshClientBundle
@@ -143,8 +131,6 @@ func TestNew_BootstrapsEmptyConfiguredDBBundleWhenEnabled(t *testing.T) {
 		ListenAddr:                 "127.0.0.1:0",
 		DBDir:                      dbDir,
 		EnableFreshClientBootstrap: true,
-		BootstrapPythonCommand:     "/usr/bin/python-custom",
-		BootstrapHydrusRoot:        "/hydrus/root",
 		BootstrapTimeout:           time.Minute,
 		AccessName:                 "test-client",
 		LogLevel:                   "error",
@@ -208,8 +194,6 @@ func TestNew_PropagatesBootstrapPreparationFailure(t *testing.T) {
 		ListenAddr:                 "127.0.0.1:0",
 		DBDir:                      dbDir,
 		EnableFreshClientBootstrap: true,
-		BootstrapPythonCommand:     "/usr/bin/python-custom",
-		BootstrapHydrusRoot:        "/hydrus/root",
 		BootstrapTimeout:           time.Minute,
 		AccessName:                 "test-client",
 		LogLevel:                   "error",
@@ -235,7 +219,7 @@ func TestNew_PropagatesReadBundleFailureAfterBootstrap(t *testing.T) {
 
 	originalEnsureFreshClientBundle := ensureFreshClientBundle
 	ensureFreshClientBundle = func(context.Context, bootstrap.Options) (bootstrap.Result, error) {
-		return bootstrap.Result{Bootstrapped: true, HydrusRoot: "/hydrus/root"}, nil
+		return bootstrap.Result{Bootstrapped: true}, nil
 	}
 	defer func() {
 		ensureFreshClientBundle = originalEnsureFreshClientBundle
@@ -253,8 +237,6 @@ func TestNew_PropagatesReadBundleFailureAfterBootstrap(t *testing.T) {
 		ListenAddr:                 "127.0.0.1:0",
 		DBDir:                      dbDir,
 		EnableFreshClientBootstrap: true,
-		BootstrapPythonCommand:     "/usr/bin/python-custom",
-		BootstrapHydrusRoot:        "/hydrus/root",
 		BootstrapTimeout:           time.Minute,
 		AccessName:                 "test-client",
 		LogLevel:                   "error",
@@ -352,12 +334,72 @@ func TestApp_DBBackedImportRoundTripEndpoints(t *testing.T) {
 		EnableCORS:               false,
 	}
 
+	runImportRoundTripEndpointsTest(t, cfg, sourcePath, false)
+}
+
+func TestApp_NativeBootstrapImportRoundTripEndpoints(t *testing.T) {
+	dbDir := filepath.Join(t.TempDir(), "fresh-bundle")
+	sourcePath := writeAppPNGSourceFile(t, t.TempDir(), "app-native-bootstrap-import.png", 16, 24)
+
+	cfg := config.Config{
+		ListenAddr:                 "127.0.0.1:0",
+		DBDir:                      dbDir,
+		EnableFreshClientBootstrap: true,
+		BootstrapTimeout:           time.Minute,
+		AccessKey:                  strings.Repeat("b", 64),
+		AccessName:                 "test-client",
+		LogLevel:                   "error",
+		ShutdownTimeout:            time.Second,
+		AllowNonLocalConnections:   false,
+		EnableCORS:                 false,
+	}
+
+	runImportRoundTripEndpointsTest(t, cfg, sourcePath, true)
+}
+
+func runImportRoundTripEndpointsTest(
+	t *testing.T,
+	cfg config.Config,
+	sourcePath string,
+	expectBootstrapDiscovery bool,
+) {
+	t.Helper()
+
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	application, err := New(context.Background(), cfg, logger)
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
 	defer application.closeResources()
+
+	servicesReq := httptest.NewRequest(http.MethodGet, "/get_services", nil)
+	servicesReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	servicesRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(servicesRR, servicesReq)
+
+	if servicesRR.Code != http.StatusOK {
+		t.Fatalf("get_services status = %d, want %d", servicesRR.Code, http.StatusOK)
+	}
+
+	assertAppServiceDiscovery(t, servicesRR.Body.Bytes(), expectBootstrapDiscovery)
+
+	recentReq := httptest.NewRequest(http.MethodGet, "/v1/library/recent?limit=10", nil)
+	recentReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	recentRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(recentRR, recentReq)
+
+	if recentRR.Code != http.StatusOK {
+		t.Fatalf("initial recent status = %d, want %d", recentRR.Code, http.StatusOK)
+	}
+
+	var recentPayload map[string]any
+	decodeAppJSON(t, recentRR.Body.Bytes(), &recentPayload)
+	items := recentPayload["items"].([]any)
+	if len(items) != 0 {
+		t.Fatalf("len(initial items) = %d, want 0", len(items))
+	}
 
 	importBody, err := json.Marshal(map[string]string{"path": sourcePath})
 	if err != nil {
@@ -386,9 +428,9 @@ func TestApp_DBBackedImportRoundTripEndpoints(t *testing.T) {
 		t.Fatalf("file_id = %d, want > 0", fileID)
 	}
 
-	recentReq := httptest.NewRequest(http.MethodGet, "/v1/library/recent?limit=10", nil)
+	recentReq = httptest.NewRequest(http.MethodGet, "/v1/library/recent?limit=10", nil)
 	recentReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
-	recentRR := httptest.NewRecorder()
+	recentRR = httptest.NewRecorder()
 
 	application.server.Handler.ServeHTTP(recentRR, recentReq)
 
@@ -396,9 +438,8 @@ func TestApp_DBBackedImportRoundTripEndpoints(t *testing.T) {
 		t.Fatalf("recent status = %d, want %d", recentRR.Code, http.StatusOK)
 	}
 
-	var recentPayload map[string]any
 	decodeAppJSON(t, recentRR.Body.Bytes(), &recentPayload)
-	items := recentPayload["items"].([]any)
+	items = recentPayload["items"].([]any)
 	if len(items) != 1 {
 		t.Fatalf("len(items) = %d, want 1", len(items))
 	}
@@ -684,5 +725,127 @@ func decodeAppJSON(t *testing.T, raw []byte, target any) {
 
 	if err := json.Unmarshal(raw, target); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+}
+
+func assertAppServiceDiscovery(t *testing.T, raw []byte, expectBootstrapDiscovery bool) {
+	t.Helper()
+
+	var payload map[string]any
+	decodeAppJSON(t, raw, &payload)
+
+	servicesValue, ok := payload["services_v2"].([]any)
+	if !ok {
+		t.Fatalf("services_v2 type = %T, want []any", payload["services_v2"])
+	}
+
+	hiddenNames := map[string]struct{}{
+		"deleted from anywhere": {},
+		"local notes":           {},
+		"client api":            {},
+	}
+
+	serviceByName := map[string]map[string]any{}
+
+	for _, item := range servicesValue {
+		service, ok := item.(map[string]any)
+		if !ok {
+			t.Fatalf("service item type = %T, want map[string]any", item)
+		}
+
+		name, ok := service["name"].(string)
+		if !ok {
+			t.Fatalf("service name type = %T, want string", service["name"])
+		}
+
+		if _, hidden := hiddenNames[name]; hidden {
+			t.Fatalf("hidden bootstrap service %q unexpectedly appeared in discovery response", name)
+		}
+
+		serviceByName[name] = service
+	}
+
+	if !expectBootstrapDiscovery {
+		return
+	}
+
+	localTagsValue, ok := payload["local_tags"].([]any)
+	if !ok {
+		t.Fatalf("local_tags type = %T, want []any", payload["local_tags"])
+	}
+
+	if len(localTagsValue) != 2 {
+		t.Fatalf("len(local_tags) = %d, want 2", len(localTagsValue))
+	}
+
+	if _, ok := serviceByName["downloader tags"]; !ok {
+		t.Fatal("downloader tags missing from discovery response")
+	}
+
+	favourites, ok := serviceByName["favourites"]
+	if !ok {
+		t.Fatal("favourites missing from discovery response")
+	}
+
+	if _, ok := payload["local_ratings"]; ok {
+		t.Fatal("local_ratings unexpectedly present in discovery payload")
+	}
+
+	if got, _ := favourites["star_shape"].(string); got != "fat star" {
+		t.Fatalf("favourites star_shape = %q, want %q", got, "fat star")
+	}
+
+	showInThumbnail, ok := favourites["show_in_thumbnail"].(bool)
+	if !ok || showInThumbnail {
+		t.Fatalf("favourites show_in_thumbnail = %v, want explicit false", favourites["show_in_thumbnail"])
+	}
+
+	showInThumbnailEvenWhenNull, ok := favourites["show_in_thumbnail_even_when_null"].(bool)
+	if !ok || showInThumbnailEvenWhenNull {
+		t.Fatalf(
+			"favourites show_in_thumbnail_even_when_null = %v, want explicit false",
+			favourites["show_in_thumbnail_even_when_null"],
+		)
+	}
+
+	colours, ok := favourites["colours"].(map[string]any)
+	if !ok {
+		t.Fatalf("favourites colours type = %T, want map[string]any", favourites["colours"])
+	}
+
+	likeColour, ok := colours["like"].(map[string]any)
+	if !ok {
+		t.Fatalf("favourites like colour type = %T, want map[string]any", colours["like"])
+	}
+
+	if got, _ := likeColour["brush"].(string); got != "#F0F041" {
+		t.Fatalf("favourites like brush = %q, want %q", got, "#F0F041")
+	}
+
+	dislikeColour, ok := colours["dislike"].(map[string]any)
+	if !ok {
+		t.Fatalf("favourites dislike colour type = %T, want map[string]any", colours["dislike"])
+	}
+
+	if got, _ := dislikeColour["brush"].(string); got != "#C85078" {
+		t.Fatalf("favourites dislike brush = %q, want %q", got, "#C85078")
+	}
+
+	nullColour, ok := colours["null"].(map[string]any)
+	if !ok {
+		t.Fatalf("favourites null colour type = %T, want map[string]any", colours["null"])
+	}
+
+	if got, _ := nullColour["brush"].(string); got != "#BFBFBF" {
+		t.Fatalf("favourites null brush = %q, want %q", got, "#BFBFBF")
+	}
+
+	mixedColour, ok := colours["mixed"].(map[string]any)
+	if !ok {
+		t.Fatalf("favourites mixed colour type = %T, want map[string]any", colours["mixed"])
+	}
+
+	if got, _ := mixedColour["brush"].(string); got != "#5F5F5F" {
+		t.Fatalf("favourites mixed brush = %q, want %q", got, "#5F5F5F")
 	}
 }
