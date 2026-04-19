@@ -219,13 +219,13 @@ Important current limitations:
     - `pixel_hash`
     - `ipfs_multihashes`
     - `ratings`, keyed by rating service key with Hydrus-like like/numerical/inc-dec API values and unrated `null`/`0` defaults
+    - `file_viewing_statistics`, always emitted in Hydrus canvas order with float-second `viewtime`/`last_viewed_timestamp` values
     - `has_transparency`, `has_exif`, `has_human_readable_embedded_metadata`, `has_icc_profile`
     - Hydrus-like `tags`, including per-service `storage_tags` and `display_tags` that prefer specific display cache tables when available, fall back to sibling/parent-expanded storage tags when not, and copy deleted/petitioned display entries from storage
   - `include_milliseconds=true` for the implemented full-mode timestamp fields
   - optional `include_services_object=false`
   - optional `hide_service_keys_tags=false` to also include the older `service_keys_to_statuses_to_tags` and `service_keys_to_statuses_to_display_tags` compatibility maps, with legacy display values matching `tags[*].display_tags`
 - full/default `GET /get_files/file_metadata` parity is still incomplete; this slice does not yet implement:
-  - `file_viewing_statistics`
   - `include_notes=true`
   - `detailed_url_information=true`
   - exact thumbnail-dimension parity

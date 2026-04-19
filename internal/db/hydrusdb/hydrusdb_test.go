@@ -815,6 +815,202 @@ func TestBundleMetadata(t *testing.T) {
 		}
 	})
 
+	t.Run("full mode returns Hydrus-like file viewing statistics", func(t *testing.T) {
+		rows, err := bundle.GetMetadata(context.Background(), filemetadata.Request{
+			Hashes: []string{fixture.hash1Hex, fixture.hash2Hex},
+		})
+		if err != nil {
+			t.Fatalf("GetMetadata() error = %v", err)
+		}
+
+		stats1, ok := rows[0]["file_viewing_statistics"].([]map[string]any)
+		if !ok {
+			t.Fatalf("rows[0][file_viewing_statistics] type = %T, want []map[string]any", rows[0]["file_viewing_statistics"])
+		}
+
+		if len(stats1) != 3 {
+			t.Fatalf("len(rows[0][file_viewing_statistics]) = %d, want 3", len(stats1))
+		}
+
+		if got := stats1[0]["canvas_type"]; got != 0 {
+			t.Fatalf("rows[0][file_viewing_statistics][0][canvas_type] = %v, want 0", got)
+		}
+
+		if got := stats1[0]["canvas_type_pretty"]; got != "media viewer" {
+			t.Fatalf("rows[0][file_viewing_statistics][0][canvas_type_pretty] = %v, want media viewer", got)
+		}
+
+		if got := stats1[0]["views"]; got != int64(7) {
+			t.Fatalf("rows[0][file_viewing_statistics][0][views] = %v, want 7", got)
+		}
+
+		if got := stats1[0]["viewtime"]; got != 6.543 {
+			t.Fatalf("rows[0][file_viewing_statistics][0][viewtime] = %v, want 6.543", got)
+		}
+
+		if got := stats1[0]["last_viewed_timestamp"]; got != 12.345 {
+			t.Fatalf("rows[0][file_viewing_statistics][0][last_viewed_timestamp] = %v, want 12.345", got)
+		}
+
+		if got := stats1[1]["canvas_type"]; got != 1 {
+			t.Fatalf("rows[0][file_viewing_statistics][1][canvas_type] = %v, want 1", got)
+		}
+
+		if got := stats1[1]["canvas_type_pretty"]; got != "preview viewer" {
+			t.Fatalf("rows[0][file_viewing_statistics][1][canvas_type_pretty] = %v, want preview viewer", got)
+		}
+
+		if got := stats1[1]["views"]; got != int64(3) {
+			t.Fatalf("rows[0][file_viewing_statistics][1][views] = %v, want 3", got)
+		}
+
+		if got := stats1[1]["viewtime"]; got != 2.1 {
+			t.Fatalf("rows[0][file_viewing_statistics][1][viewtime] = %v, want 2.1", got)
+		}
+
+		if got := stats1[1]["last_viewed_timestamp"]; got != 23.456 {
+			t.Fatalf("rows[0][file_viewing_statistics][1][last_viewed_timestamp] = %v, want 23.456", got)
+		}
+
+		if got := stats1[2]["canvas_type"]; got != 4 {
+			t.Fatalf("rows[0][file_viewing_statistics][2][canvas_type] = %v, want 4", got)
+		}
+
+		if got := stats1[2]["canvas_type_pretty"]; got != "client api viewer" {
+			t.Fatalf("rows[0][file_viewing_statistics][2][canvas_type_pretty] = %v, want client api viewer", got)
+		}
+
+		if got := stats1[2]["views"]; got != int64(1) {
+			t.Fatalf("rows[0][file_viewing_statistics][2][views] = %v, want 1", got)
+		}
+
+		if got := stats1[2]["viewtime"]; got != 0.5 {
+			t.Fatalf("rows[0][file_viewing_statistics][2][viewtime] = %v, want 0.5", got)
+		}
+
+		if got := stats1[2]["last_viewed_timestamp"]; got != 34.567 {
+			t.Fatalf("rows[0][file_viewing_statistics][2][last_viewed_timestamp] = %v, want 34.567", got)
+		}
+
+		stats2, ok := rows[1]["file_viewing_statistics"].([]map[string]any)
+		if !ok {
+			t.Fatalf("rows[1][file_viewing_statistics] type = %T, want []map[string]any", rows[1]["file_viewing_statistics"])
+		}
+
+		if len(stats2) != 3 {
+			t.Fatalf("len(rows[1][file_viewing_statistics]) = %d, want 3", len(stats2))
+		}
+
+		if got := stats2[0]["views"]; got != int64(0) {
+			t.Fatalf("rows[1][file_viewing_statistics][0][views] = %v, want 0", got)
+		}
+
+		if got := stats2[0]["viewtime"]; got != 0.0 {
+			t.Fatalf("rows[1][file_viewing_statistics][0][viewtime] = %v, want 0.0", got)
+		}
+
+		if got := stats2[0]["last_viewed_timestamp"]; got != nil {
+			t.Fatalf("rows[1][file_viewing_statistics][0][last_viewed_timestamp] = %v, want nil", got)
+		}
+
+		if got := stats2[1]["views"]; got != int64(2) {
+			t.Fatalf("rows[1][file_viewing_statistics][1][views] = %v, want 2", got)
+		}
+
+		if got := stats2[1]["viewtime"]; got != 1.0 {
+			t.Fatalf("rows[1][file_viewing_statistics][1][viewtime] = %v, want 1.0", got)
+		}
+
+		if got := stats2[1]["last_viewed_timestamp"]; got != 4.0 {
+			t.Fatalf("rows[1][file_viewing_statistics][1][last_viewed_timestamp] = %v, want 4.0", got)
+		}
+
+		if got := stats2[2]["views"]; got != int64(0) {
+			t.Fatalf("rows[1][file_viewing_statistics][2][views] = %v, want 0", got)
+		}
+
+		if got := stats2[2]["viewtime"]; got != 0.0 {
+			t.Fatalf("rows[1][file_viewing_statistics][2][viewtime] = %v, want 0.0", got)
+		}
+
+		if got := stats2[2]["last_viewed_timestamp"]; got != nil {
+			t.Fatalf("rows[1][file_viewing_statistics][2][last_viewed_timestamp] = %v, want nil", got)
+		}
+	})
+
+	t.Run("full mode keeps viewing stats in float seconds with include_milliseconds", func(t *testing.T) {
+		rows, err := bundle.GetMetadata(context.Background(), filemetadata.Request{
+			Hashes:              []string{fixture.hash1Hex},
+			IncludeMilliseconds: true,
+		})
+		if err != nil {
+			t.Fatalf("GetMetadata() error = %v", err)
+		}
+
+		stats, ok := rows[0]["file_viewing_statistics"].([]map[string]any)
+		if !ok {
+			t.Fatalf("rows[0][file_viewing_statistics] type = %T, want []map[string]any", rows[0]["file_viewing_statistics"])
+		}
+
+		if got := stats[0]["viewtime"]; got != 6.543 {
+			t.Fatalf("rows[0][file_viewing_statistics][0][viewtime] = %v, want 6.543", got)
+		}
+
+		if got := stats[0]["last_viewed_timestamp"]; got != 12.345 {
+			t.Fatalf("rows[0][file_viewing_statistics][0][last_viewed_timestamp] = %v, want 12.345", got)
+		}
+	})
+
+	t.Run("full mode synthesizes default viewing stats when table is absent", func(t *testing.T) {
+		isolatedDir, isolatedFixture := createTestBundle(t)
+
+		mainDB := openSQLiteForTest(t, filepath.Join(isolatedDir, "client.db"))
+		mustExec(t, mainDB, `DROP TABLE file_viewing_stats;`)
+		if err := mainDB.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+
+		isolatedBundle, err := Open(context.Background(), isolatedDir)
+		if err != nil {
+			t.Fatalf("Open() error = %v", err)
+		}
+		defer func() {
+			if err := isolatedBundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		rows, err := isolatedBundle.GetMetadata(context.Background(), filemetadata.Request{
+			Hashes: []string{isolatedFixture.hash1Hex},
+		})
+		if err != nil {
+			t.Fatalf("GetMetadata() error = %v", err)
+		}
+
+		stats, ok := rows[0]["file_viewing_statistics"].([]map[string]any)
+		if !ok {
+			t.Fatalf("rows[0][file_viewing_statistics] type = %T, want []map[string]any", rows[0]["file_viewing_statistics"])
+		}
+
+		if len(stats) != 3 {
+			t.Fatalf("len(rows[0][file_viewing_statistics]) = %d, want 3", len(stats))
+		}
+
+		for index, stat := range stats {
+			if got := stat["views"]; got != int64(0) {
+				t.Fatalf("rows[0][file_viewing_statistics][%d][views] = %v, want 0", index, got)
+			}
+
+			if got := stat["viewtime"]; got != 0.0 {
+				t.Fatalf("rows[0][file_viewing_statistics][%d][viewtime] = %v, want 0.0", index, got)
+			}
+
+			if got := stat["last_viewed_timestamp"]; got != nil {
+				t.Fatalf("rows[0][file_viewing_statistics][%d][last_viewed_timestamp] = %v, want nil", index, got)
+			}
+		}
+	})
+
 	t.Run("full mode supports millisecond timestamps", func(t *testing.T) {
 		rows, err := bundle.GetMetadata(context.Background(), filemetadata.Request{
 			FileIDs:             []int64{1},
@@ -1361,6 +1557,7 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 	mustExec(t, mainDB, `CREATE TABLE has_icc_profile (hash_id INTEGER PRIMARY KEY);`)
 	mustExec(t, mainDB, `CREATE TABLE local_ratings (service_id INTEGER, hash_id INTEGER, rating REAL, PRIMARY KEY (service_id, hash_id));`)
 	mustExec(t, mainDB, `CREATE TABLE local_incdec_ratings (service_id INTEGER, hash_id INTEGER, rating INTEGER, PRIMARY KEY (service_id, hash_id));`)
+	mustExec(t, mainDB, `CREATE TABLE file_viewing_stats (hash_id INTEGER, canvas_type INTEGER, last_viewed_timestamp_ms INTEGER, views INTEGER, viewtime_ms INTEGER, PRIMARY KEY (hash_id, canvas_type));`)
 	mustExec(t, mainDB, `CREATE TABLE current_client_files_locations (location_id INTEGER PRIMARY KEY, location TEXT UNIQUE);`)
 	mustExec(t, mainDB, `CREATE TABLE client_files_subfolders (prefix TEXT, location_id INTEGER, PRIMARY KEY (prefix, location_id));`)
 	mustExec(t, mainDB, `CREATE TABLE ideal_client_files_locations (location_id INTEGER PRIMARY KEY, weight INTEGER, max_num_bytes INTEGER);`)
@@ -1463,6 +1660,15 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 		mainDB,
 		`INSERT INTO local_incdec_ratings (service_id, hash_id, rating) VALUES (?, ?, ?);`,
 		13, 1, 5,
+	)
+	mustExec(
+		t,
+		mainDB,
+		`INSERT INTO file_viewing_stats (hash_id, canvas_type, last_viewed_timestamp_ms, views, viewtime_ms) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?);`,
+		1, 0, 12345, 7, 6543,
+		1, 1, 23456, 3, 2100,
+		1, 4, 34567, 1, 500,
+		2, 1, 4000, 2, 1000,
 	)
 	mustExec(
 		t,

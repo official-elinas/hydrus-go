@@ -37,6 +37,9 @@ Last updated: 2026-04-19
 - expanded full/default DB-backed `file_metadata` with daemon-served `ratings` keyed by rating service key:
   - Hydrus-like API values for local like/dislike, numerical, and inc/dec services
   - unrated service defaults that stay aligned with Hydrus (`null` for like/numerical, `0` for inc/dec)
+- expanded full/default DB-backed `file_metadata` with daemon-served `file_viewing_statistics`:
+  - always emits media-viewer, preview-viewer, and client-api-viewer entries in Hydrus canvas order
+  - uses float-second `viewtime` and `last_viewed_timestamp` values independent of `include_milliseconds`
 - explicitly rejects `include_notes=true` and `detailed_url_information=true` in the current full-mode slice
 - added an internal writable Hydrus bundle mode with a serialized `BEGIN IMMEDIATE` transaction runner
 - added a pure managed `client_files` layout package for deterministic file and thumbnail path resolution
@@ -126,7 +129,7 @@ Last updated: 2026-04-19
 
 ### Phase 8: Read/Query Expansion After Import + PTR
 
-- [ ] continue `GET /get_files/file_metadata` toward broader parity for notes, detailed URLs, viewing stats, and remaining edge-case payload semantics
+- [ ] continue `GET /get_files/file_metadata` toward broader parity for notes, detailed URLs, and remaining edge-case payload semantics
 - [ ] begin DB-backed search and tagging read paths on top of imported and PTR-synced data
 - [ ] refine service/media-result behavior for common client workflows
 
@@ -283,3 +286,11 @@ Last updated: 2026-04-19
 - preserved Hydrus-like unrated defaults in the payload (`null` for like/numerical services, `0` for inc/dec services)
 - kept the daemon-first boundary intact; desktop clients still receive ratings only through daemon-served metadata
 - verified with targeted DB/API/app/hydrusdb package tests
+
+### 2026-04-19 — Milestone 17: DB-backed metadata viewing statistics slice
+
+- expanded full/default `GET /get_files/file_metadata` rows with `file_viewing_statistics`
+- added DB-backed reads from `main.file_viewing_stats` for the Hydrus API canvas types exposed in metadata
+- mirrored Hydrus canvas ordering and labels for media viewer, preview viewer, and client api viewer
+- preserved Hydrus-style float-second `viewtime` and `last_viewed_timestamp` values without tying them to `include_milliseconds`
+- synthesized zeroed default entries when a file has no stored viewing stats for one or more exposed canvas types
