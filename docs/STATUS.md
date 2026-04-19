@@ -1,6 +1,6 @@
 # hydrus-go status
 
-Last updated: 2026-04-18
+Last updated: 2026-04-19
 
 ## Completed
 
@@ -30,6 +30,10 @@ Last updated: 2026-04-18
   - known URLs, pixel hash, and IPFS multihashes
   - transparency/EXIF/human-readable/ICC metadata booleans
   - `include_milliseconds=true` support for the implemented full-mode timestamps
+- expanded full/default DB-backed `file_metadata` with a first daemon-served `tags` slice:
+  - service-keyed `tags` payloads with per-service `storage_tags`
+  - compatibility `service_keys_to_statuses_to_tags` and `service_keys_to_statuses_to_display_tags` behind `hide_service_keys_tags=false`
+  - a documented temporary `display_tags` approximation that mirrors storage until display-cache parity lands
 - explicitly rejects `include_notes=true` and `detailed_url_information=true` in the current full-mode slice
 - added an internal writable Hydrus bundle mode with a serialized `BEGIN IMMEDIATE` transaction runner
 - added a pure managed `client_files` layout package for deterministic file and thumbnail path resolution
@@ -75,7 +79,7 @@ Last updated: 2026-04-18
 
 - [x] Phase 1: headless bootstrap daemon
 - [x] Phase 2: read-only DB-backed service discovery and basic metadata
-- [x] Phase 3: first default/full non-tag metadata slice
+- [x] Phase 3: first default/full metadata slices
 
 ### Phase 4: Writable Import Foundation
 
@@ -258,3 +262,12 @@ Last updated: 2026-04-18
 - shifted the implementation on `feat/go-bootstrap-branch` to a native-Go empty-bundle initializer aligned to current hydrus-go runtime expectations
 - preserved fail-fast bundle-state handling for `ready`, `empty`, `partial`, and `non-empty without bundle` directory states
 - verified native first-start behavior with targeted bootstrap/config/app tests plus `go test ./...`
+
+### 2026-04-19 — Milestone 15: DB-backed metadata tags slice
+
+- expanded full/default `GET /get_files/file_metadata` rows with Hydrus-like `tags` objects keyed by service key
+- added DB-backed storage-tag reads from `client.mappings.db` for local/tag-repository services and combined-tag unioning when the virtual combined tag service is present
+- restored the deprecated `service_keys_to_statuses_to_tags` and `service_keys_to_statuses_to_display_tags` maps behind `hide_service_keys_tags=false`
+- kept the daemon-first boundary intact; desktop clients still receive tags only through daemon-served metadata
+- documented the current gap that `display_tags` still mirrors storage tags until Hydrus display-cache parity is wired
+- verified with targeted DB/API/app/daemonclient package tests

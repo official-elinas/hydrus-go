@@ -61,6 +61,7 @@ func (b *Bundle) GetMetadata(
 		ctx,
 		orderedHashes,
 		hashesToFileIDs,
+		request.IncludeLegacyServiceKeysTags,
 		request.IncludeMilliseconds,
 	)
 }

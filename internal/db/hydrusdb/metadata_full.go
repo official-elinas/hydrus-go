@@ -37,6 +37,7 @@ func (b *Bundle) fullMetadataRows(
 	ctx context.Context,
 	orderedHashes []string,
 	hashesToFileIDs map[string]int64,
+	includeLegacyServiceKeysTags bool,
 	includeMilliseconds bool,
 ) ([]filemetadata.Row, error) {
 	knownFileIDs := dedupeInt64s(mapValues(hashesToFileIDs))
@@ -137,6 +138,11 @@ func (b *Bundle) fullMetadataRows(
 		return nil, err
 	}
 
+	tagsByHashID, err := b.lookupFileTags(ctx, knownFileIDs)
+	if err != nil {
+		return nil, err
+	}
+
 	rows := make([]filemetadata.Row, 0, len(orderedHashes))
 	for _, hash := range orderedHashes {
 		record, ok := basicRecords[hash]
@@ -161,6 +167,8 @@ func (b *Bundle) fullMetadataRows(
 			currentFileServices,
 			deletedFileServices,
 			ipfsMultihashes,
+			tagsByHashID,
+			includeLegacyServiceKeysTags,
 		))
 	}
 
@@ -183,6 +191,8 @@ func buildFullMetadataRow(
 	currentFileServices map[int64][]currentFileServiceMembership,
 	deletedFileServices map[int64][]deletedFileServiceMembership,
 	ipfsMultihashes map[int64]map[string]string,
+	tagsByHashID map[int64]metadataTagsPayload,
+	includeLegacyServiceKeysTags bool,
 ) filemetadata.Row {
 	row := buildBasicRow(record, true)
 	hashID := record.hashID
@@ -225,6 +235,21 @@ func buildFullMetadataRow(
 	row["has_icc_profile"] = containsHashID(iccProfileHashIDs, hashID)
 	row["known_urls"] = cloneStringSlice(knownURLs[hashID])
 	row["ipfs_multihashes"] = cloneStringMap(ipfsMultihashes[hashID])
+
+	tagsPayload, ok := tagsByHashID[hashID]
+	if !ok {
+		tagsPayload = metadataTagsPayload{
+			tags:          map[string]map[string]any{},
+			legacyStorage: map[string]map[string][]string{},
+			legacyDisplay: map[string]map[string][]string{},
+		}
+	}
+
+	row["tags"] = tagsPayload.tags
+	if includeLegacyServiceKeysTags {
+		row["service_keys_to_statuses_to_tags"] = tagsPayload.legacyStorage
+		row["service_keys_to_statuses_to_display_tags"] = tagsPayload.legacyDisplay
+	}
 
 	if !isInbox {
 		if archivedTimestampMS, ok := archivedTimestamps[hashID]; ok {
@@ -656,12 +681,25 @@ func (b *Bundle) lookupAllServiceDefinitions(
 }
 
 func (b *Bundle) lookupMainTableNames(ctx context.Context) (map[string]struct{}, error) {
+	return b.lookupSchemaTableNames(ctx, "main")
+}
+
+func (b *Bundle) lookupSchemaTableNames(
+	ctx context.Context,
+	schemaName string,
+) (map[string]struct{}, error) {
+	switch schemaName {
+	case "main", "external_master", "external_caches", "external_mappings":
+	default:
+		return nil, fmt.Errorf("unsupported sqlite schema name %q", schemaName)
+	}
+
 	rows, err := b.conn.QueryContext(
 		ctx,
-		`SELECT name FROM main.sqlite_master WHERE type = 'table'`,
+		fmt.Sprintf(`SELECT name FROM %s.sqlite_master WHERE type = 'table'`, schemaName),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("query sqlite table names: %w", err)
+		return nil, fmt.Errorf("query sqlite table names for schema %s: %w", schemaName, err)
 	}
 	defer rows.Close()
 
@@ -669,14 +707,14 @@ func (b *Bundle) lookupMainTableNames(ctx context.Context) (map[string]struct{},
 	for rows.Next() {
 		var tableName string
 		if err := rows.Scan(&tableName); err != nil {
-			return nil, fmt.Errorf("scan sqlite table name: %w", err)
+			return nil, fmt.Errorf("scan sqlite table name for schema %s: %w", schemaName, err)
 		}
 
 		tableNames[tableName] = struct{}{}
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate sqlite table names: %w", err)
+		return nil, fmt.Errorf("iterate sqlite table names for schema %s: %w", schemaName, err)
 	}
 
 	return tableNames, nil

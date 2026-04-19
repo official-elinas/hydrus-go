@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -34,8 +35,8 @@ func TestBundleServices(t *testing.T) {
 		t.Fatalf("List() error = %v", err)
 	}
 
-	if len(catalog) != 9 {
-		t.Fatalf("len(catalog) = %d, want 9", len(catalog))
+	if len(catalog) != 10 {
+		t.Fatalf("len(catalog) = %d, want 10", len(catalog))
 	}
 
 	if catalog[0].Name != "my tags" {
@@ -44,6 +45,10 @@ func TestBundleServices(t *testing.T) {
 
 	if catalog[1].Name != "downloader tags" {
 		t.Fatalf("catalog[1].Name = %q, want downloader tags", catalog[1].Name)
+	}
+
+	if _, ok := catalog.ByName("all known tags"); !ok {
+		t.Fatal("all known tags service missing from discovery catalog")
 	}
 
 	if _, ok := catalog.ByName("client api"); ok {
@@ -205,7 +210,7 @@ func TestBundleByName_PrefersExactMatchBeforeCaseInsensitiveFallback(t *testing.
 		t,
 		mainDB,
 		`INSERT INTO services (service_id, service_key, service_type, name, dictionary_string) VALUES (?, ?, ?, ?, ?);`,
-		12,
+		13,
 		exactCaseKey,
 		int(services.TypeClientAPIService),
 		"Client API",
@@ -323,7 +328,7 @@ func TestBundleMetadata(t *testing.T) {
 		}
 	})
 
-	t.Run("full mode returns the non-tag metadata subset", func(t *testing.T) {
+	t.Run("full mode returns metadata including tag payloads", func(t *testing.T) {
 		rows, err := bundle.GetMetadata(context.Background(), filemetadata.Request{
 			Hashes: []string{fixture.hash1Hex, fixture.hash2Hex, fixture.unknownHashHex},
 		})
@@ -374,6 +379,78 @@ func TestBundleMetadata(t *testing.T) {
 
 		if got := row1["has_icc_profile"]; got != true {
 			t.Fatalf("rows[0][has_icc_profile] = %v, want true", got)
+		}
+
+		tags, ok := row1["tags"].(map[string]map[string]any)
+		if !ok {
+			t.Fatalf("rows[0][tags] type = %T, want map[string]map[string]any", row1["tags"])
+		}
+
+		localTagService, ok := tags[fixture.localTagServiceKeyHex]
+		if !ok {
+			t.Fatalf("rows[0][tags] missing local tag service %q", fixture.localTagServiceKeyHex)
+		}
+
+		localStorageTags, ok := localTagService["storage_tags"].(map[string][]string)
+		if !ok {
+			t.Fatalf("rows[0][tags][local][storage_tags] type = %T, want map[string][]string", localTagService["storage_tags"])
+		}
+
+		if got := localStorageTags["0"]; !slices.Equal(got, []string{"creator:alice", "series:zeta"}) {
+			t.Fatalf("rows[0][tags][local][storage_tags][0] = %v, want [creator:alice series:zeta]", got)
+		}
+
+		if got := localStorageTags["2"]; !slices.Equal(got, []string{"old:tag"}) {
+			t.Fatalf("rows[0][tags][local][storage_tags][2] = %v, want [old:tag]", got)
+		}
+
+		downloaderTagService, ok := tags[fixture.downloaderTagsServiceKeyHex]
+		if !ok {
+			t.Fatalf("rows[0][tags] missing downloader tag service %q", fixture.downloaderTagsServiceKeyHex)
+		}
+
+		downloaderStorageTags, ok := downloaderTagService["storage_tags"].(map[string][]string)
+		if !ok {
+			t.Fatalf("rows[0][tags][downloader][storage_tags] type = %T, want map[string][]string", downloaderTagService["storage_tags"])
+		}
+
+		if got := downloaderStorageTags["0"]; !slices.Equal(got, []string{"character:bob", "series:zeta"}) {
+			t.Fatalf("rows[0][tags][downloader][storage_tags][0] = %v, want [character:bob series:zeta]", got)
+		}
+
+		if got := downloaderStorageTags["1"]; !slices.Equal(got, []string{"pending:review"}) {
+			t.Fatalf("rows[0][tags][downloader][storage_tags][1] = %v, want [pending:review]", got)
+		}
+
+		if got := downloaderStorageTags["3"]; !slices.Equal(got, []string{"petitioned:cleanup"}) {
+			t.Fatalf("rows[0][tags][downloader][storage_tags][3] = %v, want [petitioned:cleanup]", got)
+		}
+
+		combinedTagService, ok := tags[fixture.combinedTagServiceKeyHex]
+		if !ok {
+			t.Fatalf("rows[0][tags] missing combined tag service %q", fixture.combinedTagServiceKeyHex)
+		}
+
+		combinedStorageTags, ok := combinedTagService["storage_tags"].(map[string][]string)
+		if !ok {
+			t.Fatalf("rows[0][tags][combined][storage_tags] type = %T, want map[string][]string", combinedTagService["storage_tags"])
+		}
+
+		if got := combinedStorageTags["0"]; !slices.Equal(got, []string{"character:bob", "creator:alice", "series:zeta"}) {
+			t.Fatalf("rows[0][tags][combined][storage_tags][0] = %v, want [character:bob creator:alice series:zeta]", got)
+		}
+
+		combinedDisplayTags, ok := combinedTagService["display_tags"].(map[string][]string)
+		if !ok {
+			t.Fatalf("rows[0][tags][combined][display_tags] type = %T, want map[string][]string", combinedTagService["display_tags"])
+		}
+
+		if got := combinedDisplayTags["1"]; !slices.Equal(got, []string{"pending:review"}) {
+			t.Fatalf("rows[0][tags][combined][display_tags][1] = %v, want [pending:review]", got)
+		}
+
+		if _, ok := row1["service_keys_to_statuses_to_tags"]; ok {
+			t.Fatal("rows[0][service_keys_to_statuses_to_tags] unexpectedly present when legacy tag keys are hidden")
 		}
 
 		timeModifiedDetails, ok := row1["time_modified_details"].(map[string]any)
@@ -486,6 +563,34 @@ func TestBundleMetadata(t *testing.T) {
 
 		if got := rows[2]["file_id"]; got != nil {
 			t.Fatalf("rows[2][file_id] = %v, want nil", got)
+		}
+	})
+
+	t.Run("full mode can include legacy service-key tag maps", func(t *testing.T) {
+		rows, err := bundle.GetMetadata(context.Background(), filemetadata.Request{
+			Hashes:                       []string{fixture.hash1Hex},
+			IncludeLegacyServiceKeysTags: true,
+		})
+		if err != nil {
+			t.Fatalf("GetMetadata() error = %v", err)
+		}
+
+		storageByService, ok := rows[0]["service_keys_to_statuses_to_tags"].(map[string]map[string][]string)
+		if !ok {
+			t.Fatalf("rows[0][service_keys_to_statuses_to_tags] type = %T, want map[string]map[string][]string", rows[0]["service_keys_to_statuses_to_tags"])
+		}
+
+		if got := storageByService[fixture.combinedTagServiceKeyHex]["0"]; !slices.Equal(got, []string{"character:bob", "creator:alice", "series:zeta"}) {
+			t.Fatalf("rows[0][service_keys_to_statuses_to_tags][combined][0] = %v, want [character:bob creator:alice series:zeta]", got)
+		}
+
+		displayByService, ok := rows[0]["service_keys_to_statuses_to_display_tags"].(map[string]map[string][]string)
+		if !ok {
+			t.Fatalf("rows[0][service_keys_to_statuses_to_display_tags] type = %T, want map[string]map[string][]string", rows[0]["service_keys_to_statuses_to_display_tags"])
+		}
+
+		if got := displayByService[fixture.downloaderTagsServiceKeyHex]["3"]; !slices.Equal(got, []string{"petitioned:cleanup"}) {
+			t.Fatalf("rows[0][service_keys_to_statuses_to_display_tags][downloader][3] = %v, want [petitioned:cleanup]", got)
 		}
 	})
 
@@ -917,6 +1022,9 @@ type testFixture struct {
 	hash1PixelHashHex               string
 	hash1IPFSMultihash              string
 	clientAPIServiceKey             []byte
+	localTagServiceKeyHex           string
+	downloaderTagsServiceKeyHex     string
+	combinedTagServiceKeyHex        string
 	localFilesServiceKeyHex         string
 	allKnownFilesServiceKeyHex      string
 	hydrusLocalFilesServiceKeyHex   string
@@ -972,6 +1080,7 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 	hydrusLocalFilesKey := []byte("all-local-files")
 	combinedLocalMediaKey := []byte("all-local-media")
 	combinedFilesKey := []byte("combined-files")
+	combinedTagsKey := []byte("all-known-tags")
 	trashKey := []byte("trash")
 	ipfsKey := []byte("my-ipfs")
 	clientAPIKey := []byte("client-api")
@@ -1038,7 +1147,7 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 	mustExec(
 		t,
 		mainDB,
-		`INSERT INTO services (service_id, service_key, service_type, name, dictionary_string) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?);`,
+		`INSERT INTO services (service_id, service_key, service_type, name, dictionary_string) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?);`,
 		1, localTagKey, int(services.TypeLocalTag), "my tags", "{}",
 		2, localFilesKey, int(services.TypeLocalFileDomain), "my files", "{}",
 		3, hydrusLocalFilesKey, int(services.TypeHydrusLocalFileStorage), "all local files", "{}",
@@ -1050,6 +1159,7 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 		9, clientAPIKey, int(services.TypeClientAPIService), "client api", "{}",
 		10, downloaderTagsKey, int(services.TypeLocalTag), "downloader tags", "{}",
 		11, favouritesKey, int(services.TypeLocalRatingLike), "favourites", favouritesDictionary,
+		12, combinedTagsKey, int(services.TypeCombinedTag), "all known tags", "{}",
 	)
 	mustExec(
 		t,
@@ -1159,6 +1269,7 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 
 	mustExec(t, masterDB, `CREATE TABLE hashes (hash_id INTEGER PRIMARY KEY, hash BLOB UNIQUE);`)
 	mustExec(t, masterDB, `CREATE TABLE blurhashes (hash_id INTEGER PRIMARY KEY, blurhash TEXT);`)
+	mustExec(t, masterDB, `CREATE TABLE tags (tag_id INTEGER PRIMARY KEY, tag TEXT UNIQUE);`)
 	mustExec(t, masterDB, `CREATE TABLE url_domains (domain_id INTEGER PRIMARY KEY, domain TEXT UNIQUE);`)
 	mustExec(t, masterDB, `CREATE TABLE urls (url_id INTEGER PRIMARY KEY, domain_id INTEGER, url TEXT UNIQUE);`)
 	mustExec(
@@ -1179,6 +1290,17 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 	mustExec(
 		t,
 		masterDB,
+		`INSERT INTO tags (tag_id, tag) VALUES (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?);`,
+		1, "creator:alice",
+		2, "series:zeta",
+		3, "old:tag",
+		4, "character:bob",
+		5, "pending:review",
+		6, "petitioned:cleanup",
+	)
+	mustExec(
+		t,
+		masterDB,
 		`INSERT INTO url_domains (domain_id, domain) VALUES (?, ?), (?, ?);`,
 		1, "otherbooru.org",
 		2, "img.weirdbooru.com",
@@ -1192,7 +1314,52 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 	)
 
 	createEmptySQLiteFile(t, cachesPath)
-	createEmptySQLiteFile(t, mappingsPath)
+
+	mappingsDB := openSQLiteForTest(t, mappingsPath)
+	defer mappingsDB.Close()
+
+	mustExec(t, mappingsDB, `CREATE TABLE current_mappings_1 (tag_id INTEGER, hash_id INTEGER, PRIMARY KEY (tag_id, hash_id));`)
+	mustExec(t, mappingsDB, `CREATE TABLE deleted_mappings_1 (tag_id INTEGER, hash_id INTEGER, PRIMARY KEY (tag_id, hash_id));`)
+	mustExec(t, mappingsDB, `CREATE TABLE pending_mappings_1 (tag_id INTEGER, hash_id INTEGER, PRIMARY KEY (tag_id, hash_id));`)
+	mustExec(t, mappingsDB, `CREATE TABLE petitioned_mappings_1 (tag_id INTEGER, hash_id INTEGER, reason_id INTEGER, PRIMARY KEY (tag_id, hash_id));`)
+	mustExec(t, mappingsDB, `CREATE TABLE current_mappings_10 (tag_id INTEGER, hash_id INTEGER, PRIMARY KEY (tag_id, hash_id));`)
+	mustExec(t, mappingsDB, `CREATE TABLE deleted_mappings_10 (tag_id INTEGER, hash_id INTEGER, PRIMARY KEY (tag_id, hash_id));`)
+	mustExec(t, mappingsDB, `CREATE TABLE pending_mappings_10 (tag_id INTEGER, hash_id INTEGER, PRIMARY KEY (tag_id, hash_id));`)
+	mustExec(t, mappingsDB, `CREATE TABLE petitioned_mappings_10 (tag_id INTEGER, hash_id INTEGER, reason_id INTEGER, PRIMARY KEY (tag_id, hash_id));`)
+
+	mustExec(
+		t,
+		mappingsDB,
+		`INSERT INTO current_mappings_1 (tag_id, hash_id) VALUES (?, ?), (?, ?), (?, ?);`,
+		1, 1,
+		2, 1,
+		2, 2,
+	)
+	mustExec(
+		t,
+		mappingsDB,
+		`INSERT INTO deleted_mappings_1 (tag_id, hash_id) VALUES (?, ?);`,
+		3, 1,
+	)
+	mustExec(
+		t,
+		mappingsDB,
+		`INSERT INTO current_mappings_10 (tag_id, hash_id) VALUES (?, ?), (?, ?);`,
+		2, 1,
+		4, 1,
+	)
+	mustExec(
+		t,
+		mappingsDB,
+		`INSERT INTO pending_mappings_10 (tag_id, hash_id) VALUES (?, ?);`,
+		5, 1,
+	)
+	mustExec(
+		t,
+		mappingsDB,
+		`INSERT INTO petitioned_mappings_10 (tag_id, hash_id, reason_id) VALUES (?, ?, ?);`,
+		6, 1, 1,
+	)
 
 	return dir, testFixture{
 		hash1Hex:                        hash1,
@@ -1203,6 +1370,9 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 		hash1PixelHashHex:               pixelHash,
 		hash1IPFSMultihash:              ipfsMultihash,
 		clientAPIServiceKey:             clientAPIKey,
+		localTagServiceKeyHex:           hex.EncodeToString(localTagKey),
+		downloaderTagsServiceKeyHex:     hex.EncodeToString(downloaderTagsKey),
+		combinedTagServiceKeyHex:        hex.EncodeToString(combinedTagsKey),
 		localFilesServiceKeyHex:         hex.EncodeToString(localFilesKey),
 		allKnownFilesServiceKeyHex:      hex.EncodeToString(combinedFilesKey),
 		hydrusLocalFilesServiceKeyHex:   hex.EncodeToString(hydrusLocalFilesKey),

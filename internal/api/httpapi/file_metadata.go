@@ -103,6 +103,15 @@ func parseFileMetadataRequest(r *http.Request) (filemetadata.Request, error) {
 		return filemetadata.Request{}, err
 	}
 
+	hideServiceKeysTags, err := queryBool(
+		query,
+		"hide_service_keys_tags",
+		true,
+	)
+	if err != nil {
+		return filemetadata.Request{}, err
+	}
+
 	includeBlurhash, err := queryBool(query, "include_blurhash", false)
 	if err != nil {
 		return filemetadata.Request{}, err
@@ -153,16 +162,17 @@ func parseFileMetadataRequest(r *http.Request) (filemetadata.Request, error) {
 	}
 
 	return filemetadata.Request{
-		Hashes:                     hashes,
-		FileIDs:                    fileIDs,
-		OnlyReturnIdentifiers:      onlyReturnIdentifiers,
-		OnlyReturnBasicInformation: onlyReturnBasicInformation,
-		IncludeServicesObject:      includeServicesObject,
-		IncludeBlurhash:            includeBlurhash,
-		IncludeMilliseconds:        includeMilliseconds,
-		DetailedURLInformation:     detailedURLInformation,
-		IncludeNotes:               includeNotes,
-		CreateNewFileIDs:           createNewFileIDs,
+		Hashes:                       hashes,
+		FileIDs:                      fileIDs,
+		OnlyReturnIdentifiers:        onlyReturnIdentifiers,
+		OnlyReturnBasicInformation:   onlyReturnBasicInformation,
+		IncludeServicesObject:        includeServicesObject,
+		IncludeLegacyServiceKeysTags: !hideServiceKeysTags,
+		IncludeBlurhash:              includeBlurhash,
+		IncludeMilliseconds:          includeMilliseconds,
+		DetailedURLInformation:       detailedURLInformation,
+		IncludeNotes:                 includeNotes,
+		CreateNewFileIDs:             createNewFileIDs,
 	}, nil
 }
 

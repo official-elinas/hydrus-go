@@ -23,7 +23,7 @@ This repository currently provides the following early migration slices:
 - DB-backed read-only Hydrus client bundle opening
 - Hydrus-compatible service catalog foundation
 - access key and session key flow for the initial compatibility endpoints
-- initial DB-backed file metadata compatibility, including a first full/default non-tag slice
+- initial DB-backed file metadata compatibility, including first full/default metadata slices for both non-tag fields and a first daemon-served tags payload
 - an internal prepared-file import checkpoint that composes managed placement with serialized DB writes
 - first thin-client browse/asset endpoints for recent local files, originals, and thumbnails
 - public local-path import and trash endpoints for thin-client-driven library testing
@@ -210,7 +210,7 @@ Important current limitations:
   - `only_return_identifiers=true`
   - `only_return_basic_information=true`
   - optional `include_blurhash=true` in basic mode
-  - default/full read-only non-tag metadata for:
+  - default/full read-only metadata for:
     - `file_services`
     - `time_modified` and `time_modified_details`
     - `time_archived`
@@ -219,14 +219,16 @@ Important current limitations:
     - `pixel_hash`
     - `ipfs_multihashes`
     - `has_transparency`, `has_exif`, `has_human_readable_embedded_metadata`, `has_icc_profile`
+    - Hydrus-like `tags`, including per-service `storage_tags` and a current `display_tags` approximation that mirrors storage until display-cache parity lands
   - `include_milliseconds=true` for the implemented full-mode timestamp fields
   - optional `include_services_object=false`
+  - optional `hide_service_keys_tags=false` to also include the older `service_keys_to_statuses_to_tags` and `service_keys_to_statuses_to_display_tags` compatibility maps
 - full/default `GET /get_files/file_metadata` parity is still incomplete; this slice does not yet implement:
-  - `tags`
   - `ratings`
   - `file_viewing_statistics`
   - `include_notes=true`
   - `detailed_url_information=true`
+  - exact display-tag parity from Hydrus display caches/sibling-parent processing
   - exact thumbnail-dimension parity
 - `create_new_file_ids=true` is intentionally rejected in read-only mode
 - no public batch/upload import flow yet

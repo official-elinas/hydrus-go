@@ -1174,6 +1174,153 @@ func TestGetFileMetadata(t *testing.T) {
 		}
 	})
 
+	t.Run("passes through tags payload and hides legacy maps by default", func(t *testing.T) {
+		tagStore := &fakeMetadataStore{
+			handle: func(request filemetadata.Request) ([]filemetadata.Row, error) {
+				if request.IncludeLegacyServiceKeysTags {
+					t.Fatal("IncludeLegacyServiceKeysTags = true, want false by default")
+				}
+
+				return []filemetadata.Row{{
+					"file_id": int64(1),
+					"hash":    strings.Repeat("a", 64),
+					"tags": map[string]map[string]any{
+						"74616773": {
+							"name":        "my tags",
+							"type":        services.TypeLocalTag,
+							"type_pretty": services.TypePretty(services.TypeLocalTag),
+							"storage_tags": map[string][]string{
+								"0": {"creator:alice"},
+							},
+							"display_tags": map[string][]string{
+								"0": {"creator:alice"},
+							},
+						},
+					},
+				}}, nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, provider, tagStore, false)
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/get_files/file_metadata?file_ids=%5B1%5D&include_services_object=false",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", accessKey)
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		metadata, ok := payload["metadata"].([]any)
+		if !ok || len(metadata) != 1 {
+			t.Fatalf("metadata = %v, want one row", payload["metadata"])
+		}
+
+		row, ok := metadata[0].(map[string]any)
+		if !ok {
+			t.Fatalf("metadata[0] type = %T, want map[string]any", metadata[0])
+		}
+
+		tags, ok := row["tags"].(map[string]any)
+		if !ok {
+			t.Fatalf("metadata[0][tags] type = %T, want map[string]any", row["tags"])
+		}
+
+		if _, ok := tags["74616773"]; !ok {
+			t.Fatal("metadata[0][tags] missing expected service entry")
+		}
+
+		if _, ok := row["service_keys_to_statuses_to_tags"]; ok {
+			t.Fatal("legacy service_keys_to_statuses_to_tags unexpectedly present")
+		}
+
+		if _, ok := row["service_keys_to_statuses_to_display_tags"]; ok {
+			t.Fatal("legacy service_keys_to_statuses_to_display_tags unexpectedly present")
+		}
+	})
+
+	t.Run("can include legacy tag maps when hide_service_keys_tags is false", func(t *testing.T) {
+		tagStore := &fakeMetadataStore{
+			handle: func(request filemetadata.Request) ([]filemetadata.Row, error) {
+				if !request.IncludeLegacyServiceKeysTags {
+					t.Fatal("IncludeLegacyServiceKeysTags = false, want true when hide_service_keys_tags=false")
+				}
+
+				return []filemetadata.Row{{
+					"file_id": int64(1),
+					"hash":    strings.Repeat("a", 64),
+					"tags": map[string]map[string]any{
+						"74616773": {
+							"name":        "my tags",
+							"type":        services.TypeLocalTag,
+							"type_pretty": services.TypePretty(services.TypeLocalTag),
+							"storage_tags": map[string][]string{
+								"0": {"creator:alice"},
+							},
+							"display_tags": map[string][]string{
+								"0": {"creator:alice"},
+							},
+						},
+					},
+					"service_keys_to_statuses_to_tags": map[string]map[string][]string{
+						"74616773": {
+							"0": {"creator:alice"},
+						},
+					},
+					"service_keys_to_statuses_to_display_tags": map[string]map[string][]string{
+						"74616773": {
+							"0": {"creator:alice"},
+						},
+					},
+				}}, nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, provider, tagStore, false)
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/get_files/file_metadata?file_ids=%5B1%5D&include_services_object=false&hide_service_keys_tags=false",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", accessKey)
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		metadata, ok := payload["metadata"].([]any)
+		if !ok || len(metadata) != 1 {
+			t.Fatalf("metadata = %v, want one row", payload["metadata"])
+		}
+
+		row, ok := metadata[0].(map[string]any)
+		if !ok {
+			t.Fatalf("metadata[0] type = %T, want map[string]any", metadata[0])
+		}
+
+		if _, ok := row["service_keys_to_statuses_to_tags"].(map[string]any); !ok {
+			t.Fatalf("metadata[0][service_keys_to_statuses_to_tags] type = %T, want map[string]any", row["service_keys_to_statuses_to_tags"])
+		}
+
+		if _, ok := row["service_keys_to_statuses_to_display_tags"].(map[string]any); !ok {
+			t.Fatalf("metadata[0][service_keys_to_statuses_to_display_tags] type = %T, want map[string]any", row["service_keys_to_statuses_to_display_tags"])
+		}
+	})
+
 	t.Run("invalid hash is rejected", func(t *testing.T) {
 		req := httptest.NewRequest(
 			http.MethodGet,
@@ -1190,10 +1337,10 @@ func TestGetFileMetadata(t *testing.T) {
 		}
 	})
 
-	t.Run("parses full mode flags", func(t *testing.T) {
+	t.Run("parses full mode flags and legacy tag compatibility toggle", func(t *testing.T) {
 		req := httptest.NewRequest(
 			http.MethodGet,
-			"/get_files/file_metadata?file_ids=%5B1%5D&include_milliseconds=true&include_notes=true&detailed_url_information=true&include_services_object=false",
+			"/get_files/file_metadata?file_ids=%5B1%5D&include_milliseconds=true&include_notes=true&detailed_url_information=true&include_services_object=false&hide_service_keys_tags=false",
 			nil,
 		)
 		req.Header.Set("Hydrus-Client-API-Access-Key", accessKey)
@@ -1231,6 +1378,10 @@ func TestGetFileMetadata(t *testing.T) {
 
 		if store.lastRequest.IncludeServicesObject {
 			t.Fatal("IncludeServicesObject = true, want false")
+		}
+
+		if !store.lastRequest.IncludeLegacyServiceKeysTags {
+			t.Fatal("IncludeLegacyServiceKeysTags = false, want true")
 		}
 	})
 
