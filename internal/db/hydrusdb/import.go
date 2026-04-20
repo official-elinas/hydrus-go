@@ -20,6 +20,8 @@ type PreparedLocalImport struct {
 	Mime                int
 	Width               *int64
 	Height              *int64
+	PixelHashHex        string
+	HasTransparency     *bool
 	Duration            *int64
 	NumFrames           *int64
 	HasAudio            *bool
@@ -43,6 +45,9 @@ type normalizedPreparedLocalImport struct {
 	mime                int64
 	width               sql.NullInt64
 	height              sql.NullInt64
+	pixelHashHex        string
+	pixelHashBytes      []byte
+	hasTransparency     sql.NullInt64
 	duration            sql.NullInt64
 	numFrames           sql.NullInt64
 	hasAudio            sql.NullInt64
@@ -54,6 +59,8 @@ type normalizedPreparedLocalImport struct {
 
 type preparedLocalImportPlan struct {
 	currentMemberships []preparedCurrentMembershipPlan
+	hasPixelHashMap    bool
+	hasTransparency    bool
 }
 
 type preparedCurrentMembershipPlan struct {
@@ -120,7 +127,7 @@ func (b *Bundle) RecordPreparedLocalImport(
 					FileID:          hashID,
 					AlreadyImported: true,
 				}
-				return nil
+				return ensurePreparedAuxiliaryMetadata(ctx, tx, hashID, normalized, plan)
 			}
 		} else {
 			if _, err := tx.ExecContext(
@@ -142,6 +149,10 @@ func (b *Bundle) RecordPreparedLocalImport(
 		}
 
 		if err := insertPreparedFilesInfo(ctx, tx, hashID, normalized); err != nil {
+			return err
+		}
+
+		if err := ensurePreparedAuxiliaryMetadata(ctx, tx, hashID, normalized, plan); err != nil {
 			return err
 		}
 
@@ -245,6 +256,14 @@ func normalizePreparedLocalImport(
 		return normalizedPreparedLocalImport{}, err
 	}
 
+	pixelHashHex, pixelHashBytes, err := normalizeOptionalHashHex(
+		"pixel hash",
+		prepared.PixelHashHex,
+	)
+	if err != nil {
+		return normalizedPreparedLocalImport{}, err
+	}
+
 	duration, err := normalizeOptionalNonNegativeInt64("duration", prepared.Duration)
 	if err != nil {
 		return normalizedPreparedLocalImport{}, err
@@ -283,6 +302,9 @@ func normalizePreparedLocalImport(
 		mime:                int64(prepared.Mime),
 		width:               width,
 		height:              height,
+		pixelHashHex:        pixelHashHex,
+		pixelHashBytes:      pixelHashBytes,
+		hasTransparency:     nullableBoolToInt64(prepared.HasTransparency),
 		duration:            duration,
 		numFrames:           numFrames,
 		hasAudio:            nullableBoolToInt64(prepared.HasAudio),
@@ -302,6 +324,24 @@ func normalizePreparedHash(hashHex string) (string, []byte, error) {
 	decoded, err := hex.DecodeString(normalized)
 	if err != nil {
 		return "", nil, fmt.Errorf("decode prepared file hash: %w", err)
+	}
+
+	return normalized, decoded, nil
+}
+
+func normalizeOptionalHashHex(label string, value string) (string, []byte, error) {
+	normalized := strings.ToLower(strings.TrimSpace(value))
+	if normalized == "" {
+		return "", nil, nil
+	}
+
+	if len(normalized) != 64 {
+		return "", nil, fmt.Errorf("prepared %s must be 64 hex characters", label)
+	}
+
+	decoded, err := hex.DecodeString(normalized)
+	if err != nil {
+		return "", nil, fmt.Errorf("decode prepared %s: %w", label, err)
 	}
 
 	return normalized, decoded, nil
@@ -398,6 +438,9 @@ func (b *Bundle) resolvePreparedLocalImportPlan(
 	}
 
 	plan := preparedLocalImportPlan{}
+	_, plan.hasPixelHashMap = tableNames["pixel_hash_map"]
+	_, plan.hasTransparency = tableNames["has_transparency"]
+
 	if err := appendPreparedCurrentMembership(
 		&plan,
 		tableNames,
@@ -689,6 +732,61 @@ func insertPreparedCurrentMembership(
 	return nil
 }
 
+func ensurePreparedAuxiliaryMetadata(
+	ctx context.Context,
+	tx *ImmediateTx,
+	hashID int64,
+	prepared normalizedPreparedLocalImport,
+	plan preparedLocalImportPlan,
+) error {
+	if plan.hasPixelHashMap && len(prepared.pixelHashBytes) > 0 {
+		pixelHashID, exists, err := lookupHashIDByHash(ctx, tx, prepared.pixelHashBytes)
+		if err != nil {
+			return err
+		}
+
+		if !exists {
+			if _, err := tx.ExecContext(
+				ctx,
+				`INSERT OR IGNORE INTO external_master.hashes (hash) VALUES (?)`,
+				prepared.pixelHashBytes,
+			); err != nil {
+				return fmt.Errorf("insert external_master.hashes pixel-hash row: %w", err)
+			}
+
+			pixelHashID, exists, err = lookupHashIDByHash(ctx, tx, prepared.pixelHashBytes)
+			if err != nil {
+				return err
+			}
+
+			if !exists {
+				return errors.New("inserted pixel-hash row was not readable inside transaction")
+			}
+		}
+
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT OR IGNORE INTO main.pixel_hash_map (hash_id, pixel_hash_id) VALUES (?, ?)`,
+			hashID,
+			pixelHashID,
+		); err != nil {
+			return fmt.Errorf("insert pixel_hash_map row: %w", err)
+		}
+	}
+
+	if plan.hasTransparency && prepared.hasTransparency.Valid && prepared.hasTransparency.Int64 != 0 {
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT OR IGNORE INTO main.has_transparency (hash_id) VALUES (?)`,
+			hashID,
+		); err != nil {
+			return fmt.Errorf("insert has_transparency row: %w", err)
+		}
+	}
+
+	return nil
+}
+
 func (b *Bundle) preparedLocalImportMatchesExisting(
 	ctx context.Context,
 	hashID int64,
@@ -728,6 +826,32 @@ func (b *Bundle) preparedLocalImportMatchesExisting(
 		plan,
 	) {
 		return false, nil
+	}
+
+	if plan.hasPixelHashMap {
+		pixelHashHex, pixelHashExists, err := lookupPreparedPixelHashHexByHashID(
+			ctx,
+			b.conn,
+			hashID,
+		)
+		if err != nil {
+			return false, err
+		}
+
+		if !optionalHashHexMatches(pixelHashHex, pixelHashExists, prepared.pixelHashHex) {
+			return false, nil
+		}
+	}
+
+	if plan.hasTransparency {
+		hasTransparency, err := lookupPreparedHasTransparencyByHashID(ctx, b.conn, hashID)
+		if err != nil {
+			return false, err
+		}
+
+		if !optionalTransparencyMatches(hasTransparency, prepared.hasTransparency) {
+			return false, nil
+		}
 	}
 
 	return true, nil
@@ -771,6 +895,102 @@ func lookupNullableInt64(
 	}
 
 	return value, true, nil
+}
+
+func lookupPreparedPixelHashHexByHashID(
+	ctx context.Context,
+	q queryContextQuerier,
+	hashID int64,
+) (string, bool, error) {
+	rows, err := q.QueryContext(
+		ctx,
+		`SELECT lower(hex(h.hash))
+		FROM main.pixel_hash_map phm
+		JOIN external_master.hashes h ON phm.pixel_hash_id = h.hash_id
+		WHERE phm.hash_id = ?
+		ORDER BY phm.pixel_hash_id ASC`,
+		hashID,
+	)
+	if err != nil {
+		return "", false, fmt.Errorf("query pixel_hash_map rows: %w", err)
+	}
+	defer rows.Close()
+
+	var pixelHashHex string
+	seen := 0
+	for rows.Next() {
+		var candidate string
+		if err := rows.Scan(&candidate); err != nil {
+			return "", false, fmt.Errorf("scan pixel_hash_map row: %w", err)
+		}
+
+		if seen == 0 {
+			pixelHashHex = candidate
+			seen++
+			continue
+		}
+
+		if candidate != pixelHashHex {
+			return "", false, fmt.Errorf("hash_id %d has multiple pixel_hash_map rows", hashID)
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return "", false, fmt.Errorf("iterate pixel_hash_map rows: %w", err)
+	}
+
+	if seen == 0 {
+		return "", false, nil
+	}
+
+	return pixelHashHex, true, nil
+}
+
+func lookupPreparedHasTransparencyByHashID(
+	ctx context.Context,
+	q rowQuerier,
+	hashID int64,
+) (bool, error) {
+	row := q.QueryRowContext(
+		ctx,
+		`SELECT 1 FROM main.has_transparency WHERE hash_id = ?`,
+		hashID,
+	)
+
+	var exists int
+	if err := row.Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+
+		return false, fmt.Errorf("query has_transparency row: %w", err)
+	}
+
+	return true, nil
+}
+
+func optionalHashHexMatches(actual string, exists bool, expected string) bool {
+	if expected == "" {
+		return true
+	}
+
+	if !exists {
+		return true
+	}
+
+	return actual == expected
+}
+
+func optionalTransparencyMatches(actual bool, expected sql.NullInt64) bool {
+	if !expected.Valid {
+		return true
+	}
+
+	if expected.Int64 != 0 {
+		return true
+	}
+
+	return !actual
 }
 
 func fileModifiedRowMatches(

@@ -604,7 +604,7 @@ func runImportRoundTripEndpointsTest(
 
 	metadataReq := httptest.NewRequest(
 		http.MethodGet,
-		"/get_files/file_metadata?file_id="+strconv.FormatInt(fileID, 10)+"&only_return_basic_information=true",
+		"/get_files/file_metadata?file_id="+strconv.FormatInt(fileID, 10),
 		nil,
 	)
 	metadataReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
@@ -626,6 +626,19 @@ func runImportRoundTripEndpointsTest(
 
 	if metadataRow["mime"] != "image/png" {
 		t.Fatalf("metadata mime = %v, want image/png", metadataRow["mime"])
+	}
+
+	pixelHash, ok := metadataRow["pixel_hash"].(string)
+	if !ok {
+		t.Fatalf("metadata pixel_hash type = %T, want string", metadataRow["pixel_hash"])
+	}
+
+	if len(pixelHash) != 64 {
+		t.Fatalf("len(metadata pixel_hash) = %d, want 64", len(pixelHash))
+	}
+
+	if metadataRow["has_transparency"] != false {
+		t.Fatalf("metadata has_transparency = %v, want false", metadataRow["has_transparency"])
 	}
 
 	contentReq := httptest.NewRequest(

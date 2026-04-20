@@ -39,6 +39,7 @@ func TestImporterImportLocalPath(t *testing.T) {
 		}
 
 		sourcePath := writePNGSourceFile(t, t.TempDir(), "import.png", 12, 34)
+		expectedMetadata := detectStillImageImportMetadata(sourcePath, 2)
 
 		result, err := importer.ImportLocalPath(context.Background(), fileimport.Request{Path: sourcePath})
 		if err != nil {
@@ -90,6 +91,75 @@ func TestImporterImportLocalPath(t *testing.T) {
 
 		if row["height"] != int64(34) {
 			t.Fatalf("row[height] = %v, want 34", row["height"])
+		}
+
+		fullRows, err := readBundle.GetMetadata(context.Background(), filemetadata.Request{
+			FileIDs: []int64{result.FileID},
+		})
+		if err != nil {
+			t.Fatalf("GetMetadata(full) error = %v", err)
+		}
+
+		full := fullRows[0]
+		if got := full["pixel_hash"]; got != expectedMetadata.PixelHashHex {
+			t.Fatalf("full[pixel_hash] = %v, want %q", got, expectedMetadata.PixelHashHex)
+		}
+
+		if got := full["has_transparency"]; got != false {
+			t.Fatalf("full[has_transparency] = %v, want false", got)
+		}
+	})
+
+	t.Run("imports a transparent png and records useful transparency", func(t *testing.T) {
+		dir, _ := createImportTestBundle(t)
+
+		bundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		importer, err := NewDefaultImporter(bundle, dir)
+		if err != nil {
+			t.Fatalf("NewDefaultImporter() error = %v", err)
+		}
+
+		sourcePath := writeTransparentPNGSourceFile(t, t.TempDir(), "transparent.png", 10, 8)
+		expectedMetadata := detectStillImageImportMetadata(sourcePath, 2)
+
+		result, err := importer.ImportLocalPath(context.Background(), fileimport.Request{Path: sourcePath})
+		if err != nil {
+			t.Fatalf("ImportLocalPath() error = %v", err)
+		}
+
+		readBundle, err := hydrusdb.Open(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("Open() error = %v", err)
+		}
+		defer func() {
+			if err := readBundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		fullRows, err := readBundle.GetMetadata(context.Background(), filemetadata.Request{
+			FileIDs: []int64{result.FileID},
+		})
+		if err != nil {
+			t.Fatalf("GetMetadata(full) error = %v", err)
+		}
+
+		full := fullRows[0]
+		if got := full["has_transparency"]; got != true {
+			t.Fatalf("full[has_transparency] = %v, want true", got)
+		}
+
+		if got := full["pixel_hash"]; got != expectedMetadata.PixelHashHex {
+			t.Fatalf("full[pixel_hash] = %v, want %q", got, expectedMetadata.PixelHashHex)
 		}
 	})
 
@@ -522,6 +592,40 @@ func writePNGSourceFile(
 	for y := 0; y < height; y++ {
 		for x := 0; x < width; x++ {
 			imageData.Set(x, y, color.RGBA{R: 25, G: 50, B: 75, A: 255})
+		}
+	}
+
+	if err := png.Encode(file, imageData); err != nil {
+		t.Fatalf("png.Encode() error = %v", err)
+	}
+
+	return path
+}
+
+func writeTransparentPNGSourceFile(
+	t *testing.T,
+	dir string,
+	name string,
+	width int,
+	height int,
+) string {
+	t.Helper()
+
+	path := filepath.Join(dir, name)
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("Create() error = %v", err)
+	}
+	defer file.Close()
+
+	imageData := image.NewNRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			alpha := uint8(255)
+			if x == 0 && y == 0 {
+				alpha = 64
+			}
+			imageData.SetNRGBA(x, y, color.NRGBA{R: 25, G: 50, B: 75, A: alpha})
 		}
 	}
 

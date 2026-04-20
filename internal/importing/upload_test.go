@@ -33,6 +33,7 @@ func TestImporterImportUpload(t *testing.T) {
 		}
 
 		stagedPath := writePNGSourceFile(t, t.TempDir(), "staged-upload.png", 16, 24)
+		expectedMetadata := detectStillImageImportMetadata(stagedPath, 2)
 		fileModifiedAtMS := int64(1_700_000_123_000)
 
 		result, err := importer.ImportUpload(context.Background(), fileimport.UploadRequest{
@@ -87,6 +88,14 @@ func TestImporterImportUpload(t *testing.T) {
 
 		if row["time_modified"] != 1700000123.0 {
 			t.Fatalf("row[time_modified] = %v, want 1700000123", row["time_modified"])
+		}
+
+		if got := row["pixel_hash"]; got != expectedMetadata.PixelHashHex {
+			t.Fatalf("row[pixel_hash] = %v, want %q", got, expectedMetadata.PixelHashHex)
+		}
+
+		if got := row["has_transparency"]; got != false {
+			t.Fatalf("row[has_transparency] = %v, want false", got)
 		}
 	})
 

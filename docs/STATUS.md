@@ -57,6 +57,7 @@ Last updated: 2026-04-19
 - added round-trip tests proving imported files become visible through the existing metadata read paths
 - added thin-client-focused browse and asset endpoints for recent local files, originals, and thumbnails
 - added public local-path import and trash endpoints built on top of separate read and write bundle connections
+- added best-effort JPEG/PNG import-time enrichment for `pixel_hash` and `has_transparency` so those full-metadata fields round-trip immediately for daemon-imported still images
 - added best-effort managed thumbnail generation for imported JPEG/PNG/GIF files, including stale-thumbnail repair on exact re-import
 - added a first Fyne desktop prototype scaffold for `hydrusd`
 - added focused daemonclient contract tests for the desktop client's auth, browse, mutation, thumbnail, and content-fetch HTTP paths
@@ -110,9 +111,10 @@ Last updated: 2026-04-19
 - [x] add public trash behavior for imported local files
 - [x] add minimal browse/list APIs so clients can load local files without hash-by-hash probing
 - [x] add thumbnail and original-file serving APIs for client preview flows
-- [ ] expand the public import surface beyond single local-path imports into richer batch/upload workflows
+- [ ] expand the public import surface beyond the current single-file local-path/staged-upload APIs into richer batch workflows
 - [x] add thumbnail generation for supported JPEG/PNG/GIF imports after placement
-- [ ] capture richer import metadata after placement
+- [x] capture richer still-image import metadata after placement
+- [ ] continue enriching imported-file metadata beyond the initial JPEG/PNG pixel-hash/transparency slice
 
 ### Phase 5: Thin Desktop Client MVP
 
@@ -326,3 +328,11 @@ Last updated: 2026-04-19
 - preserved Hydrus-like missing-row behavior for basic/full metadata until a corresponding `main.files_info` row exists
 - kept read-only/degraded daemon mode safe by continuing to reject `create_new_file_ids=true` there
 - verified with targeted DB/API/app/hydrusdb package tests
+
+### 2026-04-19 — Milestone 21: import-time still-image metadata enrichment
+
+- enriched daemon-local and staged-upload JPEG/PNG imports so newly imported files immediately round-trip through full metadata with `pixel_hash` and `has_transparency`
+- kept the core import transaction durable by treating the auxiliary rows as best-effort optional metadata that can also be backfilled on exact retry
+- tightened duplicate handling so conflicting auxiliary metadata is rejected instead of silently widening `pixel_hash_map` state
+- intentionally left animated-media and blurhash import-time enrichment for later parity work
+- verified with targeted DB/import/app tests plus a full `go test ./...` pass

@@ -28,13 +28,17 @@ func TestBundleRecordPreparedLocalImport(t *testing.T) {
 		width := int64(320)
 		height := int64(240)
 		hasAudio := false
+		hasTransparency := true
 		fileModifiedAtMS := int64(700123)
+		pixelHashHex := strings.Repeat("ab", 32)
 		prepared := PreparedLocalImport{
 			HashHex:          strings.Repeat("04", 32),
 			Size:             333,
 			Mime:             2,
 			Width:            &width,
 			Height:           &height,
+			PixelHashHex:     pixelHashHex,
+			HasTransparency:  &hasTransparency,
 			HasAudio:         &hasAudio,
 			ImportedAtMS:     800123,
 			FileModifiedAtMS: &fileModifiedAtMS,
@@ -112,6 +116,28 @@ func TestBundleRecordPreparedLocalImport(t *testing.T) {
 
 		if !storedAud.Valid || storedAud.Int64 != 0 {
 			t.Fatalf("stored has_audio = %v, want 0", storedAud)
+		}
+
+		storedPixelHashHex := selectString(
+			t,
+			bundle.conn,
+			`SELECT lower(hex(h.hash))
+			FROM main.pixel_hash_map phm
+			JOIN external_master.hashes h ON phm.pixel_hash_id = h.hash_id
+			WHERE phm.hash_id = ?`,
+			result.FileID,
+		)
+		if storedPixelHashHex != pixelHashHex {
+			t.Fatalf("stored pixel hash = %q, want %q", storedPixelHashHex, pixelHashHex)
+		}
+
+		if !rowExistsInDB(
+			t,
+			bundle.conn,
+			`SELECT 1 FROM main.has_transparency WHERE hash_id = ?`,
+			result.FileID,
+		) {
+			t.Fatal("has_transparency row missing")
 		}
 
 		if !rowExistsInDB(
@@ -204,6 +230,16 @@ func TestBundleRecordPreparedLocalImport(t *testing.T) {
 			t.Fatalf("retry result.FileID = %d, want %d", retryResult.FileID, result.FileID)
 		}
 
+		pixelHashCount := selectInt64(
+			t,
+			bundle.conn,
+			`SELECT COUNT(*) FROM main.pixel_hash_map WHERE hash_id = ?`,
+			result.FileID,
+		)
+		if pixelHashCount != 1 {
+			t.Fatalf("pixel_hash_map row count = %d, want 1", pixelHashCount)
+		}
+
 		if _, err := bundle.conn.ExecContext(
 			context.Background(),
 			`DELETE FROM main.file_inbox WHERE hash_id = ?`,
@@ -241,6 +277,177 @@ func TestBundleRecordPreparedLocalImport(t *testing.T) {
 
 		if archivedRetry.FileID != result.FileID {
 			t.Fatalf("archivedRetry.FileID = %d, want %d", archivedRetry.FileID, result.FileID)
+		}
+	})
+
+	t.Run("skips optional auxiliary metadata writes when those tables are absent", func(t *testing.T) {
+		dir, _ := createTestBundle(t)
+
+		bundle, err := OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		if _, err := bundle.conn.ExecContext(context.Background(), `DROP TABLE main.pixel_hash_map`); err != nil {
+			t.Fatalf("DROP TABLE pixel_hash_map error = %v", err)
+		}
+
+		if _, err := bundle.conn.ExecContext(context.Background(), `DROP TABLE main.has_transparency`); err != nil {
+			t.Fatalf("DROP TABLE has_transparency error = %v", err)
+		}
+
+		hasTransparency := true
+		prepared := PreparedLocalImport{
+			HashHex:         strings.Repeat("06", 32),
+			Size:            555,
+			Mime:            2,
+			PixelHashHex:    strings.Repeat("cd", 32),
+			HasTransparency: &hasTransparency,
+			ImportedAtMS:    901234,
+		}
+
+		result, err := bundle.RecordPreparedLocalImport(context.Background(), prepared)
+		if err != nil {
+			t.Fatalf("RecordPreparedLocalImport() error = %v", err)
+		}
+
+		if result.FileID <= 0 {
+			t.Fatalf("result.FileID = %d, want > 0", result.FileID)
+		}
+	})
+
+	t.Run("exact retry backfills missing auxiliary metadata", func(t *testing.T) {
+		dir, _ := createTestBundle(t)
+
+		bundle, err := OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		prepared := PreparedLocalImport{
+			HashHex:      strings.Repeat("07", 32),
+			Size:         666,
+			Mime:         2,
+			ImportedAtMS: 902345,
+		}
+
+		first, err := bundle.RecordPreparedLocalImport(context.Background(), prepared)
+		if err != nil {
+			t.Fatalf("first RecordPreparedLocalImport() error = %v", err)
+		}
+
+		hasTransparency := true
+		prepared.PixelHashHex = strings.Repeat("de", 32)
+		prepared.HasTransparency = &hasTransparency
+
+		second, err := bundle.RecordPreparedLocalImport(context.Background(), prepared)
+		if err != nil {
+			t.Fatalf("second RecordPreparedLocalImport() error = %v", err)
+		}
+
+		if !second.AlreadyImported {
+			t.Fatal("second.AlreadyImported = false, want true")
+		}
+
+		if second.FileID != first.FileID {
+			t.Fatalf("second.FileID = %d, want %d", second.FileID, first.FileID)
+		}
+
+		storedPixelHashHex := selectString(
+			t,
+			bundle.conn,
+			`SELECT lower(hex(h.hash))
+			FROM main.pixel_hash_map phm
+			JOIN external_master.hashes h ON phm.pixel_hash_id = h.hash_id
+			WHERE phm.hash_id = ?`,
+			first.FileID,
+		)
+		if storedPixelHashHex != prepared.PixelHashHex {
+			t.Fatalf("stored pixel hash after backfill = %q, want %q", storedPixelHashHex, prepared.PixelHashHex)
+		}
+
+		if !rowExistsInDB(
+			t,
+			bundle.conn,
+			`SELECT 1 FROM main.has_transparency WHERE hash_id = ?`,
+			first.FileID,
+		) {
+			t.Fatal("has_transparency row missing after backfill")
+		}
+	})
+
+	t.Run("rejects conflicting duplicate auxiliary metadata", func(t *testing.T) {
+		dir, _ := createTestBundle(t)
+
+		bundle, err := OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		hasTransparency := true
+		prepared := PreparedLocalImport{
+			HashHex:         strings.Repeat("08", 32),
+			Size:            777,
+			Mime:            2,
+			PixelHashHex:    strings.Repeat("aa", 32),
+			HasTransparency: &hasTransparency,
+			ImportedAtMS:    903456,
+		}
+
+		result, err := bundle.RecordPreparedLocalImport(context.Background(), prepared)
+		if err != nil {
+			t.Fatalf("RecordPreparedLocalImport() error = %v", err)
+		}
+
+		conflictingPixelHash := prepared
+		conflictingPixelHash.PixelHashHex = strings.Repeat("bb", 32)
+		if _, err := bundle.RecordPreparedLocalImport(context.Background(), conflictingPixelHash); err == nil {
+			t.Fatal("RecordPreparedLocalImport(conflicting pixel hash) error = nil, want error")
+		}
+
+		falseTransparency := false
+		conflictingTransparency := prepared
+		conflictingTransparency.HasTransparency = &falseTransparency
+		if _, err := bundle.RecordPreparedLocalImport(context.Background(), conflictingTransparency); err == nil {
+			t.Fatal("RecordPreparedLocalImport(conflicting transparency) error = nil, want error")
+		}
+
+		storedPixelHashHex := selectString(
+			t,
+			bundle.conn,
+			`SELECT lower(hex(h.hash))
+			FROM main.pixel_hash_map phm
+			JOIN external_master.hashes h ON phm.pixel_hash_id = h.hash_id
+			WHERE phm.hash_id = ?`,
+			result.FileID,
+		)
+		if storedPixelHashHex != prepared.PixelHashHex {
+			t.Fatalf("stored pixel hash after conflicts = %q, want %q", storedPixelHashHex, prepared.PixelHashHex)
+		}
+
+		pixelHashCount := selectInt64(
+			t,
+			bundle.conn,
+			`SELECT COUNT(*) FROM main.pixel_hash_map WHERE hash_id = ?`,
+			result.FileID,
+		)
+		if pixelHashCount != 1 {
+			t.Fatalf("pixel_hash_map row count after conflicts = %d, want 1", pixelHashCount)
 		}
 	})
 

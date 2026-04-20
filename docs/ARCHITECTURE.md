@@ -162,6 +162,7 @@ adds:
 - daemon-local hashing and MIME detection for `POST /v1/import/local_file`
 - runtime write enablement through a separate writable bundle when available
 - best-effort managed thumbnail generation for imported JPEG/PNG/GIF still images
+- best-effort JPEG/PNG import-time `pixel_hash` and `has_transparency` enrichment so those metadata fields round-trip immediately after daemon-owned imports
 
 The project now also has the first thin-client-oriented browse surface:
 
@@ -198,7 +199,7 @@ The runtime storage/DB model for this phase is:
 The deeper Hydrus client-core behaviors are still pending:
 
 - full media-result metadata parity, especially exact thumbnail sizing semantics and remaining edge-case behavior around metadata payloads
-- broader DB-backed import orchestration beyond the single local-path slice, especially richer upload/batch flows and richer import metadata capture
+- broader DB-backed import orchestration beyond the current local-path/upload slices, especially richer batch flows and further import metadata capture beyond the initial JPEG/PNG `pixel_hash`/`has_transparency` slice
 - thumbnail generation for additional media types beyond the current JPEG/PNG/GIF still-image subset
 - file serving and broader managed file-store lifecycle behavior
 - search/tagging engine behavior

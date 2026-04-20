@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/official-elinas/hydrus-go/internal/core/filemetadata"
@@ -40,8 +41,10 @@ func TestImporterImportPreparedFile(t *testing.T) {
 		width := int64(123)
 		height := int64(456)
 		hasAudio := false
+		hasTransparency := true
 		fileModifiedAtMS := int64(910123)
 		importedAtMS := int64(920123)
+		pixelHashHex := strings.Repeat("ef", 32)
 
 		result, err := importer.ImportPreparedFile(context.Background(), PreparedFile{
 			SourcePath:       sourcePath,
@@ -50,6 +53,8 @@ func TestImporterImportPreparedFile(t *testing.T) {
 			Mime:             2,
 			Width:            &width,
 			Height:           &height,
+			PixelHashHex:     pixelHashHex,
+			HasTransparency:  &hasTransparency,
 			HasAudio:         &hasAudio,
 			ImportedAtMS:     importedAtMS,
 			FileModifiedAtMS: &fileModifiedAtMS,
@@ -158,6 +163,14 @@ func TestImporterImportPreparedFile(t *testing.T) {
 
 		if got := full["is_deleted"]; got != false {
 			t.Fatalf("full is_deleted = %v, want false", got)
+		}
+
+		if got := full["pixel_hash"]; got != pixelHashHex {
+			t.Fatalf("full pixel_hash = %v, want %q", got, pixelHashHex)
+		}
+
+		if got := full["has_transparency"]; got != true {
+			t.Fatalf("full has_transparency = %v, want true", got)
 		}
 
 		if got := full["time_modified"]; got != 910.123 {
