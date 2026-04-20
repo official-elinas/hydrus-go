@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -20,6 +21,7 @@ import (
 	"github.com/official-elinas/hydrus-go/internal/core/filemetadata"
 	"github.com/official-elinas/hydrus-go/internal/core/filetrash"
 	"github.com/official-elinas/hydrus-go/internal/core/librarybrowse"
+	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
 	"github.com/official-elinas/hydrus-go/internal/core/services"
 )
 
@@ -286,6 +288,82 @@ func TestProtectedEndpoints(t *testing.T) {
 		}
 	})
 
+	t.Run("ptr status returns daemon-owned sync status", func(t *testing.T) {
+		ptrStore := stubPTRStore{
+			status: coreptrsync.Status{
+				Enabled:                  true,
+				Configured:               true,
+				ServiceName:              "public tag repository",
+				ServiceKey:               "7075626c696320746167207265706f7369746f7279",
+				Host:                     "ptr.hydrus.network",
+				Port:                     45871,
+				AccountMode:              coreptrsync.AccountModeSharedReadOnly,
+				Phase:                    coreptrsync.PhaseIdle,
+				MetadataSlice:            7,
+				DownloadedUpdateCount:    11,
+				ProcessedDefinitionCount: 5,
+				ProcessedContentCount:    6,
+				UpdatedAtMS:              1700000000123,
+			},
+		}
+
+		handler := newHandlerWithPTRStore(t, ptrStore)
+		req := httptest.NewRequest(http.MethodGet, "/service/ptr/status", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", access.AccessKey())
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		ptr, ok := payload["ptr"].(map[string]any)
+		if !ok {
+			t.Fatalf("ptr payload type = %T, want map[string]any", payload["ptr"])
+		}
+
+		if ptr["service_name"] != "public tag repository" {
+			t.Fatalf("service_name = %v, want public tag repository", ptr["service_name"])
+		}
+
+		if ptr["account_mode"] != coreptrsync.AccountModeSharedReadOnly {
+			t.Fatalf("account_mode = %v, want %s", ptr["account_mode"], coreptrsync.AccountModeSharedReadOnly)
+		}
+
+		if ptr["phase"] != coreptrsync.PhaseIdle {
+			t.Fatalf("phase = %v, want %s", ptr["phase"], coreptrsync.PhaseIdle)
+		}
+	})
+
+	t.Run("ptr status returns not implemented without a store", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/service/ptr/status", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", access.AccessKey())
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotImplemented)
+		}
+	})
+
+	t.Run("ptr status returns internal error when store fails", func(t *testing.T) {
+		ptrHandler := newHandlerWithPTRStore(t, stubPTRStore{err: errors.New("boom")})
+		req := httptest.NewRequest(http.MethodGet, "/service/ptr/status", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", access.AccessKey())
+		rr := httptest.NewRecorder()
+
+		ptrHandler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusInternalServerError {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusInternalServerError)
+		}
+	})
+
 	t.Run("hidden service key returns unavailable", func(t *testing.T) {
 		req := httptest.NewRequest(
 			http.MethodGet,
@@ -445,6 +523,7 @@ func TestProtectedEndpoints(t *testing.T) {
 			nil,
 			nil,
 			&fakeMetadataStore{},
+			nil,
 			false,
 		)
 
@@ -1778,6 +1857,7 @@ func newTestHandler(t *testing.T) http.Handler {
 		nil,
 		nil,
 		nil,
+		nil,
 		false,
 	)
 }
@@ -1798,6 +1878,7 @@ func newAccessControlledHandler(t *testing.T) (*AccessControl, http.Handler) {
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		access,
 		services.DefaultProvider(),
+		nil,
 		nil,
 		nil,
 		nil,
@@ -1825,6 +1906,7 @@ func newCORSEnabledHandler(t *testing.T) http.Handler {
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		access,
 		services.DefaultProvider(),
+		nil,
 		nil,
 		nil,
 		nil,
@@ -1882,8 +1964,44 @@ func newHandlerWithDeps(
 		assetStore,
 		importStore,
 		trashStore,
+		nil,
 		enableCORS,
 	)
+}
+
+func newHandlerWithPTRStore(t *testing.T, ptrStore coreptrsync.Store) http.Handler {
+	t.Helper()
+
+	access, err := NewAccessControl(
+		strings.Repeat("b", 64),
+		"test-client",
+		[]Permission{PermissionSearchAndFetchFiles, PermissionImportAndDeleteFiles},
+	)
+	if err != nil {
+		t.Fatalf("NewAccessControl() error = %v", err)
+	}
+
+	return NewHandler(
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		access,
+		services.DefaultProvider(),
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		ptrStore,
+		false,
+	)
+}
+
+type stubPTRStore struct {
+	status coreptrsync.Status
+	err    error
+}
+
+func (s stubPTRStore) Status(context.Context) (coreptrsync.Status, error) {
+	return s.status, s.err
 }
 
 type fakeMetadataStore struct {

@@ -78,7 +78,7 @@ Last updated: 2026-04-19
 
 - iterating on the Fyne prototype's preview, reconnect, and metadata UX after landing the first connect/browse/import/trash/original-preview loop
 - preparing real Windows-over-LAN smoke testing against a live `hydrusd` instance, now without requiring a pre-existing Hydrus bundle for first-start setup
-- preparing thin-client-driven performance validation for SQLite and managed `client_files` behavior before PTR work begins
+- preparing thin-client-driven performance validation for SQLite and managed `client_files` behavior alongside the first PTR daemon work
 
 ### Active reconnaissance notes
 
@@ -128,13 +128,14 @@ Last updated: 2026-04-19
 
 - [ ] validate import/browse/trash latency against real libraries through the thin client
 - [ ] measure SQLite read/write behavior under realistic daemon workflows
-- [ ] validate managed `client_files` correctness and throughput before PTR work begins
+- [ ] validate managed `client_files` correctness and throughput as PTR work expands
 - [ ] address bottlenecks discovered during end-to-end client/daemon testing
 
 ### Phase 7: PTR Integration
 
-- [ ] implement PTR repository sync foundations for imported files
-- [ ] define PTR service configuration, auth, and local daemon state requirements
+- [x] define PTR service configuration defaults, shared read-only anonymous auth, and local daemon status/state requirements
+- [x] add daemon-side PTR service/mapping-table/state foundations and a pollable status endpoint
+- [ ] implement actual PTR metadata/update download and local processing
 - [ ] make imported files eligible for PTR-driven tag/update retrieval
 - [ ] verify end-to-end value from local import through PTR sync and tag acquisition
 

@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
 )
 
 func TestLoadFromEnv_Defaults(t *testing.T) {
@@ -57,6 +59,26 @@ func TestLoadFromEnv_Defaults(t *testing.T) {
 	if cfg.EnableCORS {
 		t.Fatal("EnableCORS = true, want false")
 	}
+
+	if cfg.PTR.Enabled {
+		t.Fatal("PTR.Enabled = true, want false")
+	}
+
+	if cfg.PTR.Host != coreptrsync.DefaultHost {
+		t.Fatalf("PTR.Host = %q, want %q", cfg.PTR.Host, coreptrsync.DefaultHost)
+	}
+
+	if cfg.PTR.Port != coreptrsync.DefaultPort {
+		t.Fatalf("PTR.Port = %d, want %d", cfg.PTR.Port, coreptrsync.DefaultPort)
+	}
+
+	if cfg.PTR.AccessKey != coreptrsync.DefaultSharedAccessKey {
+		t.Fatalf("PTR.AccessKey = %q, want %q", cfg.PTR.AccessKey, coreptrsync.DefaultSharedAccessKey)
+	}
+
+	if cfg.PTR.ServiceName != coreptrsync.DefaultServiceName {
+		t.Fatalf("PTR.ServiceName = %q, want %q", cfg.PTR.ServiceName, coreptrsync.DefaultServiceName)
+	}
 }
 
 func TestLoadFromEnv_RejectsNonLocalListenAddressByDefault(t *testing.T) {
@@ -84,6 +106,11 @@ func TestLoadFromEnv_AllowsConfiguredOverrides(t *testing.T) {
 	t.Setenv("HYDRUS_GO_SHUTDOWN_TIMEOUT", "30s")
 	t.Setenv("HYDRUS_GO_ALLOW_NON_LOCAL_CONNECTIONS", "true")
 	t.Setenv("HYDRUS_GO_ENABLE_CORS", "true")
+	t.Setenv("HYDRUS_GO_ENABLE_PTR_SYNC", "true")
+	t.Setenv("HYDRUS_GO_PTR_HOST", "example.ptr")
+	t.Setenv("HYDRUS_GO_PTR_PORT", "60000")
+	t.Setenv("HYDRUS_GO_PTR_ACCESS_KEY", strings.Repeat("d", 64))
+	t.Setenv("HYDRUS_GO_PTR_SERVICE_NAME", "my public tag repository")
 
 	cfg, err := LoadFromEnv()
 	if err != nil {
@@ -136,6 +163,26 @@ func TestLoadFromEnv_AllowsConfiguredOverrides(t *testing.T) {
 
 	if !cfg.EnableCORS {
 		t.Fatal("EnableCORS = false, want true")
+	}
+
+	if !cfg.PTR.Enabled {
+		t.Fatal("PTR.Enabled = false, want true")
+	}
+
+	if cfg.PTR.Host != "example.ptr" {
+		t.Fatalf("PTR.Host = %q, want %q", cfg.PTR.Host, "example.ptr")
+	}
+
+	if cfg.PTR.Port != 60000 {
+		t.Fatalf("PTR.Port = %d, want %d", cfg.PTR.Port, 60000)
+	}
+
+	if cfg.PTR.AccessKey != strings.Repeat("d", 64) {
+		t.Fatalf("PTR.AccessKey = %q, want %q", cfg.PTR.AccessKey, strings.Repeat("d", 64))
+	}
+
+	if cfg.PTR.ServiceName != "my public tag repository" {
+		t.Fatalf("PTR.ServiceName = %q, want %q", cfg.PTR.ServiceName, "my public tag repository")
 	}
 }
 
@@ -218,6 +265,84 @@ func TestLoadFromEnv_RejectsBootstrapWithoutDBDir(t *testing.T) {
 	}
 }
 
+func TestLoadFromEnv_RejectsPTRSyncWithoutDBDir(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("HYDRUS_GO_ENABLE_PTR_SYNC", "true")
+
+	_, err := LoadFromEnv()
+	if err == nil {
+		t.Fatal("LoadFromEnv() error = nil, want error")
+	}
+
+	if !strings.Contains(err.Error(), "HYDRUS_GO_DB_DIR is required when PTR sync is enabled") {
+		t.Fatalf("LoadFromEnv() error = %v, want PTR DB dir error", err)
+	}
+}
+
+func TestLoadFromEnv_RejectsInvalidPTRAccessKey(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("HYDRUS_GO_PTR_ACCESS_KEY", "abcdef")
+
+	_, err := LoadFromEnv()
+	if err == nil {
+		t.Fatal("LoadFromEnv() error = nil, want error")
+	}
+}
+
+func TestConfigValidate_RejectsInvalidPTRFields(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(cfg *Config)
+		wantErr string
+	}{
+		{
+			name: "empty ptr host",
+			mutate: func(cfg *Config) {
+				cfg.PTR.Host = "   "
+			},
+			wantErr: "HYDRUS_GO_PTR_HOST must not be empty",
+		},
+		{
+			name: "ptr port out of range",
+			mutate: func(cfg *Config) {
+				cfg.PTR.Port = 70000
+			},
+			wantErr: "HYDRUS_GO_PTR_PORT must be between 1 and 65535",
+		},
+		{
+			name: "empty ptr service name",
+			mutate: func(cfg *Config) {
+				cfg.PTR.ServiceName = "\t"
+			},
+			wantErr: "HYDRUS_GO_PTR_SERVICE_NAME must not be empty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{
+				ListenAddr:               defaultListenAddr,
+				PTR:                      coreptrsync.DefaultConfig(),
+				AccessName:               defaultAccessName,
+				ShutdownTimeout:          time.Second,
+				AllowNonLocalConnections: false,
+				EnableCORS:               false,
+			}
+
+			tt.mutate(&cfg)
+
+			err := cfg.Validate()
+			if err == nil {
+				t.Fatal("Validate() error = nil, want error")
+			}
+
+			if !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate() error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
+	}
+}
+
 func clearConfigEnv(t *testing.T) {
 	t.Helper()
 
@@ -234,4 +359,9 @@ func clearConfigEnv(t *testing.T) {
 	t.Setenv("HYDRUS_GO_SHUTDOWN_TIMEOUT", "")
 	t.Setenv("HYDRUS_GO_ALLOW_NON_LOCAL_CONNECTIONS", "")
 	t.Setenv("HYDRUS_GO_ENABLE_CORS", "")
+	t.Setenv("HYDRUS_GO_ENABLE_PTR_SYNC", "")
+	t.Setenv("HYDRUS_GO_PTR_HOST", "")
+	t.Setenv("HYDRUS_GO_PTR_PORT", "")
+	t.Setenv("HYDRUS_GO_PTR_ACCESS_KEY", "")
+	t.Setenv("HYDRUS_GO_PTR_SERVICE_NAME", "")
 }

@@ -24,6 +24,8 @@ import (
 
 	"github.com/official-elinas/hydrus-go/internal/bootstrap"
 	"github.com/official-elinas/hydrus-go/internal/config"
+	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
+	"github.com/official-elinas/hydrus-go/internal/core/services"
 	"github.com/official-elinas/hydrus-go/internal/db/hydrusdb"
 	"github.com/official-elinas/hydrus-go/internal/storage/clientfiles"
 )
@@ -97,6 +99,254 @@ func TestNew_OpensConfiguredDBBundle(t *testing.T) {
 
 	if application.writeBundle == nil {
 		t.Fatal("application.writeBundle = nil, want opened write bundle")
+	}
+}
+
+func TestNew_EnablesAnonymousPTRFoundation(t *testing.T) {
+	dbDir := createThinClientBundle(t)
+	ptrConfig := coreptrsync.DefaultConfig()
+	ptrConfig.Enabled = true
+
+	cfg := config.Config{
+		ListenAddr:               "127.0.0.1:0",
+		DBDir:                    dbDir,
+		PTR:                      ptrConfig,
+		AccessKey:                strings.Repeat("a", 64),
+		AccessName:               "test-client",
+		LogLevel:                 "error",
+		ShutdownTimeout:          time.Second,
+		AllowNonLocalConnections: false,
+		EnableCORS:               false,
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	application, err := New(context.Background(), cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer application.closeResources()
+
+	serviceReq := httptest.NewRequest(
+		http.MethodGet,
+		"/get_service?service_name="+url.QueryEscape(coreptrsync.DefaultServiceName),
+		nil,
+	)
+	serviceReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	serviceRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(serviceRR, serviceReq)
+
+	if serviceRR.Code != http.StatusOK {
+		t.Fatalf("get_service status = %d, want %d", serviceRR.Code, http.StatusOK)
+	}
+
+	var servicePayload map[string]any
+	decodeAppJSON(t, serviceRR.Body.Bytes(), &servicePayload)
+	service := servicePayload["service"].(map[string]any)
+	if service["name"] != coreptrsync.DefaultServiceName {
+		t.Fatalf("service.name = %v, want %q", service["name"], coreptrsync.DefaultServiceName)
+	}
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/service/ptr/status", nil)
+	statusReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	statusRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(statusRR, statusReq)
+
+	if statusRR.Code != http.StatusOK {
+		t.Fatalf("ptr status = %d, want %d", statusRR.Code, http.StatusOK)
+	}
+
+	var statusPayload map[string]any
+	decodeAppJSON(t, statusRR.Body.Bytes(), &statusPayload)
+	ptr := statusPayload["ptr"].(map[string]any)
+	if ptr["enabled"] != true {
+		t.Fatalf("ptr.enabled = %v, want true", ptr["enabled"])
+	}
+
+	if ptr["configured"] != true {
+		t.Fatalf("ptr.configured = %v, want true", ptr["configured"])
+	}
+
+	if ptr["phase"] != coreptrsync.PhaseIdle {
+		t.Fatalf("ptr.phase = %v, want %q", ptr["phase"], coreptrsync.PhaseIdle)
+	}
+
+	if ptr["account_mode"] != coreptrsync.AccountModeSharedReadOnly {
+		t.Fatalf("ptr.account_mode = %v, want %q", ptr["account_mode"], coreptrsync.AccountModeSharedReadOnly)
+	}
+}
+
+func TestNew_PTRStatusIsDisabledWithoutDBWhenSyncDisabled(t *testing.T) {
+	cfg := config.Config{
+		ListenAddr:               "127.0.0.1:0",
+		AccessKey:                strings.Repeat("a", 64),
+		AccessName:               "test-client",
+		LogLevel:                 "error",
+		ShutdownTimeout:          time.Second,
+		AllowNonLocalConnections: false,
+		EnableCORS:               false,
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	application, err := New(context.Background(), cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer application.closeResources()
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/service/ptr/status", nil)
+	statusReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	statusRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(statusRR, statusReq)
+
+	if statusRR.Code != http.StatusOK {
+		t.Fatalf("ptr status = %d, want %d", statusRR.Code, http.StatusOK)
+	}
+
+	var statusPayload map[string]any
+	decodeAppJSON(t, statusRR.Body.Bytes(), &statusPayload)
+	ptr := statusPayload["ptr"].(map[string]any)
+
+	if ptr["enabled"] != false {
+		t.Fatalf("ptr.enabled = %v, want false", ptr["enabled"])
+	}
+
+	if ptr["configured"] != false {
+		t.Fatalf("ptr.configured = %v, want false", ptr["configured"])
+	}
+
+	if ptr["phase"] != coreptrsync.PhaseDisabled {
+		t.Fatalf("ptr.phase = %v, want %q", ptr["phase"], coreptrsync.PhaseDisabled)
+	}
+}
+
+func TestNew_PTRStatusIgnoresPersistedFoundationWhenSyncDisabled(t *testing.T) {
+	dbDir := createThinClientBundle(t)
+	enabledPTR := coreptrsync.DefaultConfig()
+	enabledPTR.Enabled = true
+
+	enabledCfg := config.Config{
+		ListenAddr:               "127.0.0.1:0",
+		DBDir:                    dbDir,
+		PTR:                      enabledPTR,
+		AccessKey:                strings.Repeat("a", 64),
+		AccessName:               "test-client",
+		LogLevel:                 "error",
+		ShutdownTimeout:          time.Second,
+		AllowNonLocalConnections: false,
+		EnableCORS:               false,
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	enabledApp, err := New(context.Background(), enabledCfg, logger)
+	if err != nil {
+		t.Fatalf("New(enabled) error = %v", err)
+	}
+	enabledApp.closeResources()
+
+	disabledCfg := enabledCfg
+	disabledCfg.PTR = coreptrsync.DefaultConfig()
+
+	disabledApp, err := New(context.Background(), disabledCfg, logger)
+	if err != nil {
+		t.Fatalf("New(disabled) error = %v", err)
+	}
+	defer disabledApp.closeResources()
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/service/ptr/status", nil)
+	statusReq.Header.Set("Hydrus-Client-API-Access-Key", disabledCfg.AccessKey)
+	statusRR := httptest.NewRecorder()
+
+	disabledApp.server.Handler.ServeHTTP(statusRR, statusReq)
+
+	if statusRR.Code != http.StatusOK {
+		t.Fatalf("ptr status = %d, want %d", statusRR.Code, http.StatusOK)
+	}
+
+	var statusPayload map[string]any
+	decodeAppJSON(t, statusRR.Body.Bytes(), &statusPayload)
+	ptr := statusPayload["ptr"].(map[string]any)
+
+	if ptr["enabled"] != false {
+		t.Fatalf("ptr.enabled = %v, want false", ptr["enabled"])
+	}
+
+	if ptr["configured"] != false {
+		t.Fatalf("ptr.configured = %v, want false", ptr["configured"])
+	}
+
+	if ptr["phase"] != coreptrsync.PhaseDisabled {
+		t.Fatalf("ptr.phase = %v, want %q", ptr["phase"], coreptrsync.PhaseDisabled)
+	}
+}
+
+func TestNew_PTRNameCollisionDoesNotAbortStartup(t *testing.T) {
+	dbDir := createThinClientBundle(t)
+	mainDB, err := sql.Open("sqlite", filepath.Join(dbDir, "client.db"))
+	if err != nil {
+		t.Fatalf("sql.Open(main) error = %v", err)
+	}
+	defer mainDB.Close()
+
+	mustExecApp(
+		t,
+		mainDB,
+		`INSERT INTO services (service_key, service_type, name, dictionary_string) VALUES (?, ?, ?, ?)`,
+		[]byte("existing-public-ptr"),
+		int(services.TypeTagRepository),
+		coreptrsync.DefaultServiceName,
+		"{}",
+	)
+
+	ptrConfig := coreptrsync.DefaultConfig()
+	ptrConfig.Enabled = true
+
+	cfg := config.Config{
+		ListenAddr:               "127.0.0.1:0",
+		DBDir:                    dbDir,
+		PTR:                      ptrConfig,
+		AccessKey:                strings.Repeat("a", 64),
+		AccessName:               "test-client",
+		LogLevel:                 "error",
+		ShutdownTimeout:          time.Second,
+		AllowNonLocalConnections: false,
+		EnableCORS:               false,
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	application, err := New(context.Background(), cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v, want degraded PTR availability instead", err)
+	}
+	defer application.closeResources()
+
+	statusReq := httptest.NewRequest(http.MethodGet, "/service/ptr/status", nil)
+	statusReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	statusRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(statusRR, statusReq)
+
+	if statusRR.Code != http.StatusOK {
+		t.Fatalf("ptr status = %d, want %d", statusRR.Code, http.StatusOK)
+	}
+
+	var statusPayload map[string]any
+	decodeAppJSON(t, statusRR.Body.Bytes(), &statusPayload)
+	ptr := statusPayload["ptr"].(map[string]any)
+
+	if ptr["phase"] != coreptrsync.PhaseUnavailable {
+		t.Fatalf("ptr.phase = %v, want %q", ptr["phase"], coreptrsync.PhaseUnavailable)
+	}
+
+	reason, ok := ptr["unavailable_reason"].(string)
+	if !ok || !strings.Contains(reason, "already in use") {
+		t.Fatalf("ptr.unavailable_reason = %v, want collision guidance", ptr["unavailable_reason"])
 	}
 }
 

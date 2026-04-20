@@ -4,7 +4,7 @@
 
 Build a simple multi-platform desktop prototype that validates `hydrusd`
 recent-browse, selected-file preview, queued remote-safe import, and trash
-workflows against a real Hydrus library before PTR work begins.
+workflows against a real Hydrus library alongside ongoing PTR backend work.
 
 This is **not** a full Hydrus desktop parity effort yet.
 

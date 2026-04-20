@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/official-elinas/hydrus-go/internal/api/httpapi"
@@ -18,9 +19,11 @@ import (
 	"github.com/official-elinas/hydrus-go/internal/core/filemetadata"
 	"github.com/official-elinas/hydrus-go/internal/core/filetrash"
 	"github.com/official-elinas/hydrus-go/internal/core/librarybrowse"
+	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
 	"github.com/official-elinas/hydrus-go/internal/core/services"
 	"github.com/official-elinas/hydrus-go/internal/db/hydrusdb"
 	"github.com/official-elinas/hydrus-go/internal/importing"
+	ptrsyncmanager "github.com/official-elinas/hydrus-go/internal/ptrsync"
 )
 
 var (
@@ -38,6 +41,7 @@ type App struct {
 	server      *http.Server
 	readBundle  *hydrusdb.Bundle
 	writeBundle *hydrusdb.Bundle
+	ptrManager  coreptrsync.Store
 }
 
 // New constructs the bootstrap daemon application.
@@ -46,12 +50,15 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 		startupCtx = context.Background()
 	}
 
+	cfg.PTR = normalizedPTRConfig(cfg.PTR)
+
 	serviceProvider := services.Provider(services.DefaultProvider())
 	var metadataStore filemetadata.Store
 	var browseStore librarybrowse.Store
 	var assetStore fileassets.Store
 	var importStore fileimport.Store
 	var trashStore filetrash.Store
+	var ptrStore coreptrsync.Store
 	var readBundle *hydrusdb.Bundle
 	var writeBundle *hydrusdb.Bundle
 	var err error
@@ -114,6 +121,26 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 		assetStore = readBundle
 	}
 
+	ptrManager, err := ptrsyncmanager.NewManager(
+		startupCtx,
+		logger,
+		cfg.PTR,
+		readBundle,
+		writeBundle,
+	)
+	if err != nil {
+		if readBundle != nil {
+			_ = readBundle.Close()
+		}
+
+		if writeBundle != nil {
+			_ = writeBundle.Close()
+		}
+
+		return nil, fmt.Errorf("prepare PTR sync manager: %w", err)
+	}
+	ptrStore = ptrManager
+
 	permissions := []httpapi.Permission{httpapi.PermissionSearchAndFetchFiles}
 	if importStore != nil || trashStore != nil {
 		permissions = append(permissions, httpapi.PermissionImportAndDeleteFiles)
@@ -145,6 +172,7 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 		assetStore,
 		importStore,
 		trashStore,
+		ptrStore,
 		cfg.EnableCORS,
 	)
 
@@ -164,7 +192,29 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 		server:      server,
 		readBundle:  readBundle,
 		writeBundle: writeBundle,
+		ptrManager:  ptrStore,
 	}, nil
+}
+
+func normalizedPTRConfig(cfg coreptrsync.Config) coreptrsync.Config {
+	defaults := coreptrsync.DefaultConfig()
+	if strings.TrimSpace(cfg.Host) == "" {
+		cfg.Host = defaults.Host
+	}
+
+	if cfg.Port == 0 {
+		cfg.Port = defaults.Port
+	}
+
+	if strings.TrimSpace(cfg.AccessKey) == "" {
+		cfg.AccessKey = defaults.AccessKey
+	}
+
+	if strings.TrimSpace(cfg.ServiceName) == "" {
+		cfg.ServiceName = defaults.ServiceName
+	}
+
+	return cfg
 }
 
 // Run starts the daemon and blocks until the context is canceled or the server

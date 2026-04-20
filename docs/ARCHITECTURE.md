@@ -180,6 +180,7 @@ The planned desktop direction is now:
 
 - a thin Fyne prototype surfaced through `cmd/hydrus-desktop` and documented in `desktop/fyne/`
 - daemon remains the owner of SQLite, `client_files`, imports, and later PTR sync
+- daemon also owns PTR service configuration and sync status reporting; the thin client should poll `hydrusd` rather than touching repository network or SQLite state directly
 - the first client milestone stays closer to a simple image-browser shell than to full Hydrus workstation parity
 - the prototype is specifically meant to exercise `hydrusd` browse/add/trash behavior, selected-file metadata, and original-file serving, not to be a general-purpose Hydrus replacement yet
 

@@ -292,7 +292,7 @@ read-only Hydrus bundle and route mutations through a separate writable bundle.
 The daemon now opens two bundle connections when `HYDRUS_GO_DB_DIR` is set:
 one query-only read bundle for service discovery, metadata, browse, and asset
 streaming; and one writable bundle for public import and trash mutations. This
-becomes the basis for thin-client workflow testing before PTR work begins.
+becomes the basis for thin-client workflow testing alongside ongoing PTR work.
 
 ---
 

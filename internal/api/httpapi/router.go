@@ -17,6 +17,7 @@ import (
 	"github.com/official-elinas/hydrus-go/internal/core/filemetadata"
 	"github.com/official-elinas/hydrus-go/internal/core/filetrash"
 	"github.com/official-elinas/hydrus-go/internal/core/librarybrowse"
+	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
 	"github.com/official-elinas/hydrus-go/internal/core/services"
 )
 
@@ -29,6 +30,7 @@ type Server struct {
 	assetStore    fileassets.Store
 	importStore   fileimport.Store
 	trashStore    filetrash.Store
+	ptrStore      coreptrsync.Store
 	enableCORS    bool
 }
 
@@ -42,6 +44,7 @@ func NewHandler(
 	assetStore fileassets.Store,
 	importStore fileimport.Store,
 	trashStore filetrash.Store,
+	ptrStore coreptrsync.Store,
 	enableCORS bool,
 ) http.Handler {
 	server := &Server{
@@ -53,6 +56,7 @@ func NewHandler(
 		assetStore:    assetStore,
 		importStore:   importStore,
 		trashStore:    trashStore,
+		ptrStore:      ptrStore,
 		enableCORS:    enableCORS,
 	}
 
@@ -74,6 +78,7 @@ func NewHandler(
 	mux.Handle("/v1/files/trash", server.post("/v1/files/trash", server.handleTrashFile))
 	mux.Handle("/v1/import/local_file", server.post("/v1/import/local_file", server.handleImportLocalFile))
 	mux.Handle("/v1/import/upload", server.post("/v1/import/upload", server.handleImportUpload))
+	mux.Handle("/service/ptr/status", server.get("/service/ptr/status", server.handleGetPTRStatus))
 
 	return server.withGlobalMiddleware(mux)
 }

@@ -241,6 +241,12 @@ Important current limitations:
 - no public batch import flow yet
 - no public permanent delete flow yet
 - staged upload is still a narrow single-file flow rather than a broader Hydrus-style import pipeline
+- PTR work has now started in the daemon, but the current slice only provides:
+  - opt-in public PTR defaults (shared read-only anonymous key, host, port)
+  - local PTR service/mapping-table provisioning
+  - persisted daemon-side PTR status/state foundation
+  - `GET /service/ptr/status` for thin-client polling
+- actual PTR update download/processing is not implemented yet, so the daemon still does not sync definitions/content from the live repository
 - no search/tagging engine yet
 - no downloader/subscription/parsing system yet
 
@@ -407,6 +413,11 @@ This bootstrap currently targets the Go toolchain declared in `go.mod`
 - `HYDRUS_GO_DB_DIR` (optional path to a Hydrus client DB directory; required when fresh bootstrap is enabled)
 - `HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP` (default: `false`)
 - `HYDRUS_GO_BOOTSTRAP_TIMEOUT` (default: `2m`)
+- `HYDRUS_GO_ENABLE_PTR_SYNC` (default: `false`; opt-in only, matching Hydrus' “never connect until you tell it to” stance)
+- `HYDRUS_GO_PTR_HOST` (default: `ptr.hydrus.network`)
+- `HYDRUS_GO_PTR_PORT` (default: `45871`)
+- `HYDRUS_GO_PTR_ACCESS_KEY` (default: documented shared public read-only PTR key)
+- `HYDRUS_GO_PTR_SERVICE_NAME` (default: `public tag repository`)
 - `HYDRUS_GO_ACCESS_KEY` (optional 64-char hex access key)
 - `HYDRUS_GO_ACCESS_NAME` (default: `hydrus-go`)
 - `HYDRUS_GO_LOG_LEVEL` (default: `info`)
@@ -428,7 +439,7 @@ This bootstrap currently targets the Go toolchain declared in `go.mod`
 - iterate on the Fyne prototype's preview caching, paging, reconnect behavior, and metadata ergonomics now that the first connect/browse/add/trash/original-preview loop is wired
 - run real Windows-over-LAN smoke tests against a live `hydrusd` + Hydrus library and tighten any failures quickly
 - validate add/trash latency and recent-grid refresh behavior on a real Hydrus library through the prototype
-- validate SQLite and managed `client_files` performance through the thin client before PTR work begins
-- implement PTR in the backend daemon after the local workflow contract is proven
+- implement live anonymous PTR metadata/update download and processing in the backend daemon
+- expose daemon-owned PTR sync progress and job control for the thin client
 - broaden default/full metadata parity for `GET /get_files/file_metadata`
 - search/tagging model on top of imported and PTR-synced data

@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
 )
 
 const (
@@ -26,6 +28,7 @@ type Config struct {
 	DBDir                      string
 	EnableFreshClientBootstrap bool
 	BootstrapTimeout           time.Duration
+	PTR                        coreptrsync.Config
 	AccessKey                  string
 	AccessName                 string
 	LogLevel                   string
@@ -57,6 +60,7 @@ func LoadFromEnvUnvalidated() (Config, error) {
 		DBDir:                      strings.TrimSpace(os.Getenv("HYDRUS_GO_DB_DIR")),
 		EnableFreshClientBootstrap: false,
 		BootstrapTimeout:           defaultBootstrapTimeout,
+		PTR:                        coreptrsync.DefaultConfig(),
 		AccessKey:                  strings.TrimSpace(os.Getenv("HYDRUS_GO_ACCESS_KEY")),
 		AccessName:                 getEnv("HYDRUS_GO_ACCESS_NAME", defaultAccessName),
 		LogLevel:                   getEnv("HYDRUS_GO_LOG_LEVEL", defaultLogLevel),
@@ -89,6 +93,33 @@ func LoadFromEnvUnvalidated() (Config, error) {
 		return Config{}, err
 	}
 	cfg.EnableCORS = enableCORS
+
+	enablePTRSync, err := getEnvBool("HYDRUS_GO_ENABLE_PTR_SYNC", cfg.PTR.Enabled)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.PTR.Enabled = enablePTRSync
+
+	cfg.PTR.Host = getEnv("HYDRUS_GO_PTR_HOST", cfg.PTR.Host)
+
+	ptrPort, err := getEnvInt("HYDRUS_GO_PTR_PORT", cfg.PTR.Port)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.PTR.Port = ptrPort
+
+	ptrAccessKey := strings.TrimSpace(os.Getenv("HYDRUS_GO_PTR_ACCESS_KEY"))
+	if ptrAccessKey != "" {
+		cfg.PTR.AccessKey = ptrAccessKey
+	}
+
+	cfg.PTR.ServiceName = getEnv("HYDRUS_GO_PTR_SERVICE_NAME", cfg.PTR.ServiceName)
+
+	normalizedPTRAccessKey, err := normalizeOptionalPTRAccessKey(cfg.PTR.AccessKey)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.PTR.AccessKey = normalizedPTRAccessKey
 
 	shutdownTimeout, err := getEnvDuration(
 		"HYDRUS_GO_SHUTDOWN_TIMEOUT",
@@ -156,6 +187,26 @@ func (c Config) validate() error {
 		} else if !info.IsDir() {
 			return fmt.Errorf("HYDRUS_GO_DB_DIR must be a directory")
 		}
+	}
+
+	if strings.TrimSpace(c.PTR.Host) == "" {
+		return fmt.Errorf("HYDRUS_GO_PTR_HOST must not be empty")
+	}
+
+	if c.PTR.Port <= 0 || c.PTR.Port > 65535 {
+		return fmt.Errorf("HYDRUS_GO_PTR_PORT must be between 1 and 65535")
+	}
+
+	if strings.TrimSpace(c.PTR.ServiceName) == "" {
+		return fmt.Errorf("HYDRUS_GO_PTR_SERVICE_NAME must not be empty")
+	}
+
+	if _, err := normalizeOptionalPTRAccessKey(c.PTR.AccessKey); err != nil {
+		return err
+	}
+
+	if c.PTR.Enabled && strings.TrimSpace(c.DBDir) == "" {
+		return fmt.Errorf("HYDRUS_GO_DB_DIR is required when PTR sync is enabled")
 	}
 
 	host, _, err := net.SplitHostPort(c.ListenAddr)
@@ -230,6 +281,20 @@ func getEnvDuration(key string, fallback time.Duration) (time.Duration, error) {
 	return value, nil
 }
 
+func getEnvInt(key string, fallback int) (int, error) {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return fallback, nil
+	}
+
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("parse %s: %w", key, err)
+	}
+
+	return value, nil
+}
+
 func isLocalOnlyHost(host string) bool {
 	host = strings.TrimSpace(strings.ToLower(host))
 
@@ -255,6 +320,27 @@ func normalizeOptionalAccessKey(accessKey string) (string, error) {
 	if len(decoded) != 32 {
 		return "", fmt.Errorf(
 			"HYDRUS_GO_ACCESS_KEY must be 32 bytes (64 hex characters), got %d bytes",
+			len(decoded),
+		)
+	}
+
+	return normalized, nil
+}
+
+func normalizeOptionalPTRAccessKey(accessKey string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(accessKey))
+	if normalized == "" {
+		return "", fmt.Errorf("HYDRUS_GO_PTR_ACCESS_KEY must not be empty")
+	}
+
+	decoded, err := hex.DecodeString(normalized)
+	if err != nil {
+		return "", fmt.Errorf("decode HYDRUS_GO_PTR_ACCESS_KEY: %w", err)
+	}
+
+	if len(decoded) != 32 {
+		return "", fmt.Errorf(
+			"HYDRUS_GO_PTR_ACCESS_KEY must be 32 bytes (64 hex characters), got %d bytes",
 			len(decoded),
 		)
 	}
