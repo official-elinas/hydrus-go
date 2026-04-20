@@ -9,7 +9,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
+
+	"github.com/official-elinas/hydrus-go/internal/storage/clientfiles"
 )
 
 var requiredBundleFiles = []string{
@@ -18,6 +21,11 @@ var requiredBundleFiles = []string{
 	"client.caches.db",
 	"client.mappings.db",
 }
+
+const bootstrapLockFilename = ".hydrus-go-bootstrap.lock"
+const bootstrapLockStaleAfter = 15 * time.Minute
+const bootstrapLockHeartbeatInterval = time.Minute
+const bootstrapCreatedThumbnailMarker = ".hydrus-go-bootstrap-created-thumbnail-root"
 
 // BundleState describes the observed state of a configured Hydrus DB directory.
 type BundleState string
@@ -60,7 +68,12 @@ type inspection struct {
 // for hydrus-go, optionally bootstrapping a fresh canonical bundle when the
 // target directory is empty or missing.
 func EnsureFreshClientBundle(ctx context.Context, options Options) (Result, error) {
-	dbDir, err := filepath.Abs(filepath.Clean(strings.TrimSpace(options.DBDir)))
+	rawDBDir := strings.TrimSpace(options.DBDir)
+	if rawDBDir == "" {
+		return Result{}, fmt.Errorf("hydrus DB directory must not be empty")
+	}
+
+	dbDir, err := filepath.Abs(filepath.Clean(rawDBDir))
 	if err != nil {
 		return Result{}, fmt.Errorf("resolve hydrus DB directory: %w", err)
 	}
@@ -108,45 +121,147 @@ func EnsureFreshClientBundle(ctx context.Context, options Options) (Result, erro
 	bootstrapCtx, cancel := context.WithTimeout(ctx, options.Timeout)
 	defer cancel()
 
-	if err := createFreshClientBundle(bootstrapCtx, dbDir); err != nil {
-		return Result{}, fmt.Errorf("create fresh hydrus client bundle: %w", err)
-	}
+	return withBootstrapLock(bootstrapCtx, dbDir, func() (Result, error) {
+		lockedObserved, err := inspectBundleDir(dbDir)
+		if err != nil {
+			return Result{}, fmt.Errorf("inspect hydrus DB directory after lock: %w", err)
+		}
 
-	verified, err := inspectBundleDir(dbDir)
-	if err != nil {
-		return Result{}, fmt.Errorf("verify bootstrapped hydrus DB directory: %w", err)
-	}
+		switch lockedObserved.State {
+		case StateReady:
+			return Result{State: StateReady}, nil
+		case StatePartial:
+			return Result{}, fmt.Errorf(
+				"hydrus DB directory %q contains a partial client bundle (present: %s; missing: %s); delete the incomplete files or point hydrus-go at a valid bundle",
+				dbDir,
+				joinOrNone(lockedObserved.Present),
+				joinOrNone(lockedObserved.Missing),
+			)
+		case StateNonEmptyWithoutBundle:
+			return Result{}, fmt.Errorf(
+				"hydrus DB directory %q is not empty but does not contain a canonical client bundle (entries: %s); fresh bootstrap only runs against an empty directory",
+				dbDir,
+				joinOrNone(lockedObserved.ExtraEntries),
+			)
+		case StateEmpty:
+		default:
+			return Result{}, fmt.Errorf("hydrus DB directory %q is in an unknown state after lock", dbDir)
+		}
 
-	if verified.State != StateReady {
-		cleanupErr := cleanupFreshBundleArtifacts(dbDir)
-		return Result{}, fmt.Errorf(
-			"fresh bootstrap finished, but hydrus DB directory %q is not ready (state: %s; present: %s; missing: %s)%s",
-			dbDir,
-			verified.State,
-			joinOrNone(verified.Present),
-			joinOrNone(verified.Missing),
-			formatCleanupError(cleanupErr),
+		if err := createFreshClientBundle(bootstrapCtx, dbDir); err != nil {
+			cleanupErr := cleanupFreshBundleArtifacts(dbDir)
+			return Result{}, errors.Join(
+				fmt.Errorf("create fresh hydrus client bundle: %w", err),
+				cleanupErr,
+			)
+		}
+
+		verified, err := inspectBundleDir(dbDir)
+		if err != nil {
+			return Result{}, fmt.Errorf("verify bootstrapped hydrus DB directory: %w", err)
+		}
+
+		if verified.State != StateReady {
+			cleanupErr := cleanupFreshBundleArtifacts(dbDir)
+			return Result{}, fmt.Errorf(
+				"fresh bootstrap finished, but hydrus DB directory %q is not ready (state: %s; present: %s; missing: %s)%s",
+				dbDir,
+				verified.State,
+				joinOrNone(verified.Present),
+				joinOrNone(verified.Missing),
+				formatCleanupError(cleanupErr),
+			)
+		}
+
+		if err := verifyFreshClientBundle(bootstrapCtx, dbDir); err != nil {
+			cleanupErr := cleanupFreshBundleArtifacts(dbDir)
+			return Result{}, errors.Join(
+				fmt.Errorf("verify fresh hydrus client bundle: %w", err),
+				cleanupErr,
+			)
+		}
+
+		return Result{
+			State:        StateReady,
+			Bootstrapped: true,
+		}, clearBootstrapThumbnailMarker(dbDir)
+	})
+}
+
+func withBootstrapLock(
+	ctx context.Context,
+	dbDir string,
+	fn func() (Result, error),
+) (Result, error) {
+	lockPath := filepath.Join(dbDir, bootstrapLockFilename)
+
+	for {
+		lockFile, err := os.OpenFile(
+			lockPath,
+			os.O_CREATE|os.O_EXCL|os.O_WRONLY,
+			0o600,
 		)
-	}
+		if err == nil {
+			if closeErr := lockFile.Close(); closeErr != nil {
+				_ = os.Remove(lockPath)
+				return Result{}, fmt.Errorf("close bootstrap lock file: %w", closeErr)
+			}
 
-	if err := verifyFreshClientBundle(bootstrapCtx, dbDir); err != nil {
-		cleanupErr := cleanupFreshBundleArtifacts(dbDir)
-		return Result{}, errors.Join(
-			fmt.Errorf("verify fresh hydrus client bundle: %w", err),
-			cleanupErr,
-		)
-	}
+			stopHeartbeat := startBootstrapLockHeartbeat(lockPath)
+			defer stopHeartbeat()
 
-	return Result{
-		State:        StateReady,
-		Bootstrapped: true,
-	}, nil
+			result, fnErr := fn()
+			if removeErr := os.Remove(lockPath); removeErr != nil && !os.IsNotExist(removeErr) {
+				if fnErr == nil {
+					return Result{}, fmt.Errorf("remove bootstrap lock file %q: %w", lockPath, removeErr)
+				}
+
+				return Result{}, errors.Join(
+					fnErr,
+					fmt.Errorf("remove bootstrap lock file %q: %w", lockPath, removeErr),
+				)
+			}
+
+			return result, fnErr
+		}
+
+		if !os.IsExist(err) {
+			return Result{}, fmt.Errorf("create bootstrap lock file %q: %w", lockPath, err)
+		}
+
+		info, statErr := os.Stat(lockPath)
+		switch {
+		case statErr == nil && time.Since(info.ModTime()) > bootstrapLockStaleAfter:
+			if removeErr := os.Remove(lockPath); removeErr != nil && !os.IsNotExist(removeErr) {
+				return Result{}, fmt.Errorf("remove stale bootstrap lock file %q: %w", lockPath, removeErr)
+			}
+			continue
+		case statErr == nil || os.IsNotExist(statErr):
+		case statErr != nil:
+			return Result{}, fmt.Errorf("stat bootstrap lock file %q: %w", lockPath, statErr)
+		}
+
+		select {
+		case <-ctx.Done():
+			return Result{}, fmt.Errorf("wait for bootstrap lock: %w", ctx.Err())
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
 }
 
 func inspectBundleDir(dbDir string) (inspection, error) {
 	entries, err := os.ReadDir(dbDir)
 	if err != nil {
 		return inspection{}, fmt.Errorf("read directory %q: %w", dbDir, err)
+	}
+
+	visibleEntries := make([]os.DirEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.Name() == bootstrapLockFilename {
+			continue
+		}
+
+		visibleEntries = append(visibleEntries, entry)
 	}
 
 	present := []string{}
@@ -175,11 +290,11 @@ func inspectBundleDir(dbDir string) (inspection, error) {
 		return inspection{State: StateReady, Present: present}, nil
 	case len(present) > 0:
 		return inspection{State: StatePartial, Present: present, Missing: missing}, nil
-	case len(entries) == 0:
+	case len(visibleEntries) == 0:
 		return inspection{State: StateEmpty, Missing: missing}, nil
 	default:
-		extraEntries := make([]string, 0, len(entries))
-		for _, entry := range entries {
+		extraEntries := make([]string, 0, len(visibleEntries))
+		for _, entry := range visibleEntries {
 			extraEntries = append(extraEntries, entry.Name())
 		}
 		sort.Strings(extraEntries)
@@ -203,7 +318,10 @@ func ensureBootstrapDBDir(dbDir string, enabled bool) error {
 		return nil
 	case os.IsNotExist(err):
 		if !enabled {
-			return nil
+			return fmt.Errorf(
+				"hydrus DB directory %q does not exist and fresh-client bootstrap is disabled; enable it with HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP=true or --bootstrap-fresh-client",
+				dbDir,
+			)
 		}
 
 		if mkdirErr := os.MkdirAll(dbDir, 0o755); mkdirErr != nil {
@@ -218,6 +336,11 @@ func ensureBootstrapDBDir(dbDir string, enabled bool) error {
 
 func cleanupFreshBundleArtifacts(dbDir string) error {
 	paths := bundleFilePaths(dbDir)
+	removeThumbnailRoot, err := shouldRemoveBootstrapThumbnailRoot(dbDir)
+	if err != nil {
+		return err
+	}
+
 	cleanupErrors := []error{}
 	for _, path := range []string{
 		paths.main,
@@ -226,13 +349,70 @@ func cleanupFreshBundleArtifacts(dbDir string) error {
 		paths.mappings,
 		paths.temp,
 		paths.files,
+		filepath.Join(dbDir, bootstrapCreatedThumbnailMarker),
 	} {
 		if err := os.RemoveAll(path); err != nil && !os.IsNotExist(err) {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf("remove %q: %w", path, err))
 		}
 	}
 
+	if removeThumbnailRoot {
+		thumbnailRoot := clientfiles.DefaultThumbnailRoot(dbDir)
+		if err := os.Remove(thumbnailRoot); err != nil && !os.IsNotExist(err) && !errors.Is(err, syscall.ENOTEMPTY) {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf("remove empty thumbnail root %q: %w", thumbnailRoot, err))
+		}
+	}
+
 	return errors.Join(cleanupErrors...)
+}
+
+func startBootstrapLockHeartbeat(lockPath string) func() {
+	stop := make(chan struct{})
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		ticker := time.NewTicker(bootstrapLockHeartbeatInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-stop:
+				return
+			case <-ticker.C:
+				now := time.Now()
+				_ = os.Chtimes(lockPath, now, now)
+			}
+		}
+	}()
+
+	return func() {
+		close(stop)
+		<-done
+	}
+}
+
+func shouldRemoveBootstrapThumbnailRoot(dbDir string) (bool, error) {
+	markerPath := filepath.Join(dbDir, bootstrapCreatedThumbnailMarker)
+	_, err := os.Stat(markerPath)
+	switch {
+	case err == nil:
+		return true, nil
+	case os.IsNotExist(err):
+		return false, nil
+	default:
+		return false, fmt.Errorf("stat bootstrap thumbnail marker %q: %w", markerPath, err)
+	}
+}
+
+func clearBootstrapThumbnailMarker(dbDir string) error {
+	markerPath := filepath.Join(dbDir, bootstrapCreatedThumbnailMarker)
+	if err := os.Remove(markerPath); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove bootstrap thumbnail marker %q: %w", markerPath, err)
+	}
+
+	return nil
 }
 
 func formatCleanupError(err error) string {

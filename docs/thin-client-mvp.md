@@ -3,8 +3,8 @@
 ## Goal
 
 Build a simple multi-platform desktop prototype that validates `hydrusd`
-recent-browse, selected-file preview, add, and trash workflows against a real
-Hydrus library before PTR work begins.
+recent-browse, selected-file preview, queued remote-safe import, and trash
+workflows against a real Hydrus library before PTR work begins.
 
 This is **not** a full Hydrus desktop parity effort yet.
 
@@ -28,13 +28,22 @@ Why this stack:
 
 The first prototype iteration is intentionally narrow:
 
-- connect to the local daemon
+- connect to the local or remote daemon
 - browse recent local files in a dense thumbnail grid
+- queue imports from:
+  - a single-file picker
+  - a folder picker
+  - drag-and-drop of files or folders into the window
+- process queued imports sequentially through the daemon's remote-safe upload endpoint
+- review queue state in a dedicated list with retry/remove/prune controls
+- keep queue staging usable while disconnected and resume processing when a
+  usable daemon connection is restored
+- skip unsupported dropped items or unreadable paths with local feedback rather
+  than failing the entire queue
 - preview selected JPEG/PNG/GIF originals through the daemon's `/v1/files/content` endpoint
   - keep preview bounded for thin-client responsiveness (currently 16 MiB payload,
     8192px maximum dimension, 16,000,000 decoded pixels)
-- show selected-file metadata in a narrow sidebar
-- add one local file through the daemon's local-path import endpoint
+- show selected-file metadata in a left-side details pane, including daemon-served tag groups for the selected file
 - trash one selected file through the daemon's trash endpoint
 - refresh the grid and metadata state after each mutation
 
@@ -65,14 +74,18 @@ The thin-client-specific daemon endpoints for this prototype are:
 - `POST /v1/import/local_file`
   - imports one daemon-local file path through the public thin-client contract
   - supported JPEG/PNG/GIF still-image imports now attempt best-effort thumbnail generation after placement
+- `POST /v1/import/upload`
+  - imports one uploaded file through the public thin-client contract
+  - this is the preferred path for the desktop client because it remains safe when `hydrusd` runs on another host or over LAN
 - `POST /v1/files/trash`
   - moves one file into the local trash domain through the public thin-client contract
 
-Important note:
+Important notes:
 
-- the current import endpoint is **daemon-local path based**
-- the prototype therefore assumes the selected file path is meaningful from the
+- the desktop client now prefers the upload endpoint so local file selection and
+  drag-and-drop do **not** depend on the path being meaningful from the
   `hydrusd` host's point of view
+- the daemon-local path endpoint remains available for daemon-hosted workflows
 - the prototype can now be tested against either an existing Hydrus client
   bundle or an empty/missing `HYDRUS_GO_DB_DIR` that `hydrusd` bootstraps on
   first start
@@ -84,14 +97,18 @@ Important note:
 
 ## Prototype UI shape
 
-Minimum window structure:
+Current minimum window structure:
 
-- compact top action bar: connect, refresh, add file, trash selected
-- narrow left sidebar:
-  - daemon connection state
-  - selected-file preview for supported JPEG/PNG/GIF image types
-  - selected-file metadata
-  - last action/result text
+- compact top action bar: connect, refresh, add file, add folder, trash selected
+- left Fyne-managed split pane:
+  - upper controls/import pane:
+    - daemon connection state
+    - import queue summary and queue contents
+    - queue review controls: retry selected, remove selected, retry failed, clear finished, clear queue
+    - last action/result text
+  - lower details pane:
+    - selected-file preview for supported JPEG/PNG/GIF image types
+    - selected-file metadata
 - dominant center thumbnail grid
 - bottom status line
 

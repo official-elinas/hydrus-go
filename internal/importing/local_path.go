@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
-	"image"
 	"io"
 	"net/http"
 	"os"
@@ -14,10 +13,6 @@ import (
 
 	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
 	"github.com/official-elinas/hydrus-go/internal/core/mimes"
-
-	_ "image/gif"
-	_ "image/jpeg"
-	_ "image/png"
 )
 
 // ImportLocalPath imports one daemon-local file path through the existing
@@ -64,7 +59,7 @@ func (i *Importer) ImportLocalPath(
 		return fileimport.Result{}, err
 	}
 
-	width, height := detectImageDimensions(sourcePath, mimeEnum)
+	stillImageMetadata := detectStillImageImportMetadata(sourcePath, mimeEnum)
 
 	importedAtMS := time.Now().UTC().UnixMilli()
 	var fileModifiedAtMS *int64
@@ -77,8 +72,10 @@ func (i *Importer) ImportLocalPath(
 		HashHex:             hashHex,
 		Size:                info.Size(),
 		Mime:                mimeEnum,
-		Width:               width,
-		Height:              height,
+		Width:               stillImageMetadata.Width,
+		Height:              stillImageMetadata.Height,
+		PixelHashHex:        stillImageMetadata.PixelHashHex,
+		HasTransparency:     stillImageMetadata.HasTransparency,
 		ImportedAtMS:        importedAtMS,
 		FileModifiedAtMS:    fileModifiedAtMS,
 		LocalFileServiceKey: strings.TrimSpace(request.LocalFileServiceKey),
@@ -164,27 +161,6 @@ func detectLocalImportMIME(path string) (int, error) {
 	return 0, &fileimport.RequestError{
 		Message: fmt.Sprintf("local file path %q has an unsupported file type", path),
 	}
-}
-
-func detectImageDimensions(path string, mimeEnum int) (*int64, *int64) {
-	if !supportsDecodeConfigDimensions(mimeEnum) {
-		return nil, nil
-	}
-
-	file, err := os.Open(path)
-	if err != nil {
-		return nil, nil
-	}
-	defer file.Close()
-
-	config, _, err := image.DecodeConfig(file)
-	if err != nil {
-		return nil, nil
-	}
-
-	width := int64(config.Width)
-	height := int64(config.Height)
-	return &width, &height
 }
 
 func supportsDecodeConfigDimensions(mimeEnum int) bool {

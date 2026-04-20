@@ -1174,6 +1174,246 @@ func TestGetFileMetadata(t *testing.T) {
 		}
 	})
 
+	t.Run("services objects include hidden services referenced by metadata", func(t *testing.T) {
+		allowsZero := true
+		minStars := 0
+		maxStars := 7
+		hiddenRepoRating := services.Service{
+			Name:       "repo stars",
+			ServiceKey: "7265706f2d7374617273",
+			Type:       services.TypeRatingNumericalRepository,
+			TypePretty: services.TypePretty(services.TypeRatingNumericalRepository),
+			StarShape:  "circle",
+			AllowsZero: &allowsZero,
+			MinStars:   &minStars,
+			MaxStars:   &maxStars,
+		}
+
+		repoProvider := services.NewStaticProviderWithLookupCatalog(
+			services.DefaultCatalog(),
+			append(services.BootstrapCatalog(), hiddenRepoRating),
+		)
+		repoStore := &fakeMetadataStore{
+			handle: func(request filemetadata.Request) ([]filemetadata.Row, error) {
+				return []filemetadata.Row{{
+					"file_id": int64(1),
+					"hash":    strings.Repeat("a", 64),
+					"ratings": map[string]any{
+						hiddenRepoRating.ServiceKey: 6,
+					},
+				}}, nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, repoProvider, repoStore, false)
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/get_files/file_metadata?file_ids=%5B1%5D",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", accessKey)
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		servicesByKey, ok := payload["services"].(map[string]any)
+		if !ok {
+			t.Fatalf("services type = %T, want map[string]any", payload["services"])
+		}
+
+		if _, ok := servicesByKey[hiddenRepoRating.ServiceKey]; !ok {
+			t.Fatalf("services missing hidden repo rating %q", hiddenRepoRating.ServiceKey)
+		}
+
+		servicesValue, ok := payload["services_v2"].([]any)
+		if !ok {
+			t.Fatalf("services_v2 type = %T, want []any", payload["services_v2"])
+		}
+
+		var matched map[string]any
+		for _, item := range servicesValue {
+			service, ok := item.(map[string]any)
+			if !ok {
+				t.Fatalf("service item type = %T, want map[string]any", item)
+			}
+
+			if service["service_key"] == hiddenRepoRating.ServiceKey {
+				matched = service
+				break
+			}
+		}
+
+		if matched == nil {
+			t.Fatalf("services_v2 missing hidden repo rating %q", hiddenRepoRating.ServiceKey)
+		}
+
+		if got := matched["max_stars"]; got != float64(7) {
+			t.Fatalf("hidden repo rating max_stars = %v, want 7", got)
+		}
+
+		if got := matched["allows_zero"]; got != true {
+			t.Fatalf("hidden repo rating allows_zero = %v, want true", got)
+		}
+
+		if got := matched["star_shape"]; got != "circle" {
+			t.Fatalf("hidden repo rating star_shape = %v, want circle", got)
+		}
+	})
+
+	t.Run("passes through tags payload and hides legacy maps by default", func(t *testing.T) {
+		tagStore := &fakeMetadataStore{
+			handle: func(request filemetadata.Request) ([]filemetadata.Row, error) {
+				if request.IncludeLegacyServiceKeysTags {
+					t.Fatal("IncludeLegacyServiceKeysTags = true, want false by default")
+				}
+
+				return []filemetadata.Row{{
+					"file_id": int64(1),
+					"hash":    strings.Repeat("a", 64),
+					"tags": map[string]map[string]any{
+						"74616773": {
+							"name":        "my tags",
+							"type":        services.TypeLocalTag,
+							"type_pretty": services.TypePretty(services.TypeLocalTag),
+							"storage_tags": map[string][]string{
+								"0": {"creator:alice"},
+							},
+							"display_tags": map[string][]string{
+								"0": {"creator:alice"},
+							},
+						},
+					},
+				}}, nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, provider, tagStore, false)
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/get_files/file_metadata?file_ids=%5B1%5D&include_services_object=false",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", accessKey)
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		metadata, ok := payload["metadata"].([]any)
+		if !ok || len(metadata) != 1 {
+			t.Fatalf("metadata = %v, want one row", payload["metadata"])
+		}
+
+		row, ok := metadata[0].(map[string]any)
+		if !ok {
+			t.Fatalf("metadata[0] type = %T, want map[string]any", metadata[0])
+		}
+
+		tags, ok := row["tags"].(map[string]any)
+		if !ok {
+			t.Fatalf("metadata[0][tags] type = %T, want map[string]any", row["tags"])
+		}
+
+		if _, ok := tags["74616773"]; !ok {
+			t.Fatal("metadata[0][tags] missing expected service entry")
+		}
+
+		if _, ok := row["service_keys_to_statuses_to_tags"]; ok {
+			t.Fatal("legacy service_keys_to_statuses_to_tags unexpectedly present")
+		}
+
+		if _, ok := row["service_keys_to_statuses_to_display_tags"]; ok {
+			t.Fatal("legacy service_keys_to_statuses_to_display_tags unexpectedly present")
+		}
+	})
+
+	t.Run("can include legacy tag maps when hide_service_keys_tags is false", func(t *testing.T) {
+		tagStore := &fakeMetadataStore{
+			handle: func(request filemetadata.Request) ([]filemetadata.Row, error) {
+				if !request.IncludeLegacyServiceKeysTags {
+					t.Fatal("IncludeLegacyServiceKeysTags = false, want true when hide_service_keys_tags=false")
+				}
+
+				return []filemetadata.Row{{
+					"file_id": int64(1),
+					"hash":    strings.Repeat("a", 64),
+					"tags": map[string]map[string]any{
+						"74616773": {
+							"name":        "my tags",
+							"type":        services.TypeLocalTag,
+							"type_pretty": services.TypePretty(services.TypeLocalTag),
+							"storage_tags": map[string][]string{
+								"0": {"creator:alice"},
+							},
+							"display_tags": map[string][]string{
+								"0": {"creator:alice"},
+							},
+						},
+					},
+					"service_keys_to_statuses_to_tags": map[string]map[string][]string{
+						"74616773": {
+							"0": {"creator:alice"},
+						},
+					},
+					"service_keys_to_statuses_to_display_tags": map[string]map[string][]string{
+						"74616773": {
+							"0": {"creator:alice"},
+						},
+					},
+				}}, nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, provider, tagStore, false)
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/get_files/file_metadata?file_ids=%5B1%5D&include_services_object=false&hide_service_keys_tags=false",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", accessKey)
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		metadata, ok := payload["metadata"].([]any)
+		if !ok || len(metadata) != 1 {
+			t.Fatalf("metadata = %v, want one row", payload["metadata"])
+		}
+
+		row, ok := metadata[0].(map[string]any)
+		if !ok {
+			t.Fatalf("metadata[0] type = %T, want map[string]any", metadata[0])
+		}
+
+		if _, ok := row["service_keys_to_statuses_to_tags"].(map[string]any); !ok {
+			t.Fatalf("metadata[0][service_keys_to_statuses_to_tags] type = %T, want map[string]any", row["service_keys_to_statuses_to_tags"])
+		}
+
+		if _, ok := row["service_keys_to_statuses_to_display_tags"].(map[string]any); !ok {
+			t.Fatalf("metadata[0][service_keys_to_statuses_to_display_tags] type = %T, want map[string]any", row["service_keys_to_statuses_to_display_tags"])
+		}
+	})
+
 	t.Run("invalid hash is rejected", func(t *testing.T) {
 		req := httptest.NewRequest(
 			http.MethodGet,
@@ -1190,10 +1430,10 @@ func TestGetFileMetadata(t *testing.T) {
 		}
 	})
 
-	t.Run("parses full mode flags", func(t *testing.T) {
+	t.Run("parses full mode flags and legacy tag compatibility toggle", func(t *testing.T) {
 		req := httptest.NewRequest(
 			http.MethodGet,
-			"/get_files/file_metadata?file_ids=%5B1%5D&include_milliseconds=true&include_notes=true&detailed_url_information=true&include_services_object=false",
+			"/get_files/file_metadata?file_ids=%5B1%5D&include_milliseconds=true&include_notes=true&detailed_url_information=true&create_new_file_ids=true&include_services_object=false&hide_service_keys_tags=false",
 			nil,
 		)
 		req.Header.Set("Hydrus-Client-API-Access-Key", accessKey)
@@ -1229,29 +1469,41 @@ func TestGetFileMetadata(t *testing.T) {
 			t.Fatal("DetailedURLInformation = false, want true")
 		}
 
+		if !store.lastRequest.CreateNewFileIDs {
+			t.Fatal("CreateNewFileIDs = false, want true")
+		}
+
 		if store.lastRequest.IncludeServicesObject {
 			t.Fatal("IncludeServicesObject = true, want false")
 		}
+
+		if !store.lastRequest.IncludeLegacyServiceKeysTags {
+			t.Fatal("IncludeLegacyServiceKeysTags = false, want true")
+		}
 	})
 
-	t.Run("unsupported full mode flags return not implemented", func(t *testing.T) {
-		rejectingStore := &fakeMetadataStore{
+	t.Run("passes through notes payload when requested", func(t *testing.T) {
+		notesStore := &fakeMetadataStore{
 			handle: func(request filemetadata.Request) ([]filemetadata.Row, error) {
-				switch {
-				case request.IncludeNotes:
-					return nil, &filemetadata.UnsupportedError{Message: "include_notes=true is not implemented yet"}
-				case request.DetailedURLInformation:
-					return nil, &filemetadata.UnsupportedError{Message: "detailed_url_information=true is not implemented yet"}
-				default:
-					return []filemetadata.Row{}, nil
+				if !request.IncludeNotes {
+					t.Fatal("IncludeNotes = false, want true")
 				}
+
+				return []filemetadata.Row{{
+					"file_id": int64(1),
+					"hash":    strings.Repeat("a", 64),
+					"notes": map[string]string{
+						"artist commentary": "hello from hydrus-go",
+						"translation":       "line one\nline two",
+					},
+				}}, nil
 			},
 		}
-		handler := newHandlerWithDeps(t, provider, rejectingStore, false)
+		handler := newHandlerWithDeps(t, provider, notesStore, false)
 
 		req := httptest.NewRequest(
 			http.MethodGet,
-			"/get_files/file_metadata?file_ids=%5B1%5D&include_notes=true",
+			"/get_files/file_metadata?file_ids=%5B1%5D&include_notes=true&include_services_object=false",
 			nil,
 		)
 		req.Header.Set("Hydrus-Client-API-Access-Key", accessKey)
@@ -1259,22 +1511,122 @@ func TestGetFileMetadata(t *testing.T) {
 
 		handler.ServeHTTP(rr, req)
 
-		if rr.Code != http.StatusNotImplemented {
-			t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotImplemented)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 		}
 
-		req = httptest.NewRequest(
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		metadata, ok := payload["metadata"].([]any)
+		if !ok || len(metadata) != 1 {
+			t.Fatalf("metadata = %v, want one row", payload["metadata"])
+		}
+
+		row, ok := metadata[0].(map[string]any)
+		if !ok {
+			t.Fatalf("metadata[0] type = %T, want map[string]any", metadata[0])
+		}
+
+		notes, ok := row["notes"].(map[string]any)
+		if !ok {
+			t.Fatalf("metadata[0][notes] type = %T, want map[string]any", row["notes"])
+		}
+
+		if got := notes["artist commentary"]; got != "hello from hydrus-go" {
+			t.Fatalf("metadata[0][notes][artist commentary] = %v, want hello from hydrus-go", got)
+		}
+
+		if got := notes["translation"]; got != "line one\nline two" {
+			t.Fatalf("metadata[0][notes][translation] = %v, want line one\\nline two", got)
+		}
+	})
+
+	t.Run("passes through detailed known URLs payload when requested", func(t *testing.T) {
+		detailedURLStore := &fakeMetadataStore{
+			handle: func(request filemetadata.Request) ([]filemetadata.Row, error) {
+				if !request.DetailedURLInformation {
+					t.Fatal("DetailedURLInformation = false, want true")
+				}
+
+				return []filemetadata.Row{{
+					"file_id": int64(1),
+					"hash":    strings.Repeat("a", 64),
+					"detailed_known_urls": []map[string]any{
+						{
+							"normalised_url":      "https://img.weirdbooru.com/images/ab/cd/abcdblahblahblah.jpg",
+							"url_type":            5,
+							"url_type_string":     "unknown url",
+							"match_name":          "unknown url",
+							"can_parse":           false,
+							"cannot_parse_reason": "unknown url class",
+						},
+						{
+							"normalised_url":      "https://otherbooru.org/index.php?id=123456&page=post&s=view",
+							"url_type":            0,
+							"url_type_string":     "post url",
+							"match_name":          "otherbooru file page",
+							"can_parse":           false,
+							"cannot_parse_reason": "Could not find a parser for otherbooru file page URL Class!",
+						},
+					},
+				}}, nil
+			},
+		}
+		handler := newHandlerWithDeps(t, provider, detailedURLStore, false)
+
+		req := httptest.NewRequest(
 			http.MethodGet,
-			"/get_files/file_metadata?file_ids=%5B1%5D&detailed_url_information=true",
+			"/get_files/file_metadata?file_ids=%5B1%5D&detailed_url_information=true&include_services_object=false",
 			nil,
 		)
 		req.Header.Set("Hydrus-Client-API-Access-Key", accessKey)
-		rr = httptest.NewRecorder()
+		rr := httptest.NewRecorder()
 
 		handler.ServeHTTP(rr, req)
 
-		if rr.Code != http.StatusNotImplemented {
-			t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotImplemented)
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		metadata, ok := payload["metadata"].([]any)
+		if !ok || len(metadata) != 1 {
+			t.Fatalf("metadata = %v, want one row", payload["metadata"])
+		}
+
+		row, ok := metadata[0].(map[string]any)
+		if !ok {
+			t.Fatalf("metadata[0] type = %T, want map[string]any", metadata[0])
+		}
+
+		detailedKnownURLs, ok := row["detailed_known_urls"].([]any)
+		if !ok {
+			t.Fatalf("metadata[0][detailed_known_urls] type = %T, want []any", row["detailed_known_urls"])
+		}
+
+		if len(detailedKnownURLs) != 2 {
+			t.Fatalf("len(metadata[0][detailed_known_urls]) = %d, want 2", len(detailedKnownURLs))
+		}
+
+		first, ok := detailedKnownURLs[0].(map[string]any)
+		if !ok {
+			t.Fatalf("metadata[0][detailed_known_urls][0] type = %T, want map[string]any", detailedKnownURLs[0])
+		}
+
+		if got := first["normalised_url"]; got != "https://img.weirdbooru.com/images/ab/cd/abcdblahblahblah.jpg" {
+			t.Fatalf("metadata[0][detailed_known_urls][0][normalised_url] = %v, want weirdbooru image URL", got)
+		}
+
+		second, ok := detailedKnownURLs[1].(map[string]any)
+		if !ok {
+			t.Fatalf("metadata[0][detailed_known_urls][1] type = %T, want map[string]any", detailedKnownURLs[1])
+		}
+
+		if got := second["normalised_url"]; got != "https://otherbooru.org/index.php?id=123456&page=post&s=view" {
+			t.Fatalf("metadata[0][detailed_known_urls][1][normalised_url] = %v, want normalised otherbooru URL", got)
 		}
 	})
 

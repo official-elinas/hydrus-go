@@ -62,7 +62,7 @@ func (i *Importer) ImportUpload(
 		return fileimport.Result{}, err
 	}
 
-	width, height := detectImageDimensions(stagedPath, mimeEnum)
+	stillImageMetadata := detectStillImageImportMetadata(stagedPath, mimeEnum)
 	importedAtMS := time.Now().UTC().UnixMilli()
 
 	result, err := i.ImportPreparedFile(ctx, PreparedFile{
@@ -70,8 +70,10 @@ func (i *Importer) ImportUpload(
 		HashHex:             hashHex,
 		Size:                info.Size(),
 		Mime:                mimeEnum,
-		Width:               width,
-		Height:              height,
+		Width:               stillImageMetadata.Width,
+		Height:              stillImageMetadata.Height,
+		PixelHashHex:        stillImageMetadata.PixelHashHex,
+		HasTransparency:     stillImageMetadata.HasTransparency,
 		ImportedAtMS:        importedAtMS,
 		FileModifiedAtMS:    fileModifiedAtMS,
 		LocalFileServiceKey: strings.TrimSpace(request.LocalFileServiceKey),

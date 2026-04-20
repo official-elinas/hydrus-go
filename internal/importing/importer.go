@@ -25,6 +25,8 @@ type PreparedFile struct {
 	Mime                int
 	Width               *int64
 	Height              *int64
+	PixelHashHex        string
+	HasTransparency     *bool
 	Duration            *int64
 	NumFrames           *int64
 	HasAudio            *bool
@@ -132,6 +134,8 @@ func (i *Importer) ImportPreparedFile(
 			Mime:                prepared.Mime,
 			Width:               prepared.Width,
 			Height:              prepared.Height,
+			PixelHashHex:        prepared.PixelHashHex,
+			HasTransparency:     prepared.HasTransparency,
 			Duration:            prepared.Duration,
 			NumFrames:           prepared.NumFrames,
 			HasAudio:            prepared.HasAudio,

@@ -7,19 +7,28 @@ The prototype is intentionally narrow:
 
 - it connects to `hydrusd` over HTTP/JSON
 - it does not touch SQLite or `client_files` directly
-- it exists to validate daemon/database browse/add/trash behavior and bounded selected-file preview through a real UI
+- it exists to validate daemon/database browse/import/trash behavior, bulk queue orchestration, and bounded selected-file preview through a real UI
 - it is shaped more like `image-tests/comfyui-image-browser.png` than full
   Hydrus workstation parity
 
 ## Current prototype loop
 
-- connect to local `hydrusd`
+- connect to local or remote `hydrusd`
 - load recent local files into a thumbnail grid
+- queue imports from:
+  - the single-file picker
+  - the folder picker
+  - drag-and-drop of files or folders into the window
+- process the queue sequentially through the daemon's remote-safe upload endpoint
+- review queued items in a dedicated list with retry/remove controls
+- keep queue staging usable while disconnected and resume processing when a
+  usable daemon connection is restored
+- skip unsupported dropped items or unreadable paths with user-facing feedback
 - preview selected JPEG/PNG/GIF originals through the daemon's content endpoint
   - preview is intentionally bounded to keep the thin client responsive
   - current limits: 16 MiB payload, 8192px maximum dimension, 16,000,000 decoded pixels
-- inspect selected-file metadata
-- add one local file through the daemon's local-path import endpoint
+- inspect selected-file metadata, including daemon-served tag groups grouped by service/status in the details pane
+- clear the queue when idle or prune/retry finished items from the queue review pane
 - trash one selected file through the daemon's trash endpoint
 
 ## Local run sketch

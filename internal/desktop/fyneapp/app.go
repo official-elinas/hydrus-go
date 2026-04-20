@@ -12,6 +12,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -35,7 +36,7 @@ const (
 	previewPixelLimit   = 16_000_000
 	previewMaxDimension = 8192
 	defaultDaemonURL    = "http://127.0.0.1:45869"
-	defaultMetadataText = "Select a file from the grid to inspect the daemon-backed metadata state.\n\nThis prototype is focused on validating hydrusd add/trash flows, not full Hydrus UI parity."
+	defaultMetadataText = "Select a file from the grid to inspect the daemon-backed metadata state.\n\nThis prototype is focused on validating daemon-backed import/trash flows and early Hydrus-like layout work, not full UI parity yet."
 	defaultPreviewText  = "Select a supported still image to preview the daemon-served original file."
 )
 
@@ -51,18 +52,27 @@ type prototype struct {
 	stateMu sync.RWMutex
 	client  *daemonclient.Client
 
-	connectButton *widget.Button
-	refreshButton *widget.Button
-	addButton     *widget.Button
-	trashButton   *widget.Button
+	connectButton        *widget.Button
+	refreshButton        *widget.Button
+	addButton            *widget.Button
+	addFolderButton      *widget.Button
+	clearQueueButton     *widget.Button
+	retrySelectedButton  *widget.Button
+	removeSelectedButton *widget.Button
+	retryFailedButton    *widget.Button
+	clearFinishedButton  *widget.Button
+	trashButton          *widget.Button
 
-	connectionLabel *widget.Label
-	previewImage    *canvas.Image
-	previewLabel    *widget.Label
-	metadataLabel   *widget.Label
-	activityLabel   *widget.Label
-	statusBarLabel  *widget.Label
-	gridHost        *fyne.Container
+	connectionLabel   *widget.Label
+	queueSummaryLabel *widget.Label
+	queueDetailLabel  *widget.Label
+	previewImage      *canvas.Image
+	previewLabel      *widget.Label
+	metadataLabel     *widget.Label
+	activityLabel     *widget.Label
+	statusBarLabel    *widget.Label
+	queueList         *widget.List
+	gridHost          *fyne.Container
 
 	recent           []daemonclient.RecentItem
 	selectedFileID   int64
@@ -76,6 +86,11 @@ type prototype struct {
 	previewRequestID uint64
 	previewCancel    context.CancelFunc
 	previewRequestM  sync.Mutex
+
+	queueMu            sync.Mutex
+	importQueue        []importQueueEntry
+	importQueueRunning bool
+	selectedQueueIndex int
 }
 
 type connectionSnapshot struct {
@@ -93,15 +108,20 @@ func newPrototype() *prototype {
 	window.Resize(fyne.NewSize(1500, 920))
 
 	p := &prototype{
-		app:            application,
-		window:         window,
-		client:         daemonclient.New(),
-		thumbnailCache: map[int64]fyne.Resource{},
-		thumbnailLoads: map[int64]struct{}{},
+		app:                application,
+		window:             window,
+		client:             daemonclient.New(),
+		selectedQueueIndex: -1,
+		thumbnailCache:     map[int64]fyne.Resource{},
+		thumbnailLoads:     map[int64]struct{}{},
 	}
 
 	p.connectionLabel = widget.NewLabel("")
 	p.connectionLabel.Wrapping = fyne.TextWrapWord
+	p.queueSummaryLabel = widget.NewLabel(formatImportQueueSummary(nil, false))
+	p.queueSummaryLabel.Wrapping = fyne.TextWrapWord
+	p.queueDetailLabel = widget.NewLabel(defaultSelectedQueueText())
+	p.queueDetailLabel.Wrapping = fyne.TextWrapWord
 	p.previewImage = canvas.NewImageFromImage(tilePlaceholderImage)
 	p.previewImage.FillMode = canvas.ImageFillContain
 	p.previewLabel = widget.NewLabel(defaultPreviewText)
@@ -113,6 +133,13 @@ func newPrototype() *prototype {
 	p.activityLabel.Wrapping = fyne.TextWrapWord
 	p.statusBarLabel = widget.NewLabel("Ready. Connect to hydrusd to start the prototype.")
 	p.statusBarLabel.Wrapping = fyne.TextWrapWord
+	p.queueList = widget.NewList(
+		p.importQueueLength,
+		makeImportQueueListItem,
+		p.updateImportQueueListItem,
+	)
+	p.queueList.OnSelected = p.selectImportQueueEntry
+	p.queueList.OnUnselected = p.unselectImportQueueEntry
 	p.gridHost = container.NewMax()
 
 	p.connectButton = widget.NewButton("Connect", p.showConnectDialog)
@@ -120,11 +147,19 @@ func newPrototype() *prototype {
 		p.reloadRecent(p.selectedFileID, "Refreshed recent files from hydrusd.")
 	})
 	p.addButton = widget.NewButton("Add File", p.showImportDialog)
+	p.addFolderButton = widget.NewButton("Add Folder", p.showImportFolderDialog)
+	p.retrySelectedButton = widget.NewButton("Retry Selected", p.retrySelectedQueueEntry)
+	p.removeSelectedButton = widget.NewButton("Remove Selected", p.removeSelectedQueueEntry)
+	p.retryFailedButton = widget.NewButton("Retry Failed", p.retryFailedQueueEntries)
+	p.clearFinishedButton = widget.NewButton("Clear Finished", p.clearFinishedQueueEntries)
+	p.clearQueueButton = widget.NewButton("Clear Queue", p.clearImportQueue)
 	p.trashButton = widget.NewButton("Trash Selected", p.confirmTrashSelected)
 
 	p.window.SetContent(p.buildContent())
+	p.window.SetOnDropped(p.handleDroppedItems)
 	p.loadSavedConnection()
 	p.updateActionState()
+	p.renderImportQueue()
 	p.renderGrid()
 
 	return p
@@ -241,6 +276,7 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		p.connectButton,
 		p.refreshButton,
 		p.addButton,
+		p.addFolderButton,
 		p.trashButton,
 	)
 
@@ -253,25 +289,60 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		),
 	)
 
-	sidebar := container.NewVScroll(container.NewPadded(container.NewVBox(
+	queueHelp := widget.NewLabel(
+		"Queue files with Add File, Add Folder, or by dragging files and folders anywhere into the window.",
+	)
+	queueHelp.Wrapping = fyne.TextWrapWord
+
+	queueActionButtons := container.NewVBox(
+		container.NewGridWithColumns(2, p.retrySelectedButton, p.removeSelectedButton),
+		container.NewGridWithColumns(2, p.retryFailedButton, p.clearFinishedButton),
+		p.clearQueueButton,
+	)
+
+	queueHeader := container.NewPadded(container.NewVBox(
 		widget.NewLabelWithStyle("hydrusd prototype", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		widget.NewLabel("A thin Fyne shell for testing add/trash workflows against the Go daemon."),
+		widget.NewLabel("A thin Fyne shell for testing daemon-backed Hydrus parity work without direct DB or managed-file access."),
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Connection", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		p.connectionLabel,
 		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Import queue", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		queueHelp,
+		p.queueSummaryLabel,
+		queueActionButtons,
+	))
+
+	queueFooter := container.NewPadded(container.NewVBox(
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Selected queue item", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		p.queueDetailLabel,
+		widget.NewSeparator(),
+		widget.NewLabelWithStyle("Last action", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		p.activityLabel,
+	))
+
+	controlsPane := container.NewBorder(
+		queueHeader,
+		queueFooter,
+		nil,
+		nil,
+		container.NewPadded(p.queueList),
+	)
+
+	detailPane := container.NewVScroll(container.NewPadded(container.NewVBox(
 		widget.NewLabelWithStyle("Selected preview", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		previewPanel,
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Selected file", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		p.metadataLabel,
-		widget.NewSeparator(),
-		widget.NewLabelWithStyle("Last action", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		p.activityLabel,
 	)))
 
-	split := container.NewHSplit(sidebar, container.NewPadded(p.gridHost))
-	split.SetOffset(0.22)
+	leftPane := container.NewVSplit(controlsPane, detailPane)
+	leftPane.SetOffset(0.4)
+
+	split := container.NewHSplit(leftPane, container.NewPadded(p.gridHost))
+	split.SetOffset(0.27)
 
 	return container.NewBorder(
 		container.NewPadded(toolbar),
@@ -336,6 +407,8 @@ func (p *prototype) connectToDaemon(baseURL string, accessKey string) {
 	p.connectButton.Disable()
 	p.refreshButton.Disable()
 	p.addButton.Disable()
+	p.addFolderButton.Disable()
+	p.clearQueueButton.Disable()
 	p.trashButton.Disable()
 
 	go func(attemptID uint64, wasConnected bool) {
@@ -356,6 +429,7 @@ func (p *prototype) connectToDaemon(baseURL string, accessKey string) {
 					if p.selectedFileID > 0 {
 						p.loadSelectedPreview(p.selectedFileID)
 					}
+					p.startImportQueueProcessor()
 				}
 				p.setStatus("Connection failed.")
 				dialog.ShowError(err, p.window)
@@ -381,6 +455,7 @@ func (p *prototype) connectToDaemon(baseURL string, accessKey string) {
 					if p.selectedFileID > 0 {
 						p.loadSelectedPreview(p.selectedFileID)
 					}
+					p.startImportQueueProcessor()
 				}
 				p.setStatus("Session creation failed.")
 				dialog.ShowError(err, p.window)
@@ -406,6 +481,7 @@ func (p *prototype) connectToDaemon(baseURL string, accessKey string) {
 					if p.selectedFileID > 0 {
 						p.loadSelectedPreview(p.selectedFileID)
 					}
+					p.startImportQueueProcessor()
 				}
 				p.setStatus("Connected, but loading recent files failed.")
 				dialog.ShowError(err, p.window)
@@ -434,16 +510,13 @@ func (p *prototype) connectToDaemon(baseURL string, accessKey string) {
 				),
 			)
 			p.applyRecentItems(page.Items, 0)
+			p.startImportQueueProcessor()
 			p.setStatus(fmt.Sprintf("Connected to hydrusd and loaded %d recent files.", len(page.Items)))
 		})
 	}(attemptID, wasConnected)
 }
 
 func (p *prototype) showImportDialog() {
-	if !p.currentConnection().connected {
-		return
-	}
-
 	dialog.ShowFileOpen(func(reader fyne.URIReadCloser, err error) {
 		if err != nil {
 			dialog.ShowError(err, p.window)
@@ -472,48 +545,362 @@ func (p *prototype) showImportDialog() {
 			return
 		}
 
-		p.importFile(path)
+		p.queueImportSources([]string{path}, "file picker")
 	}, p.window)
 }
 
-func (p *prototype) importFile(path string) {
+func (p *prototype) showImportFolderDialog() {
+	dialog.ShowFolderOpen(func(listable fyne.ListableURI, err error) {
+		if err != nil {
+			dialog.ShowError(err, p.window)
+			return
+		}
+
+		if listable == nil {
+			return
+		}
+
+		path := filepath.Clean(listable.Path())
+		if strings.TrimSpace(path) == "" {
+			dialog.ShowError(fmt.Errorf("selected folder path was empty"), p.window)
+			return
+		}
+
+		p.queueImportSources([]string{path}, "folder picker")
+	}, p.window)
+}
+
+func (p *prototype) handleDroppedItems(_ fyne.Position, items []fyne.URI) {
+	paths, rejected := droppedLocalPaths(items)
+	if len(paths) == 0 {
+		if len(rejected) > 0 {
+			dialog.ShowInformation(
+				"Nothing importable was dropped",
+				formatRejectedImportItems(rejected),
+				p.window,
+			)
+		}
+		return
+	}
+
+	p.queueImportSources(paths, "drag and drop")
+	if len(rejected) > 0 {
+		p.setStatus(
+			fmt.Sprintf(
+				"Queued dropped items and skipped %d unsupported drop target(s).",
+				len(rejected),
+			),
+		)
+	}
+}
+
+func (p *prototype) queueImportSources(paths []string, source string) {
+	if len(paths) == 0 {
+		return
+	}
+
+	inputs := append([]string(nil), paths...)
+	p.setStatus(fmt.Sprintf("Preparing %d import source(s) from %s...", len(inputs), source))
+
+	go func(source string, inputs []string) {
+		resolved, skipped, err := expandImportSelection(inputs)
+		if err != nil {
+			fyne.Do(func() {
+				dialog.ShowError(err, p.window)
+				p.setStatus("Preparing import sources failed.")
+			})
+			return
+		}
+
+		fyne.Do(func() {
+			added, duplicates := p.appendImportQueueEntries(resolved, source)
+			p.renderImportQueue()
+			p.updateActionState()
+
+			status := fmt.Sprintf("Queued %d file(s) from %s.", added, source)
+			if duplicates > 0 {
+				status = fmt.Sprintf(
+					"Queued %d file(s) from %s and skipped %d already queued path(s).",
+					added,
+					source,
+					duplicates,
+				)
+			}
+			if added == 0 && len(skipped) > 0 {
+				status = "No importable files were added to the queue."
+			}
+			if len(skipped) > 0 && added > 0 {
+				status += fmt.Sprintf(" Skipped %d unsupported or empty source(s).", len(skipped))
+			}
+			if !p.currentConnection().connected && added > 0 {
+				status += " Connect to hydrusd to process the queue."
+			}
+
+			p.setStatus(status)
+
+			if len(skipped) > 0 && added == 0 {
+				dialog.ShowInformation(
+					"No importable files were found",
+					formatRejectedImportItems(skipped),
+					p.window,
+				)
+			}
+
+			p.startImportQueueProcessor()
+		})
+	}(source, inputs)
+}
+
+func (p *prototype) appendImportQueueEntries(paths []string, source string) (int, int) {
+	p.queueMu.Lock()
+	defer p.queueMu.Unlock()
+
+	existing := map[string]int{}
+	for index, entry := range p.importQueue {
+		existing[entry.Path] = index
+	}
+
+	added := 0
+	duplicates := 0
+	for _, path := range paths {
+		normalized := filepath.Clean(strings.TrimSpace(path))
+		if normalized == "." || normalized == "" {
+			continue
+		}
+
+		if existingIndex, exists := existing[normalized]; exists {
+			if p.importQueue[existingIndex].Status == importQueueStatusFailed {
+				p.importQueue[existingIndex].Status = importQueueStatusPending
+				p.importQueue[existingIndex].Source = source
+				p.importQueue[existingIndex].Detail = "Retrying after a previous failure."
+				p.importQueue[existingIndex].FileID = 0
+				added++
+				continue
+			}
+
+			duplicates++
+			continue
+		}
+
+		existing[normalized] = len(p.importQueue)
+		p.importQueue = append(p.importQueue, importQueueEntry{
+			Path:   normalized,
+			Source: source,
+			Status: importQueueStatusPending,
+			Detail: "Waiting to upload through hydrusd.",
+		})
+		added++
+	}
+
+	return added, duplicates
+}
+
+func (p *prototype) startImportQueueProcessor() {
 	connection := p.currentConnection()
 	if !connection.connected || connection.client == nil {
 		return
 	}
 
-	p.setStatus(fmt.Sprintf("Uploading %s through hydrusd...", filepath.Base(path)))
+	p.queueMu.Lock()
+	if p.importQueueRunning {
+		p.queueMu.Unlock()
+		return
+	}
 
-	go func(connection connectionSnapshot) {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
+	hasPending := false
+	for _, entry := range p.importQueue {
+		if entry.Status == importQueueStatusPending {
+			hasPending = true
+			break
+		}
+	}
+	if !hasPending {
+		p.queueMu.Unlock()
+		return
+	}
 
-		result, err := connection.client.UploadFile(ctx, path)
-		if err != nil {
-			fyne.Do(func() {
-				if !p.isCurrentOperation(connection) {
-					return
-				}
+	p.importQueueRunning = true
+	p.queueMu.Unlock()
 
-				p.setStatus("Upload failed.")
-				dialog.ShowError(err, p.window)
-			})
-			return
+	p.renderImportQueue()
+	p.updateActionState()
+
+	go p.processImportQueue(connection)
+}
+
+func (p *prototype) processImportQueue(connection connectionSnapshot) {
+	lastSuccessfulFileID := int64(0)
+	importedCount := 0
+	duplicateCount := 0
+	failedCount := 0
+	paused := false
+
+	for {
+		if !p.isCurrentOperation(connection) {
+			paused = true
+			p.queueMu.Lock()
+			p.importQueueRunning = false
+			p.queueMu.Unlock()
+			break
 		}
 
-		status := fmt.Sprintf("Uploaded file_id %d through hydrusd.", result.FileID)
-		if result.AlreadyImported {
-			status = fmt.Sprintf("File already existed as file_id %d; hydrusd confirmed it.", result.FileID)
+		index, path, ok := p.beginNextImportQueueEntry()
+		if !ok {
+			break
 		}
 
 		fyne.Do(func() {
-			if !p.isCurrentOperation(connection) {
-				return
+			if p.isCurrentOperation(connection) {
+				p.renderImportQueue()
+				p.updateActionState()
+				p.setStatus(fmt.Sprintf("Uploading %s through hydrusd...", filepath.Base(path)))
 			}
-
-			p.reloadRecent(result.FileID, status)
 		})
-	}(connection)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		result, err := connection.client.UploadFile(ctx, path)
+		cancel()
+
+		if !p.isCurrentOperation(connection) {
+			paused = true
+			p.requeueImportQueueEntry(index, "Waiting to resume after connection change.")
+			p.queueMu.Lock()
+			p.importQueueRunning = false
+			p.queueMu.Unlock()
+			break
+		}
+
+		if err != nil {
+			failedCount++
+			p.finishImportQueueEntry(index, importQueueStatusFailed, 0, err.Error())
+			fyne.Do(func() {
+				if p.isCurrentOperation(connection) {
+					p.renderImportQueue()
+					p.updateActionState()
+				}
+			})
+			continue
+		}
+
+		status := importQueueStatusImported
+		detail := fmt.Sprintf("Imported as file_id %d.", result.FileID)
+		if result.AlreadyImported {
+			status = importQueueStatusDuplicate
+			detail = fmt.Sprintf("Already present as file_id %d.", result.FileID)
+			duplicateCount++
+		} else {
+			importedCount++
+		}
+
+		if result.FileID > 0 {
+			lastSuccessfulFileID = result.FileID
+		}
+
+		p.finishImportQueueEntry(index, status, result.FileID, detail)
+		fyne.Do(func() {
+			if p.isCurrentOperation(connection) {
+				p.renderImportQueue()
+				p.updateActionState()
+			}
+		})
+	}
+
+	if paused {
+		fyne.Do(func() {
+			p.renderImportQueue()
+			p.updateActionState()
+			p.setStatus("Import queue paused until the hydrusd connection is restored.")
+			p.startImportQueueProcessor()
+		})
+		return
+	}
+
+	status := fmt.Sprintf(
+		"Import queue finished: %d imported, %d duplicates, %d failed.",
+		importedCount,
+		duplicateCount,
+		failedCount,
+	)
+
+	fyne.Do(func() {
+		if !p.isCurrentOperation(connection) {
+			return
+		}
+
+		p.renderImportQueue()
+		p.updateActionState()
+		if importedCount > 0 || duplicateCount > 0 {
+			p.reloadRecent(lastSuccessfulFileID, status)
+			return
+		}
+
+		p.setStatus(status)
+	})
+}
+
+func (p *prototype) beginNextImportQueueEntry() (int, string, bool) {
+	p.queueMu.Lock()
+	defer p.queueMu.Unlock()
+
+	for index, entry := range p.importQueue {
+		if entry.Status != importQueueStatusPending {
+			continue
+		}
+
+		p.importQueue[index].Status = importQueueStatusUploading
+		p.importQueue[index].Detail = "Streaming to hydrusd..."
+		return index, p.importQueue[index].Path, true
+	}
+
+	p.importQueueRunning = false
+	return -1, "", false
+}
+
+func (p *prototype) finishImportQueueEntry(index int, status importQueueStatus, fileID int64, detail string) {
+	p.queueMu.Lock()
+	defer p.queueMu.Unlock()
+
+	if index < 0 || index >= len(p.importQueue) {
+		return
+	}
+
+	p.importQueue[index].Status = status
+	p.importQueue[index].FileID = fileID
+	p.importQueue[index].Detail = strings.TrimSpace(detail)
+}
+
+func (p *prototype) requeueImportQueueEntry(index int, detail string) {
+	p.queueMu.Lock()
+	defer p.queueMu.Unlock()
+
+	if index < 0 || index >= len(p.importQueue) {
+		return
+	}
+
+	p.importQueue[index].Status = importQueueStatusPending
+	p.importQueue[index].FileID = 0
+	p.importQueue[index].Detail = strings.TrimSpace(detail)
+}
+
+func (p *prototype) clearImportQueue() {
+	p.queueMu.Lock()
+	if p.importQueueRunning {
+		p.queueMu.Unlock()
+		return
+	}
+
+	if len(p.importQueue) == 0 {
+		p.queueMu.Unlock()
+		return
+	}
+
+	p.importQueue = nil
+	p.selectedQueueIndex = -1
+	p.queueMu.Unlock()
+
+	p.renderImportQueue()
+	p.updateActionState()
+	p.setStatus("Cleared the import queue.")
 }
 
 func (p *prototype) confirmTrashSelected() {
@@ -646,7 +1033,7 @@ func (p *prototype) applyRecentItems(items []daemonclient.RecentItem, preferredF
 func (p *prototype) renderGrid() {
 	if len(p.recent) == 0 {
 		p.gridHost.Objects = []fyne.CanvasObject{
-			container.NewCenter(widget.NewLabel("No recent local files are loaded. Use Add File to exercise hydrusd.")),
+			container.NewCenter(widget.NewLabel("No recent local files are loaded. Queue imports with Add File, Add Folder, or drag and drop to exercise hydrusd.")),
 		}
 		p.gridHost.Refresh()
 		return
@@ -907,12 +1294,65 @@ func (p *prototype) lookupPreviewResource(fileID int64) (fyne.Resource, string) 
 
 func (p *prototype) updateActionState() {
 	connected := p.currentConnection().connected
+	p.queueMu.Lock()
+	queueRunning := p.importQueueRunning
+	hasQueuedItems := len(p.importQueue) > 0
+	hasFailedItems := false
+	hasFinishedItems := false
+	selectedQueueIndex := normalizeImportQueueSelection(p.selectedQueueIndex, len(p.importQueue))
+	selectedQueueEntry := importQueueEntry{}
+	hasSelectedQueueEntry := false
+	if selectedQueueIndex >= 0 {
+		selectedQueueEntry = p.importQueue[selectedQueueIndex]
+		hasSelectedQueueEntry = true
+	}
+	for _, entry := range p.importQueue {
+		if canRetryImportQueueEntry(entry) {
+			hasFailedItems = true
+		}
+		if isFinishedImportQueueEntry(entry) {
+			hasFinishedItems = true
+		}
+	}
+	p.queueMu.Unlock()
+
+	p.addButton.Enable()
+	p.addFolderButton.Enable()
+
 	if connected {
 		p.refreshButton.Enable()
-		p.addButton.Enable()
 	} else {
 		p.refreshButton.Disable()
-		p.addButton.Disable()
+	}
+
+	if !queueRunning && hasQueuedItems {
+		p.clearQueueButton.Enable()
+	} else {
+		p.clearQueueButton.Disable()
+	}
+
+	if hasFailedItems {
+		p.retryFailedButton.Enable()
+	} else {
+		p.retryFailedButton.Disable()
+	}
+
+	if hasFinishedItems && !queueRunning {
+		p.clearFinishedButton.Enable()
+	} else {
+		p.clearFinishedButton.Disable()
+	}
+
+	if hasSelectedQueueEntry && canRetryImportQueueEntry(selectedQueueEntry) {
+		p.retrySelectedButton.Enable()
+	} else {
+		p.retrySelectedButton.Disable()
+	}
+
+	if hasSelectedQueueEntry && !queueRunning && canRemoveImportQueueEntry(selectedQueueEntry) {
+		p.removeSelectedButton.Enable()
+	} else {
+		p.removeSelectedButton.Disable()
 	}
 
 	if connected && p.selectedFileID > 0 {
@@ -1012,7 +1452,7 @@ func formatMetadata(metadata daemonclient.FileMetadata) string {
 		dimensions = fmt.Sprintf("%dx%d", *metadata.Width, *metadata.Height)
 	}
 
-	return strings.Join([]string{
+	lines := []string{
 		fmt.Sprintf("file_id: %d", metadata.FileID),
 		fmt.Sprintf("hash: %s", metadata.Hash),
 		fmt.Sprintf("mime: %s", metadata.MIME),
@@ -1021,7 +1461,179 @@ func formatMetadata(metadata daemonclient.FileMetadata) string {
 		fmt.Sprintf("local: %t", metadata.IsLocal),
 		fmt.Sprintf("trashed: %t", metadata.IsTrashed),
 		fmt.Sprintf("deleted: %t", metadata.IsDeleted),
-	}, "\n")
+	}
+
+	tagLines := formatMetadataTags(metadata.Tags)
+	if len(tagLines) > 0 {
+		lines = append(lines, "", "tags:")
+		lines = append(lines, tagLines...)
+	}
+
+	return strings.Join(lines, "\n")
+}
+
+func formatMetadataTags(tags map[string]daemonclient.FileMetadataTagService) []string {
+	if len(tags) == 0 {
+		return nil
+	}
+
+	serviceKeys := []string{}
+	for serviceKey, service := range tags {
+		if !metadataTagServiceHasVisibleTags(service) {
+			continue
+		}
+
+		serviceKeys = append(serviceKeys, serviceKey)
+	}
+
+	if len(serviceKeys) == 0 {
+		return nil
+	}
+
+	sort.Slice(serviceKeys, func(i, j int) bool {
+		leftLabel := metadataTagServiceHeading(serviceKeys[i], tags[serviceKeys[i]])
+		rightLabel := metadataTagServiceHeading(serviceKeys[j], tags[serviceKeys[j]])
+		if leftLabel == rightLabel {
+			return serviceKeys[i] < serviceKeys[j]
+		}
+
+		return leftLabel < rightLabel
+	})
+
+	lines := []string{}
+	for _, serviceKey := range serviceKeys {
+		lines = append(lines, formatMetadataTagService(serviceKey, tags[serviceKey])...)
+	}
+
+	return lines
+}
+
+func formatMetadataTagService(
+	serviceKey string,
+	service daemonclient.FileMetadataTagService,
+) []string {
+	tagsByStatus := metadataTagPreferredTagsByStatus(service)
+
+	statusKeys := metadataTagStatusKeys(tagsByStatus)
+	if len(statusKeys) == 0 {
+		return nil
+	}
+
+	lines := []string{fmt.Sprintf("- %s", metadataTagServiceHeading(serviceKey, service))}
+	for _, statusKey := range statusKeys {
+		serviceTags := tagsByStatus[statusKey]
+		if len(serviceTags) == 0 {
+			continue
+		}
+
+		lines = append(
+			lines,
+			fmt.Sprintf(
+				"  %s: %s",
+				metadataTagStatusLabel(statusKey),
+				strings.Join(serviceTags, ", "),
+			),
+		)
+	}
+
+	return lines
+}
+
+func metadataTagServiceHasVisibleTags(service daemonclient.FileMetadataTagService) bool {
+	return len(metadataTagStatusKeys(metadataTagPreferredTagsByStatus(service))) > 0
+}
+
+func metadataTagPreferredTagsByStatus(
+	service daemonclient.FileMetadataTagService,
+) map[string][]string {
+	preferred := map[string][]string{}
+	for statusKey, tags := range service.StorageTags {
+		if len(tags) == 0 {
+			continue
+		}
+
+		preferred[statusKey] = tags
+	}
+
+	for statusKey, tags := range service.DisplayTags {
+		if len(tags) == 0 {
+			continue
+		}
+
+		preferred[statusKey] = tags
+	}
+
+	return preferred
+}
+
+func metadataTagServiceHeading(
+	serviceKey string,
+	service daemonclient.FileMetadataTagService,
+) string {
+	name := strings.TrimSpace(service.Name)
+	if name == "" {
+		name = serviceKey
+	}
+
+	typePretty := strings.TrimSpace(service.TypePretty)
+	if typePretty == "" {
+		return name
+	}
+
+	return name + " (" + typePretty + ")"
+}
+
+func metadataTagStatusKeys(tagsByStatus map[string][]string) []string {
+	statusKeys := []string{}
+	for statusKey, tags := range tagsByStatus {
+		if len(tags) == 0 {
+			continue
+		}
+
+		statusKeys = append(statusKeys, statusKey)
+	}
+
+	sort.Slice(statusKeys, func(i, j int) bool {
+		leftRank := metadataTagStatusRank(statusKeys[i])
+		rightRank := metadataTagStatusRank(statusKeys[j])
+		if leftRank == rightRank {
+			return statusKeys[i] < statusKeys[j]
+		}
+
+		return leftRank < rightRank
+	})
+
+	return statusKeys
+}
+
+func metadataTagStatusRank(statusKey string) int {
+	switch statusKey {
+	case "0":
+		return 0
+	case "1":
+		return 1
+	case "2":
+		return 2
+	case "3":
+		return 3
+	default:
+		return 100
+	}
+}
+
+func metadataTagStatusLabel(statusKey string) string {
+	switch statusKey {
+	case "0":
+		return "current"
+	case "1":
+		return "pending"
+	case "2":
+		return "deleted"
+	case "3":
+		return "petitioned"
+	default:
+		return "status " + statusKey
+	}
 }
 
 func shortCredential(value string) string {

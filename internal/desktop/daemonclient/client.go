@@ -58,15 +58,26 @@ type RecentItem struct {
 
 // FileMetadata is the selected-file metadata subset shown by the prototype UI.
 type FileMetadata struct {
-	FileID    int64  `json:"file_id"`
-	Hash      string `json:"hash"`
-	MIME      string `json:"mime"`
-	Size      int64  `json:"size"`
-	Width     *int64 `json:"width,omitempty"`
-	Height    *int64 `json:"height,omitempty"`
-	IsLocal   bool   `json:"is_local"`
-	IsTrashed bool   `json:"is_trashed"`
-	IsDeleted bool   `json:"is_deleted"`
+	FileID    int64                             `json:"file_id"`
+	Hash      string                            `json:"hash"`
+	MIME      string                            `json:"mime"`
+	Size      int64                             `json:"size"`
+	Width     *int64                            `json:"width,omitempty"`
+	Height    *int64                            `json:"height,omitempty"`
+	IsLocal   bool                              `json:"is_local"`
+	IsTrashed bool                              `json:"is_trashed"`
+	IsDeleted bool                              `json:"is_deleted"`
+	Tags      map[string]FileMetadataTagService `json:"tags,omitempty"`
+}
+
+// FileMetadataTagService is one daemon-served metadata tag group keyed by
+// service key.
+type FileMetadataTagService struct {
+	Name        string              `json:"name"`
+	Type        int                 `json:"type"`
+	TypePretty  string              `json:"type_pretty"`
+	StorageTags map[string][]string `json:"storage_tags,omitempty"`
+	DisplayTags map[string][]string `json:"display_tags,omitempty"`
 }
 
 // ImportResult is the public file import response payload.

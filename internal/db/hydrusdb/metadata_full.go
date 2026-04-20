@@ -37,6 +37,9 @@ func (b *Bundle) fullMetadataRows(
 	ctx context.Context,
 	orderedHashes []string,
 	hashesToFileIDs map[string]int64,
+	includeDetailedURLInformation bool,
+	includeNotes bool,
+	includeLegacyServiceKeysTags bool,
 	includeMilliseconds bool,
 ) ([]filemetadata.Row, error) {
 	knownFileIDs := dedupeInt64s(mapValues(hashesToFileIDs))
@@ -127,12 +130,40 @@ func (b *Bundle) fullMetadataRows(
 		return nil, err
 	}
 
+	detailedKnownURLs := map[int64][]map[string]any{}
+	if includeDetailedURLInformation {
+		detailedKnownURLs = buildDetailedKnownURLsByHashID(knownURLs)
+	}
+
 	currentFileServices, deletedFileServices, err := b.lookupFileServiceMemberships(ctx, knownFileIDs)
 	if err != nil {
 		return nil, err
 	}
 
 	ipfsMultihashes, err := b.lookupIPFSMultihashes(ctx, knownFileIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	notesByHashID := map[int64]map[string]string{}
+	if includeNotes {
+		notesByHashID, err = b.lookupFileNotes(ctx, knownFileIDs)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	ratingsByHashID, err := b.lookupFileRatings(ctx, knownFileIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	viewingStatsByHashID, err := b.lookupFileViewingStatistics(ctx, knownFileIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	tagsByHashID, err := b.lookupFileTags(ctx, knownFileIDs, currentFileServices)
 	if err != nil {
 		return nil, err
 	}
@@ -158,9 +189,17 @@ func (b *Bundle) fullMetadataRows(
 			fileModifiedTimestamps,
 			domainModifiedTimestamps,
 			knownURLs,
+			detailedKnownURLs,
 			currentFileServices,
 			deletedFileServices,
 			ipfsMultihashes,
+			notesByHashID,
+			ratingsByHashID,
+			viewingStatsByHashID,
+			tagsByHashID,
+			includeDetailedURLInformation,
+			includeNotes,
+			includeLegacyServiceKeysTags,
 		))
 	}
 
@@ -180,9 +219,17 @@ func buildFullMetadataRow(
 	fileModifiedTimestamps map[int64]int64,
 	domainModifiedTimestamps map[int64][]domainModifiedTimestamp,
 	knownURLs map[int64][]string,
+	detailedKnownURLs map[int64][]map[string]any,
 	currentFileServices map[int64][]currentFileServiceMembership,
 	deletedFileServices map[int64][]deletedFileServiceMembership,
 	ipfsMultihashes map[int64]map[string]string,
+	notesByHashID map[int64]map[string]string,
+	ratingsByHashID map[int64]map[string]any,
+	viewingStatsByHashID map[int64][]map[string]any,
+	tagsByHashID map[int64]metadataTagsPayload,
+	includeDetailedURLInformation bool,
+	includeNotes bool,
+	includeLegacyServiceKeysTags bool,
 ) filemetadata.Row {
 	row := buildBasicRow(record, true)
 	hashID := record.hashID
@@ -224,7 +271,40 @@ func buildFullMetadataRow(
 	row["has_human_readable_embedded_metadata"] = containsHashID(humanReadableHashIDs, hashID)
 	row["has_icc_profile"] = containsHashID(iccProfileHashIDs, hashID)
 	row["known_urls"] = cloneStringSlice(knownURLs[hashID])
+	if includeDetailedURLInformation {
+		row["detailed_known_urls"] = cloneMapSlice(detailedKnownURLs[hashID])
+	}
 	row["ipfs_multihashes"] = cloneStringMap(ipfsMultihashes[hashID])
+	if includeNotes {
+		row["notes"] = cloneStringMap(notesByHashID[hashID])
+	}
+
+	ratings := ratingsByHashID[hashID]
+	if ratings == nil {
+		ratings = map[string]any{}
+	}
+	row["ratings"] = cloneAnyMap(ratings)
+
+	viewingStats := viewingStatsByHashID[hashID]
+	if viewingStats == nil {
+		viewingStats = buildFileViewingStatisticsPayload(nil)
+	}
+	row["file_viewing_statistics"] = cloneMapSlice(viewingStats)
+
+	tagsPayload, ok := tagsByHashID[hashID]
+	if !ok {
+		tagsPayload = metadataTagsPayload{
+			tags:          map[string]map[string]any{},
+			legacyStorage: map[string]map[string][]string{},
+			legacyDisplay: map[string]map[string][]string{},
+		}
+	}
+
+	row["tags"] = tagsPayload.tags
+	if includeLegacyServiceKeysTags {
+		row["service_keys_to_statuses_to_tags"] = tagsPayload.legacyStorage
+		row["service_keys_to_statuses_to_display_tags"] = tagsPayload.legacyDisplay
+	}
 
 	if !isInbox {
 		if archivedTimestampMS, ok := archivedTimestamps[hashID]; ok {
@@ -656,12 +736,25 @@ func (b *Bundle) lookupAllServiceDefinitions(
 }
 
 func (b *Bundle) lookupMainTableNames(ctx context.Context) (map[string]struct{}, error) {
+	return b.lookupSchemaTableNames(ctx, "main")
+}
+
+func (b *Bundle) lookupSchemaTableNames(
+	ctx context.Context,
+	schemaName string,
+) (map[string]struct{}, error) {
+	switch schemaName {
+	case "main", "external_master", "external_caches", "external_mappings":
+	default:
+		return nil, fmt.Errorf("unsupported sqlite schema name %q", schemaName)
+	}
+
 	rows, err := b.conn.QueryContext(
 		ctx,
-		`SELECT name FROM main.sqlite_master WHERE type = 'table'`,
+		fmt.Sprintf(`SELECT name FROM %s.sqlite_master WHERE type = 'table'`, schemaName),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("query sqlite table names: %w", err)
+		return nil, fmt.Errorf("query sqlite table names for schema %s: %w", schemaName, err)
 	}
 	defer rows.Close()
 
@@ -669,14 +762,14 @@ func (b *Bundle) lookupMainTableNames(ctx context.Context) (map[string]struct{},
 	for rows.Next() {
 		var tableName string
 		if err := rows.Scan(&tableName); err != nil {
-			return nil, fmt.Errorf("scan sqlite table name: %w", err)
+			return nil, fmt.Errorf("scan sqlite table name for schema %s: %w", schemaName, err)
 		}
 
 		tableNames[tableName] = struct{}{}
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate sqlite table names: %w", err)
+		return nil, fmt.Errorf("iterate sqlite table names for schema %s: %w", schemaName, err)
 	}
 
 	return tableNames, nil
@@ -886,6 +979,32 @@ func cloneStringMap(values map[string]string) map[string]string {
 	cloned := make(map[string]string, len(values))
 	for key, value := range values {
 		cloned[key] = value
+	}
+
+	return cloned
+}
+
+func cloneAnyMap(values map[string]any) map[string]any {
+	if len(values) == 0 {
+		return map[string]any{}
+	}
+
+	cloned := make(map[string]any, len(values))
+	for key, value := range values {
+		cloned[key] = value
+	}
+
+	return cloned
+}
+
+func cloneMapSlice(values []map[string]any) []map[string]any {
+	if len(values) == 0 {
+		return []map[string]any{}
+	}
+
+	cloned := make([]map[string]any, 0, len(values))
+	for _, value := range values {
+		cloned = append(cloned, cloneAnyMap(value))
 	}
 
 	return cloned

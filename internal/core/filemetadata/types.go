@@ -6,16 +6,17 @@ import "context"
 
 // Request describes a file metadata lookup request.
 type Request struct {
-	Hashes                     []string
-	FileIDs                    []int64
-	OnlyReturnIdentifiers      bool
-	OnlyReturnBasicInformation bool
-	IncludeServicesObject      bool
-	IncludeBlurhash            bool
-	IncludeMilliseconds        bool
-	DetailedURLInformation     bool
-	IncludeNotes               bool
-	CreateNewFileIDs           bool
+	Hashes                       []string
+	FileIDs                      []int64
+	OnlyReturnIdentifiers        bool
+	OnlyReturnBasicInformation   bool
+	IncludeServicesObject        bool
+	IncludeLegacyServiceKeysTags bool
+	IncludeBlurhash              bool
+	IncludeMilliseconds          bool
+	DetailedURLInformation       bool
+	IncludeNotes                 bool
+	CreateNewFileIDs             bool
 }
 
 // Row is a single file metadata response row.

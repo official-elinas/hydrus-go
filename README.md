@@ -23,7 +23,7 @@ This repository currently provides the following early migration slices:
 - DB-backed read-only Hydrus client bundle opening
 - Hydrus-compatible service catalog foundation
 - access key and session key flow for the initial compatibility endpoints
-- initial DB-backed file metadata compatibility, including a first full/default non-tag slice
+- initial DB-backed file metadata compatibility, including first full/default metadata slices for both non-tag fields and a first daemon-served tags payload
 - an internal prepared-file import checkpoint that composes managed placement with serialized DB writes
 - first thin-client browse/asset endpoints for recent local files, originals, and thumbnails
 - public local-path import and trash endpoints for thin-client-driven library testing
@@ -210,28 +210,37 @@ Important current limitations:
   - `only_return_identifiers=true`
   - `only_return_basic_information=true`
   - optional `include_blurhash=true` in basic mode
-  - default/full read-only non-tag metadata for:
+  - default/full read-only metadata for:
     - `file_services`
     - `time_modified` and `time_modified_details`
     - `time_archived`
     - `is_inbox`, `is_local`, `is_trashed`, `is_deleted`
     - `known_urls`
+    - optional `detailed_known_urls` when `detailed_url_information=true`, preserving `known_urls` while adding Hydrus-like normalized/classified URL rows for the currently implemented URL-detail layer
     - `pixel_hash`
     - `ipfs_multihashes`
+    - optional `notes` when `include_notes=true`, emitted as a Hydrus-like note-name → note-text object with `{}` for files that currently have no notes
+    - `ratings`, keyed by rating service key with Hydrus-like like/numerical/inc-dec API values and unrated `null`/`0` defaults
+    - `file_viewing_statistics`, always emitted in Hydrus canvas order with float-second `viewtime`/`last_viewed_timestamp` values
     - `has_transparency`, `has_exif`, `has_human_readable_embedded_metadata`, `has_icc_profile`
+    - Hydrus-like `tags`, including per-service `storage_tags` and `display_tags` that prefer specific display cache tables when available, fall back to sibling/parent-expanded storage tags when not, and copy deleted/petitioned display entries from storage
   - `include_milliseconds=true` for the implemented full-mode timestamp fields
   - optional `include_services_object=false`
+  - optional `hide_service_keys_tags=false` to also include the older `service_keys_to_statuses_to_tags` and `service_keys_to_statuses_to_display_tags` compatibility maps, with legacy display values matching `tags[*].display_tags`
+  - `create_new_file_ids=true` when a writable bundle is available:
+    - unknown hashes get master `hash_id`/`file_id` rows allocated in `external_master.hashes`
+    - identifier mode returns the new `file_id` immediately
+    - basic/full modes still return missing rows until a real `main.files_info` record exists for that hash
+- daemon-local and staged-upload imports now backfill best-effort still-image metadata for JPEG/PNG sources so newly imported files immediately round-trip through full metadata with:
+  - `pixel_hash`
+  - `has_transparency`
 - full/default `GET /get_files/file_metadata` parity is still incomplete; this slice does not yet implement:
-  - `tags`
-  - `ratings`
-  - `file_viewing_statistics`
-  - `include_notes=true`
-  - `detailed_url_information=true`
   - exact thumbnail-dimension parity
-- `create_new_file_ids=true` is intentionally rejected in read-only mode
-- no public batch/upload import flow yet
+- import-time still-image enrichment is currently bounded to the Go JPEG/PNG decode path; animated-media/blurhash parity is still pending
+- `create_new_file_ids=true` is still rejected in read-only/degraded daemon mode
+- no public batch import flow yet
 - no public permanent delete flow yet
-- no rich public import pipeline yet beyond single local-path imports with basic hashing/sniffing
+- staged upload is still a narrow single-file flow rather than a broader Hydrus-style import pipeline
 - no search/tagging engine yet
 - no downloader/subscription/parsing system yet
 
@@ -317,9 +326,10 @@ thumbnail.
 
 The first desktop client is a thin Fyne prototype that connects to `hydrusd`.
 It is deliberately closer to `image-tests/comfyui-image-browser.png` than to the
-full Hydrus workstation UI, and it exists to validate daemon/database
-browse/add/trash behavior plus bounded selected-file original preview through a
-real local UI.
+full Hydrus workstation UI, and it exists to validate daemon/database browse,
+queued import, trash, and bounded selected-file original preview behavior
+through a real local UI while the layout gradually moves toward a more
+Hydrus-like multi-pane shell.
 
 Run it with:
 
@@ -344,6 +354,15 @@ Notes:
 
 - the desktop prototype talks to `hydrusd`; it never touches SQLite or
   `client_files` directly
+- current import testing can be driven through a single-file picker, a folder
+  picker, or drag-and-drop into the desktop window; queued items are uploaded
+  sequentially through the daemon's remote-safe upload endpoint
+- the left import pane now includes queue review controls for retrying failed
+  items, removing selected entries, and pruning finished work without touching
+  the daemon/API contract
+- the queue can be staged while disconnected and will start or resume processing
+  when a usable daemon connection is available; the same pane also exposes a
+  full `Clear Queue` reset when processing is idle
 - for cross-machine LAN testing, point the connect dialog at the daemon host
   (for example `http://<linux-host>:45869`) rather than the default localhost
   URL

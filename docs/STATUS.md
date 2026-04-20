@@ -1,6 +1,6 @@
 # hydrus-go status
 
-Last updated: 2026-04-18
+Last updated: 2026-04-19
 
 ## Completed
 
@@ -30,7 +30,26 @@ Last updated: 2026-04-18
   - known URLs, pixel hash, and IPFS multihashes
   - transparency/EXIF/human-readable/ICC metadata booleans
   - `include_milliseconds=true` support for the implemented full-mode timestamps
-- explicitly rejects `include_notes=true` and `detailed_url_information=true` in the current full-mode slice
+- expanded full/default DB-backed `file_metadata` with a first daemon-served `tags` slice:
+  - service-keyed `tags` payloads with per-service `storage_tags` and Hydrus-like `display_tags`
+  - compatibility `service_keys_to_statuses_to_tags` and `service_keys_to_statuses_to_display_tags` behind `hide_service_keys_tags=false`, with legacy display values matching `tags[*].display_tags`
+  - `display_tags` now prefer specific display cache tables when available, otherwise fall back to sibling/parent-expanded storage tags, with deleted/petitioned display copied from storage
+- expanded full/default DB-backed `file_metadata` with daemon-served `ratings` keyed by rating service key:
+  - Hydrus-like API values for local like/dislike, numerical, and inc/dec services
+  - unrated service defaults that stay aligned with Hydrus (`null` for like/numerical, `0` for inc/dec)
+- expanded full/default DB-backed `file_metadata` with daemon-served `file_viewing_statistics`:
+  - always emits media-viewer, preview-viewer, and client-api-viewer entries in Hydrus canvas order
+  - uses float-second `viewtime` and `last_viewed_timestamp` values independent of `include_milliseconds`
+- expanded full/default DB-backed `file_metadata` with optional daemon-served `notes`:
+  - emitted only when `include_notes=true`
+  - uses a Hydrus-like note-name → note-text object and returns `{}` for files with no stored notes
+- expanded full/default DB-backed `file_metadata` with optional daemon-served `detailed_known_urls`:
+  - emitted only when `detailed_url_information=true`
+  - preserves `known_urls` while adding Hydrus-like normalized/classified URL rows for the currently implemented URL-detail layer
+- added writable-bundle `create_new_file_ids=true` support for DB-backed `file_metadata`:
+  - unknown hashes now allocate master `hash_id` rows when a writable bundle is available
+  - identifier mode returns the new `file_id` immediately, while basic/full modes still return missing rows until a real `files_info` record exists
+  - read-only/degraded daemon mode still rejects this write-semantics flag
 - added an internal writable Hydrus bundle mode with a serialized `BEGIN IMMEDIATE` transaction runner
 - added a pure managed `client_files` layout package for deterministic file and thumbnail path resolution
 - added an internal managed `client_files` placement layer with lazy directory creation and no-overwrite publication
@@ -38,6 +57,7 @@ Last updated: 2026-04-18
 - added round-trip tests proving imported files become visible through the existing metadata read paths
 - added thin-client-focused browse and asset endpoints for recent local files, originals, and thumbnails
 - added public local-path import and trash endpoints built on top of separate read and write bundle connections
+- added best-effort JPEG/PNG import-time enrichment for `pixel_hash` and `has_transparency` so those full-metadata fields round-trip immediately for daemon-imported still images
 - added best-effort managed thumbnail generation for imported JPEG/PNG/GIF files, including stale-thumbnail repair on exact re-import
 - added a first Fyne desktop prototype scaffold for `hydrusd`
 - added focused daemonclient contract tests for the desktop client's auth, browse, mutation, thumbnail, and content-fetch HTTP paths
@@ -75,7 +95,7 @@ Last updated: 2026-04-18
 
 - [x] Phase 1: headless bootstrap daemon
 - [x] Phase 2: read-only DB-backed service discovery and basic metadata
-- [x] Phase 3: first default/full non-tag metadata slice
+- [x] Phase 3: first default/full metadata slices
 
 ### Phase 4: Writable Import Foundation
 
@@ -91,9 +111,10 @@ Last updated: 2026-04-18
 - [x] add public trash behavior for imported local files
 - [x] add minimal browse/list APIs so clients can load local files without hash-by-hash probing
 - [x] add thumbnail and original-file serving APIs for client preview flows
-- [ ] expand the public import surface beyond single local-path imports into richer batch/upload workflows
+- [ ] expand the public import surface beyond the current single-file local-path/staged-upload APIs into richer batch workflows
 - [x] add thumbnail generation for supported JPEG/PNG/GIF imports after placement
-- [ ] capture richer import metadata after placement
+- [x] capture richer still-image import metadata after placement
+- [ ] continue enriching imported-file metadata beyond the initial JPEG/PNG pixel-hash/transparency slice
 
 ### Phase 5: Thin Desktop Client MVP
 
@@ -119,7 +140,7 @@ Last updated: 2026-04-18
 
 ### Phase 8: Read/Query Expansion After Import + PTR
 
-- [ ] continue `GET /get_files/file_metadata` toward broader parity for tags, ratings, notes, and viewing stats
+- [ ] continue `GET /get_files/file_metadata` toward broader parity for detailed URLs, exact thumbnail sizing, and remaining edge-case payload semantics
 - [ ] begin DB-backed search and tagging read paths on top of imported and PTR-synced data
 - [ ] refine service/media-result behavior for common client workflows
 
@@ -258,3 +279,60 @@ Last updated: 2026-04-18
 - shifted the implementation on `feat/go-bootstrap-branch` to a native-Go empty-bundle initializer aligned to current hydrus-go runtime expectations
 - preserved fail-fast bundle-state handling for `ready`, `empty`, `partial`, and `non-empty without bundle` directory states
 - verified native first-start behavior with targeted bootstrap/config/app tests plus `go test ./...`
+
+### 2026-04-19 — Milestone 15: DB-backed metadata tags slice
+
+- expanded full/default `GET /get_files/file_metadata` rows with Hydrus-like `tags` objects keyed by service key
+- added DB-backed storage-tag reads from `client.mappings.db` for local/tag-repository services, combined-tag unioning when the virtual combined tag service is present, and matching display-tag payloads
+- restored the deprecated `service_keys_to_statuses_to_tags` and `service_keys_to_statuses_to_display_tags` maps behind `hide_service_keys_tags=false`, with the legacy display map matching `tags[*].display_tags`
+- kept the daemon-first boundary intact; desktop clients still receive tags only through daemon-served metadata
+- added display-tag parity that prefers specific display cache tables when available and otherwise derives display tags through sibling/parent fallback
+- verified with targeted DB/API/app/daemonclient package tests
+
+### 2026-04-19 — Milestone 16: DB-backed metadata ratings slice
+
+- expanded full/default `GET /get_files/file_metadata` rows with a `ratings` object keyed by rating service key
+- added DB-backed reads from `main.local_ratings` and `main.local_incdec_ratings` for local rating services
+- mirrored Hydrus API rating semantics for like/dislike booleans, numerical star conversion, and inc/dec integer counts
+- preserved Hydrus-like unrated defaults in the payload (`null` for like/numerical services, `0` for inc/dec services)
+- kept the daemon-first boundary intact; desktop clients still receive ratings only through daemon-served metadata
+- verified with targeted DB/API/app/hydrusdb package tests
+
+### 2026-04-19 — Milestone 17: DB-backed metadata viewing statistics slice
+
+- expanded full/default `GET /get_files/file_metadata` rows with `file_viewing_statistics`
+- added DB-backed reads from `main.file_viewing_stats` for the Hydrus API canvas types exposed in metadata
+- mirrored Hydrus canvas ordering and labels for media viewer, preview viewer, and client api viewer
+- preserved Hydrus-style float-second `viewtime` and `last_viewed_timestamp` values without tying them to `include_milliseconds`
+- synthesized zeroed default entries when a file has no stored viewing stats for one or more exposed canvas types
+
+### 2026-04-19 — Milestone 18: DB-backed metadata notes slice
+
+- expanded full/default `GET /get_files/file_metadata` rows with optional `notes` when `include_notes=true`
+- added DB-backed reads from `main.file_notes`, `external_master.labels`, and `external_master.notes`
+- mirrored Hydrus API note payload shape as a note-name → note-text object
+- preserved a safe migration fallback by returning empty notes objects when a file has no notes or when note tables are absent in a partial bundle
+- verified with targeted DB/API/app/hydrusdb package tests
+
+### 2026-04-19 — Milestone 19: DB-backed metadata detailed URL slice
+
+- expanded full/default `GET /get_files/file_metadata` rows with optional `detailed_known_urls` when `detailed_url_information=true`
+- preserved the existing sorted `known_urls` field while adding Hydrus-like normalized/classified URL rows alongside it
+- mirrored Hydrus-style unknown-url payloads for valid unrecognised full URLs and current parser-missing semantics for the seeded `otherbooru` post URL fixture
+- verified with targeted DB/API/app/hydrusdb package tests
+
+### 2026-04-19 — Milestone 20: writable metadata file-ID allocation slice
+
+- expanded DB-backed `GET /get_files/file_metadata` to honor `create_new_file_ids=true` when a writable bundle is available
+- added master-hash allocation through `external_master.hashes` so identifier-mode lookups can return newly created `file_id` values for unknown hashes
+- preserved Hydrus-like missing-row behavior for basic/full metadata until a corresponding `main.files_info` row exists
+- kept read-only/degraded daemon mode safe by continuing to reject `create_new_file_ids=true` there
+- verified with targeted DB/API/app/hydrusdb package tests
+
+### 2026-04-19 — Milestone 21: import-time still-image metadata enrichment
+
+- enriched daemon-local and staged-upload JPEG/PNG imports so newly imported files immediately round-trip through full metadata with `pixel_hash` and `has_transparency`
+- kept the core import transaction durable by treating the auxiliary rows as best-effort optional metadata that can also be backfilled on exact retry
+- tightened duplicate handling so conflicting auxiliary metadata is rejected instead of silently widening `pixel_hash_map` state
+- intentionally left animated-media and blurhash import-time enrichment for later parity work
+- verified with targeted DB/import/app tests plus a full `go test ./...` pass

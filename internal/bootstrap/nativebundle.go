@@ -53,6 +53,12 @@ func defaultCreateFreshClientBundle(ctx context.Context, dbDir string) error {
 	stagingPaths := bundleFilePaths(stagingDir)
 	targetPaths := bundleFilePaths(dbDir)
 	thumbnailRoot := clientfiles.DefaultThumbnailRoot(dbDir)
+	thumbnailRootExisted := true
+	if _, err := os.Stat(thumbnailRoot); os.IsNotExist(err) {
+		thumbnailRootExisted = false
+	} else if err != nil {
+		return fmt.Errorf("stat managed thumbnails root %q: %w", thumbnailRoot, err)
+	}
 
 	if err := createMainBootstrapDB(
 		ctx,
@@ -91,6 +97,13 @@ func defaultCreateFreshClientBundle(ctx context.Context, dbDir string) error {
 		return fmt.Errorf("create managed thumbnails root: %w", err)
 	}
 
+	if !thumbnailRootExisted {
+		markerPath := filepath.Join(dbDir, bootstrapCreatedThumbnailMarker)
+		if err := os.WriteFile(markerPath, nil, 0o644); err != nil {
+			return fmt.Errorf("record managed thumbnails bootstrap marker: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -113,6 +126,7 @@ func defaultVerifyFreshClientBundle(ctx context.Context, dbDir string) error {
 	}
 
 	mainPath := filepath.Join(dbDir, "client.db")
+	masterPath := filepath.Join(dbDir, "client.master.db")
 
 	serviceRows, err := lookupSeededServices(ctx, mainPath)
 	if err != nil {
@@ -124,11 +138,20 @@ func defaultVerifyFreshClientBundle(ctx context.Context, dbDir string) error {
 		return err
 	}
 
+	masterTableNames, err := lookupTableNames(ctx, masterPath)
+	if err != nil {
+		return err
+	}
+
 	if err := verifySeededRuntimeServices(catalog, serviceRows, mainTableNames); err != nil {
 		return err
 	}
 
 	if err := verifySeededBootstrapTables(mainTableNames); err != nil {
+		return err
+	}
+
+	if err := verifySeededMasterBootstrapTables(ctx, masterPath, masterTableNames); err != nil {
 		return err
 	}
 
@@ -191,6 +214,11 @@ func moveBootstrappedPathsIntoPlace(stagingPaths bundlePaths, targetPaths bundle
 
 	movedTargets := []string{}
 	for _, move := range moves {
+		if err := ensureBootstrapTargetMissing(move[1]); err != nil {
+			cleanupMovedTargets(movedTargets)
+			return err
+		}
+
 		if err := os.Rename(move[0], move[1]); err != nil {
 			cleanupMovedTargets(movedTargets)
 			return fmt.Errorf("move bootstrapped path into place: %w", err)
@@ -200,6 +228,18 @@ func moveBootstrappedPathsIntoPlace(stagingPaths bundlePaths, targetPaths bundle
 	}
 
 	return nil
+}
+
+func ensureBootstrapTargetMissing(path string) error {
+	_, err := os.Lstat(path)
+	switch {
+	case err == nil:
+		return fmt.Errorf("bootstrap target path %q already exists", path)
+	case os.IsNotExist(err):
+		return nil
+	default:
+		return fmt.Errorf("stat bootstrap target path %q: %w", path, err)
+	}
 }
 
 func cleanupMovedTargets(paths []string) {
@@ -384,12 +424,25 @@ func createMasterBootstrapDB(ctx context.Context, path string) error {
 		`PRAGMA user_version = 0;`,
 		`CREATE TABLE hashes (hash_id INTEGER PRIMARY KEY, hash BLOB UNIQUE);`,
 		`CREATE TABLE blurhashes (hash_id INTEGER PRIMARY KEY, blurhash TEXT);`,
+		`CREATE TABLE namespaces (namespace_id INTEGER PRIMARY KEY, namespace TEXT UNIQUE);`,
+		`CREATE TABLE subtags (subtag_id INTEGER PRIMARY KEY, subtag TEXT UNIQUE);`,
+		`CREATE TABLE tags (tag_id INTEGER PRIMARY KEY, namespace_id INTEGER, subtag_id INTEGER);`,
+		`CREATE UNIQUE INDEX tags_namespace_subtag_idx ON tags (namespace_id, subtag_id);`,
 		`CREATE TABLE url_domains (domain_id INTEGER PRIMARY KEY, domain TEXT UNIQUE);`,
 		`CREATE TABLE urls (url_id INTEGER PRIMARY KEY, domain_id INTEGER, url TEXT UNIQUE);`,
 	} {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("exec master bootstrap schema: %w", err)
 		}
+	}
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO namespaces (namespace_id, namespace) VALUES (?, ?)`,
+		1,
+		"",
+	); err != nil {
+		return fmt.Errorf("seed master bootstrap null namespace row: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -827,6 +880,64 @@ func verifySeededBootstrapTables(mainTableNames map[string]struct{}) error {
 		if _, ok := mainTableNames[requiredTable]; !ok {
 			return fmt.Errorf("required seeded table %q is missing", requiredTable)
 		}
+	}
+
+	return nil
+}
+
+func verifySeededMasterBootstrapTables(
+	ctx context.Context,
+	masterPath string,
+	masterTableNames map[string]struct{},
+) error {
+	for _, requiredTable := range []string{
+		"hashes",
+		"blurhashes",
+		"namespaces",
+		"subtags",
+		"tags",
+		"url_domains",
+		"urls",
+	} {
+		if _, ok := masterTableNames[requiredTable]; !ok {
+			return fmt.Errorf("required seeded master table %q is missing", requiredTable)
+		}
+	}
+
+	db, err := sql.Open("sqlite", masterPath)
+	if err != nil {
+		return fmt.Errorf("open master DB for verification: %w", err)
+	}
+	defer db.Close()
+
+	namespaceID, err := querySingleInt(
+		ctx,
+		db,
+		`SELECT namespace_id FROM namespaces WHERE namespace = ? LIMIT 1`,
+		"",
+	)
+	if err != nil {
+		return fmt.Errorf("read seeded null namespace row: %w", err)
+	}
+
+	if namespaceID != 1 {
+		return fmt.Errorf("seeded null namespace_id = %d, want 1", namespaceID)
+	}
+
+	indexCount, err := querySingleInt(
+		ctx,
+		db,
+		`SELECT COUNT(*)
+		FROM sqlite_master
+		WHERE type = 'index' AND name = ?`,
+		"tags_namespace_subtag_idx",
+	)
+	if err != nil {
+		return fmt.Errorf("verify master tag index: %w", err)
+	}
+
+	if indexCount != 1 {
+		return fmt.Errorf("expected master tag index %q once, found %d", "tags_namespace_subtag_idx", indexCount)
 	}
 
 	return nil
