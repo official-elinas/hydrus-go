@@ -14,6 +14,7 @@ import (
 
 	"github.com/official-elinas/hydrus-go/internal/core/filemetadata"
 	"github.com/official-elinas/hydrus-go/internal/core/services"
+	coretags "github.com/official-elinas/hydrus-go/internal/core/tags"
 	"github.com/official-elinas/hydrus-go/internal/storage/clientfiles"
 )
 
@@ -317,6 +318,75 @@ func TestBundleMetadata(t *testing.T) {
 		}
 	})
 
+	t.Run("writable identifier mode can create new file IDs for unknown hashes", func(t *testing.T) {
+		isolatedDir, isolatedFixture := createTestBundle(t)
+
+		writableBundle, err := OpenWritable(context.Background(), isolatedDir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := writableBundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		rows, err := writableBundle.GetMetadata(context.Background(), filemetadata.Request{
+			Hashes:                []string{isolatedFixture.hash2Hex, isolatedFixture.unknownHashHex, isolatedFixture.hash1Hex},
+			OnlyReturnIdentifiers: true,
+			CreateNewFileIDs:      true,
+		})
+		if err != nil {
+			t.Fatalf("GetMetadata() error = %v", err)
+		}
+
+		if got := rows[0]["file_id"]; got != int64(2) {
+			t.Fatalf("rows[0][file_id] = %v, want 2", got)
+		}
+
+		createdFileID, ok := rows[1]["file_id"].(int64)
+		if !ok {
+			t.Fatalf("rows[1][file_id] type = %T, want int64", rows[1]["file_id"])
+		}
+
+		if createdFileID <= 3 {
+			t.Fatalf("rows[1][file_id] = %d, want newly allocated ID > 3", createdFileID)
+		}
+
+		if got := rows[2]["file_id"]; got != int64(1) {
+			t.Fatalf("rows[2][file_id] = %v, want 1", got)
+		}
+
+		repeatedRows, err := writableBundle.GetMetadata(context.Background(), filemetadata.Request{
+			Hashes:                []string{isolatedFixture.unknownHashHex},
+			OnlyReturnIdentifiers: true,
+		})
+		if err != nil {
+			t.Fatalf("GetMetadata(repeated) error = %v", err)
+		}
+
+		if got := repeatedRows[0]["file_id"]; got != createdFileID {
+			t.Fatalf("repeated rows[0][file_id] = %v, want %d", got, createdFileID)
+		}
+
+		normalizedRows, err := writableBundle.GetMetadata(context.Background(), filemetadata.Request{
+			Hashes:                []string{"  " + strings.ToUpper(isolatedFixture.unknownHashHex) + "  "},
+			OnlyReturnIdentifiers: true,
+			CreateNewFileIDs:      true,
+		})
+		if err != nil {
+			t.Fatalf("GetMetadata(normalized) error = %v", err)
+		}
+
+		if got := normalizedRows[0]["hash"]; got != isolatedFixture.unknownHashHex {
+			t.Fatalf("normalized rows[0][hash] = %v, want %q", got, isolatedFixture.unknownHashHex)
+		}
+
+		if got := normalizedRows[0]["file_id"]; got != createdFileID {
+			t.Fatalf("normalized rows[0][file_id] = %v, want %d", got, createdFileID)
+		}
+	})
+
 	t.Run("basic mode reports forced filetypes and missing rows", func(t *testing.T) {
 		rows, err := bundle.GetMetadata(context.Background(), filemetadata.Request{
 			Hashes:                     []string{fixture.hash1Hex, fixture.hash2Hex, fixture.hash3Hex, fixture.unknownHashHex},
@@ -349,6 +419,55 @@ func TestBundleMetadata(t *testing.T) {
 
 		if got := rows[3]["file_id"]; got != nil {
 			t.Fatalf("rows[3][file_id] = %v, want nil", got)
+		}
+	})
+
+	t.Run("create_new_file_ids does not synthesize basic or full records", func(t *testing.T) {
+		isolatedDir, isolatedFixture := createTestBundle(t)
+
+		writableBundle, err := OpenWritable(context.Background(), isolatedDir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := writableBundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		basicRows, err := writableBundle.GetMetadata(context.Background(), filemetadata.Request{
+			Hashes:                     []string{isolatedFixture.unknownHashHex},
+			OnlyReturnBasicInformation: true,
+			CreateNewFileIDs:           true,
+		})
+		if err != nil {
+			t.Fatalf("GetMetadata(basic) error = %v", err)
+		}
+
+		if got := basicRows[0]["file_id"]; got != nil {
+			t.Fatalf("basicRows[0][file_id] = %v, want nil", got)
+		}
+
+		fullRows, err := writableBundle.GetMetadata(context.Background(), filemetadata.Request{
+			Hashes:                 []string{isolatedFixture.unknownHashHex},
+			CreateNewFileIDs:       true,
+			IncludeNotes:           true,
+			DetailedURLInformation: true,
+		})
+		if err != nil {
+			t.Fatalf("GetMetadata(full) error = %v", err)
+		}
+
+		if got := fullRows[0]["file_id"]; got != nil {
+			t.Fatalf("fullRows[0][file_id] = %v, want nil", got)
+		}
+
+		if _, ok := fullRows[0]["notes"]; ok {
+			t.Fatal("fullRows[0][notes] unexpectedly present for missing-row full metadata")
+		}
+
+		if _, ok := fullRows[0]["detailed_known_urls"]; ok {
+			t.Fatal("fullRows[0][detailed_known_urls] unexpectedly present for missing-row full metadata")
 		}
 	})
 
@@ -545,6 +664,10 @@ func TestBundleMetadata(t *testing.T) {
 			t.Fatalf("rows[0][known_urls][1] = %q, want post URL", got)
 		}
 
+		if _, ok := row1["detailed_known_urls"]; ok {
+			t.Fatal("rows[0][detailed_known_urls] unexpectedly present when detailed_url_information=false")
+		}
+
 		ipfsMultihashes, ok := row1["ipfs_multihashes"].(map[string]string)
 		if !ok {
 			t.Fatalf("rows[0][ipfs_multihashes] type = %T, want map[string]string", row1["ipfs_multihashes"])
@@ -557,6 +680,10 @@ func TestBundleMetadata(t *testing.T) {
 		fileServices, ok := row1["file_services"].(map[string]any)
 		if !ok {
 			t.Fatalf("rows[0][file_services] type = %T, want map[string]any", row1["file_services"])
+		}
+
+		if _, ok := row1["notes"]; ok {
+			t.Fatal("rows[0][notes] unexpectedly present when include_notes=false")
 		}
 
 		currentServices, ok := fileServices["current"].(map[string]map[string]any)
@@ -595,6 +722,14 @@ func TestBundleMetadata(t *testing.T) {
 
 		if got := row2["is_deleted"]; got != true {
 			t.Fatalf("rows[1][is_deleted] = %v, want true", got)
+		}
+
+		if _, ok := row2["notes"]; ok {
+			t.Fatal("rows[1][notes] unexpectedly present when include_notes=false")
+		}
+
+		if _, ok := row2["detailed_known_urls"]; ok {
+			t.Fatal("rows[1][detailed_known_urls] unexpectedly present when detailed_url_information=false")
 		}
 
 		if _, ok := row2["time_archived"]; ok {
@@ -753,6 +888,210 @@ func TestBundleMetadata(t *testing.T) {
 
 		if got := displayByService[fixture.downloaderTagsServiceKeyHex]["0"]; !slices.Equal(got, []string{"cache:downloader-current"}) {
 			t.Fatalf("rows[0][service_keys_to_statuses_to_display_tags][downloader][0] = %v, want [cache:downloader-current]", got)
+		}
+	})
+
+	t.Run("full mode can include Hydrus-like detailed known URLs", func(t *testing.T) {
+		rows, err := bundle.GetMetadata(context.Background(), filemetadata.Request{
+			Hashes:                 []string{fixture.hash1Hex, fixture.hash2Hex, fixture.unknownHashHex},
+			DetailedURLInformation: true,
+		})
+		if err != nil {
+			t.Fatalf("GetMetadata() error = %v", err)
+		}
+
+		detailed1, ok := rows[0]["detailed_known_urls"].([]map[string]any)
+		if !ok {
+			t.Fatalf("rows[0][detailed_known_urls] type = %T, want []map[string]any", rows[0]["detailed_known_urls"])
+		}
+
+		if len(detailed1) != 2 {
+			t.Fatalf("len(rows[0][detailed_known_urls]) = %d, want 2", len(detailed1))
+		}
+
+		knownURLs, ok := rows[0]["known_urls"].([]string)
+		if !ok {
+			t.Fatalf("rows[0][known_urls] type = %T, want []string", rows[0]["known_urls"])
+		}
+
+		if len(knownURLs) != 2 {
+			t.Fatalf("len(rows[0][known_urls]) = %d, want 2", len(knownURLs))
+		}
+
+		if got := knownURLs[0]; got != "https://img.weirdbooru.com/images/ab/cd/abcdblahblahblah.jpg" {
+			t.Fatalf("rows[0][known_urls][0] = %q, want weirdbooru image URL", got)
+		}
+
+		if got := knownURLs[1]; got != "https://otherbooru.org/index.php?page=post&s=view&id=123456" {
+			t.Fatalf("rows[0][known_urls][1] = %q, want original otherbooru URL order", got)
+		}
+
+		if got := detailed1[0]["normalised_url"]; got != "https://img.weirdbooru.com/images/ab/cd/abcdblahblahblah.jpg" {
+			t.Fatalf("rows[0][detailed_known_urls][0][normalised_url] = %v, want weirdbooru image URL", got)
+		}
+
+		if got := detailed1[0]["url_type"]; got != hydrusURLTypeUnknown {
+			t.Fatalf("rows[0][detailed_known_urls][0][url_type] = %v, want %d", got, hydrusURLTypeUnknown)
+		}
+
+		if got := detailed1[0]["url_type_string"]; got != "unknown url" {
+			t.Fatalf("rows[0][detailed_known_urls][0][url_type_string] = %v, want unknown url", got)
+		}
+
+		if got := detailed1[0]["match_name"]; got != "unknown url" {
+			t.Fatalf("rows[0][detailed_known_urls][0][match_name] = %v, want unknown url", got)
+		}
+
+		if got := detailed1[0]["can_parse"]; got != false {
+			t.Fatalf("rows[0][detailed_known_urls][0][can_parse] = %v, want false", got)
+		}
+
+		if got := detailed1[0]["cannot_parse_reason"]; got != "unknown url class" {
+			t.Fatalf("rows[0][detailed_known_urls][0][cannot_parse_reason] = %v, want unknown url class", got)
+		}
+
+		if got := detailed1[1]["normalised_url"]; got != "https://otherbooru.org/index.php?id=123456&page=post&s=view" {
+			t.Fatalf("rows[0][detailed_known_urls][1][normalised_url] = %v, want normalised otherbooru URL", got)
+		}
+
+		if got := detailed1[1]["url_type"]; got != hydrusURLTypePost {
+			t.Fatalf("rows[0][detailed_known_urls][1][url_type] = %v, want %d", got, hydrusURLTypePost)
+		}
+
+		if got := detailed1[1]["url_type_string"]; got != "post url" {
+			t.Fatalf("rows[0][detailed_known_urls][1][url_type_string] = %v, want post url", got)
+		}
+
+		if got := detailed1[1]["match_name"]; got != "otherbooru file page" {
+			t.Fatalf("rows[0][detailed_known_urls][1][match_name] = %v, want otherbooru file page", got)
+		}
+
+		if got := detailed1[1]["can_parse"]; got != false {
+			t.Fatalf("rows[0][detailed_known_urls][1][can_parse] = %v, want false", got)
+		}
+
+		if got := detailed1[1]["cannot_parse_reason"]; got != "Could not find a parser for otherbooru file page URL Class!" {
+			t.Fatalf("rows[0][detailed_known_urls][1][cannot_parse_reason] = %v, want parser-missing reason", got)
+		}
+
+		detailed2, ok := rows[1]["detailed_known_urls"].([]map[string]any)
+		if !ok {
+			t.Fatalf("rows[1][detailed_known_urls] type = %T, want []map[string]any", rows[1]["detailed_known_urls"])
+		}
+
+		if len(detailed2) != 1 {
+			t.Fatalf("len(rows[1][detailed_known_urls]) = %d, want 1", len(detailed2))
+		}
+
+		if got := detailed2[0]["normalised_url"]; got != "https://otherbooru.org/index.php?id=123456&page=post&s=view" {
+			t.Fatalf("rows[1][detailed_known_urls][0][normalised_url] = %v, want normalised otherbooru URL", got)
+		}
+
+		if _, ok := rows[2]["detailed_known_urls"]; ok {
+			t.Fatal("rows[2][detailed_known_urls] unexpectedly present for missing hash row")
+		}
+	})
+
+	t.Run("full mode can include Hydrus-like notes payloads", func(t *testing.T) {
+		rows, err := bundle.GetMetadata(context.Background(), filemetadata.Request{
+			Hashes:       []string{fixture.hash1Hex, fixture.hash2Hex, fixture.unknownHashHex},
+			IncludeNotes: true,
+		})
+		if err != nil {
+			t.Fatalf("GetMetadata() error = %v", err)
+		}
+
+		notes1, ok := rows[0]["notes"].(map[string]string)
+		if !ok {
+			t.Fatalf("rows[0][notes] type = %T, want map[string]string", rows[0]["notes"])
+		}
+
+		if len(notes1) != 2 {
+			t.Fatalf("len(rows[0][notes]) = %d, want 2", len(notes1))
+		}
+
+		if got := notes1["artist commentary"]; got != "hello from hydrus-go" {
+			t.Fatalf("rows[0][notes][artist commentary] = %q, want hello from hydrus-go", got)
+		}
+
+		if got := notes1["translation"]; got != "line one\nline two" {
+			t.Fatalf("rows[0][notes][translation] = %q, want line one\\nline two", got)
+		}
+
+		notes2, ok := rows[1]["notes"].(map[string]string)
+		if !ok {
+			t.Fatalf("rows[1][notes] type = %T, want map[string]string", rows[1]["notes"])
+		}
+
+		if len(notes2) != 0 {
+			t.Fatalf("len(rows[1][notes]) = %d, want 0", len(notes2))
+		}
+
+		if _, ok := rows[2]["notes"]; ok {
+			t.Fatal("rows[2][notes] unexpectedly present for missing hash row")
+		}
+	})
+
+	t.Run("full mode synthesizes empty notes when note tables are absent", func(t *testing.T) {
+		tests := []struct {
+			name     string
+			dbFile   string
+			tableSQL string
+		}{
+			{
+				name:     "main file_notes missing",
+				dbFile:   "client.db",
+				tableSQL: `DROP TABLE file_notes;`,
+			},
+			{
+				name:     "external master labels missing",
+				dbFile:   "client.master.db",
+				tableSQL: `DROP TABLE labels;`,
+			},
+			{
+				name:     "external master notes missing",
+				dbFile:   "client.master.db",
+				tableSQL: `DROP TABLE notes;`,
+			},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				isolatedDir, isolatedFixture := createTestBundle(t)
+
+				db := openSQLiteForTest(t, filepath.Join(isolatedDir, tt.dbFile))
+				mustExec(t, db, tt.tableSQL)
+				if err := db.Close(); err != nil {
+					t.Fatalf("Close() error = %v", err)
+				}
+
+				isolatedBundle, err := Open(context.Background(), isolatedDir)
+				if err != nil {
+					t.Fatalf("Open() error = %v", err)
+				}
+				defer func() {
+					if err := isolatedBundle.Close(); err != nil {
+						t.Fatalf("Close() error = %v", err)
+					}
+				}()
+
+				rows, err := isolatedBundle.GetMetadata(context.Background(), filemetadata.Request{
+					Hashes:       []string{isolatedFixture.hash1Hex},
+					IncludeNotes: true,
+				})
+				if err != nil {
+					t.Fatalf("GetMetadata() error = %v", err)
+				}
+
+				notes, ok := rows[0]["notes"].(map[string]string)
+				if !ok {
+					t.Fatalf("rows[0][notes] type = %T, want map[string]string", rows[0]["notes"])
+				}
+
+				if len(notes) != 0 {
+					t.Fatalf("len(rows[0][notes]) = %d, want 0", len(notes))
+				}
+			})
 		}
 	})
 
@@ -1101,32 +1440,6 @@ func TestBundleMetadata(t *testing.T) {
 			Hashes:                []string{fixture.hash1Hex},
 			CreateNewFileIDs:      true,
 			OnlyReturnIdentifiers: true,
-		})
-		if err == nil {
-			t.Fatal("GetMetadata() error = nil, want error")
-		}
-
-		if _, ok := err.(*filemetadata.UnsupportedError); !ok {
-			t.Fatalf("error type = %T, want *filemetadata.UnsupportedError", err)
-		}
-	})
-
-	t.Run("unsupported full mode flags are rejected", func(t *testing.T) {
-		_, err := bundle.GetMetadata(context.Background(), filemetadata.Request{
-			Hashes:                 []string{fixture.hash1Hex},
-			DetailedURLInformation: true,
-		})
-		if err == nil {
-			t.Fatal("GetMetadata() error = nil, want error")
-		}
-
-		if _, ok := err.(*filemetadata.UnsupportedError); !ok {
-			t.Fatalf("error type = %T, want *filemetadata.UnsupportedError", err)
-		}
-
-		_, err = bundle.GetMetadata(context.Background(), filemetadata.Request{
-			Hashes:       []string{fixture.hash1Hex},
-			IncludeNotes: true,
 		})
 		if err == nil {
 			t.Fatal("GetMetadata() error = nil, want error")
@@ -1557,6 +1870,7 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 	mustExec(t, mainDB, `CREATE TABLE has_icc_profile (hash_id INTEGER PRIMARY KEY);`)
 	mustExec(t, mainDB, `CREATE TABLE local_ratings (service_id INTEGER, hash_id INTEGER, rating REAL, PRIMARY KEY (service_id, hash_id));`)
 	mustExec(t, mainDB, `CREATE TABLE local_incdec_ratings (service_id INTEGER, hash_id INTEGER, rating INTEGER, PRIMARY KEY (service_id, hash_id));`)
+	mustExec(t, mainDB, `CREATE TABLE file_notes (hash_id INTEGER, name_id INTEGER, note_id INTEGER, PRIMARY KEY (hash_id, name_id));`)
 	mustExec(t, mainDB, `CREATE TABLE file_viewing_stats (hash_id INTEGER, canvas_type INTEGER, last_viewed_timestamp_ms INTEGER, views INTEGER, viewtime_ms INTEGER, PRIMARY KEY (hash_id, canvas_type));`)
 	mustExec(t, mainDB, `CREATE TABLE current_client_files_locations (location_id INTEGER PRIMARY KEY, location TEXT UNIQUE);`)
 	mustExec(t, mainDB, `CREATE TABLE client_files_subfolders (prefix TEXT, location_id INTEGER, PRIMARY KEY (prefix, location_id));`)
@@ -1664,6 +1978,13 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 	mustExec(
 		t,
 		mainDB,
+		`INSERT INTO file_notes (hash_id, name_id, note_id) VALUES (?, ?, ?), (?, ?, ?);`,
+		1, 1, 1,
+		1, 2, 2,
+	)
+	mustExec(
+		t,
+		mainDB,
 		`INSERT INTO file_viewing_stats (hash_id, canvas_type, last_viewed_timestamp_ms, views, viewtime_ms) VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?), (?, ?, ?, ?, ?);`,
 		1, 0, 12345, 7, 6543,
 		1, 1, 23456, 3, 2100,
@@ -1725,9 +2046,29 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 
 	mustExec(t, masterDB, `CREATE TABLE hashes (hash_id INTEGER PRIMARY KEY, hash BLOB UNIQUE);`)
 	mustExec(t, masterDB, `CREATE TABLE blurhashes (hash_id INTEGER PRIMARY KEY, blurhash TEXT);`)
-	mustExec(t, masterDB, `CREATE TABLE tags (tag_id INTEGER PRIMARY KEY, tag TEXT UNIQUE);`)
+	mustExec(t, masterDB, `CREATE TABLE labels (label_id INTEGER PRIMARY KEY, label TEXT UNIQUE);`)
+	mustExec(t, masterDB, `CREATE TABLE notes (note_id INTEGER PRIMARY KEY, note TEXT UNIQUE);`)
 	mustExec(t, masterDB, `CREATE TABLE url_domains (domain_id INTEGER PRIMARY KEY, domain TEXT UNIQUE);`)
 	mustExec(t, masterDB, `CREATE TABLE urls (url_id INTEGER PRIMARY KEY, domain_id INTEGER, url TEXT UNIQUE);`)
+	seedMasterTags(t, masterDB, map[int64]string{
+		1:  "creator:alice",
+		2:  "series:zeta",
+		3:  "old:tag",
+		4:  "character:bob",
+		5:  "pending:review",
+		6:  "petitioned:cleanup",
+		7:  "character:robert",
+		8:  "group:cast",
+		9:  "workflow:review",
+		10: "meta:pending",
+		11: "history:retired",
+		12: "history:archive",
+		13: "cache:downloader-current",
+		14: "cache:downloader-pending",
+		15: "storage:downloader-current",
+		16: "storage:downloader-pending",
+		17: "storage:downloader-deleted",
+	})
 	mustExec(
 		t,
 		masterDB,
@@ -1746,24 +2087,16 @@ func createTestBundle(t *testing.T) (string, testFixture) {
 	mustExec(
 		t,
 		masterDB,
-		`INSERT INTO tags (tag_id, tag) VALUES (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?), (?, ?);`,
-		1, "creator:alice",
-		2, "series:zeta",
-		3, "old:tag",
-		4, "character:bob",
-		5, "pending:review",
-		6, "petitioned:cleanup",
-		7, "character:robert",
-		8, "group:cast",
-		9, "workflow:review",
-		10, "meta:pending",
-		11, "history:retired",
-		12, "history:archive",
-		13, "cache:downloader-current",
-		14, "cache:downloader-pending",
-		15, "storage:downloader-current",
-		16, "storage:downloader-pending",
-		17, "storage:downloader-deleted",
+		`INSERT INTO labels (label_id, label) VALUES (?, ?), (?, ?);`,
+		1, "artist commentary",
+		2, "translation",
+	)
+	mustExec(
+		t,
+		masterDB,
+		`INSERT INTO notes (note_id, note) VALUES (?, ?), (?, ?);`,
+		1, "hello from hydrus-go",
+		2, "line one\nline two",
 	)
 	mustExec(
 		t,
@@ -2012,6 +2345,79 @@ func createEmptySQLiteFile(t *testing.T, path string) {
 	mustExec(t, db, `PRAGMA user_version = 0;`)
 	if err := db.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
+	}
+}
+
+func seedMasterTags(t *testing.T, db *sql.DB, tagsByID map[int64]string) {
+	t.Helper()
+
+	mustExec(t, db, `CREATE TABLE namespaces (namespace_id INTEGER PRIMARY KEY, namespace TEXT UNIQUE);`)
+	mustExec(t, db, `CREATE TABLE subtags (subtag_id INTEGER PRIMARY KEY, subtag TEXT UNIQUE);`)
+	mustExec(t, db, `CREATE TABLE tags (tag_id INTEGER PRIMARY KEY, namespace_id INTEGER, subtag_id INTEGER);`)
+	mustExec(t, db, `CREATE UNIQUE INDEX tags_namespace_subtag_idx ON tags (namespace_id, subtag_id);`)
+	mustExec(
+		t,
+		db,
+		`INSERT INTO namespaces (namespace_id, namespace) VALUES (?, ?);`,
+		nullNamespaceID,
+		"",
+	)
+
+	namespaceIDs := map[string]int64{"": nullNamespaceID}
+	subtagIDs := map[string]int64{}
+	nextNamespaceID := nullNamespaceID + 1
+	var nextSubtagID int64 = 1
+
+	tagIDs := make([]int64, 0, len(tagsByID))
+	for tagID := range tagsByID {
+		tagIDs = append(tagIDs, tagID)
+	}
+	slices.Sort(tagIDs)
+
+	for _, tagID := range tagIDs {
+		cleanTag := coretags.Clean(tagsByID[tagID])
+		if err := coretags.CheckNotEmpty(cleanTag); err != nil {
+			t.Fatalf("CheckNotEmpty(%q) error = %v", cleanTag, err)
+		}
+
+		namespace, subtag := coretags.Split(cleanTag)
+
+		namespaceID, ok := namespaceIDs[namespace]
+		if !ok {
+			namespaceID = nextNamespaceID
+			nextNamespaceID++
+			namespaceIDs[namespace] = namespaceID
+			mustExec(
+				t,
+				db,
+				`INSERT INTO namespaces (namespace_id, namespace) VALUES (?, ?);`,
+				namespaceID,
+				namespace,
+			)
+		}
+
+		subtagID, ok := subtagIDs[subtag]
+		if !ok {
+			subtagID = nextSubtagID
+			nextSubtagID++
+			subtagIDs[subtag] = subtagID
+			mustExec(
+				t,
+				db,
+				`INSERT INTO subtags (subtag_id, subtag) VALUES (?, ?);`,
+				subtagID,
+				subtag,
+			)
+		}
+
+		mustExec(
+			t,
+			db,
+			`INSERT INTO tags (tag_id, namespace_id, subtag_id) VALUES (?, ?, ?);`,
+			tagID,
+			namespaceID,
+			subtagID,
+		)
 	}
 }
 

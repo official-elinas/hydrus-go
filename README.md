@@ -216,8 +216,10 @@ Important current limitations:
     - `time_archived`
     - `is_inbox`, `is_local`, `is_trashed`, `is_deleted`
     - `known_urls`
+    - optional `detailed_known_urls` when `detailed_url_information=true`, preserving `known_urls` while adding Hydrus-like normalized/classified URL rows for the currently implemented URL-detail layer
     - `pixel_hash`
     - `ipfs_multihashes`
+    - optional `notes` when `include_notes=true`, emitted as a Hydrus-like note-name → note-text object with `{}` for files that currently have no notes
     - `ratings`, keyed by rating service key with Hydrus-like like/numerical/inc-dec API values and unrated `null`/`0` defaults
     - `file_viewing_statistics`, always emitted in Hydrus canvas order with float-second `viewtime`/`last_viewed_timestamp` values
     - `has_transparency`, `has_exif`, `has_human_readable_embedded_metadata`, `has_icc_profile`
@@ -225,11 +227,13 @@ Important current limitations:
   - `include_milliseconds=true` for the implemented full-mode timestamp fields
   - optional `include_services_object=false`
   - optional `hide_service_keys_tags=false` to also include the older `service_keys_to_statuses_to_tags` and `service_keys_to_statuses_to_display_tags` compatibility maps, with legacy display values matching `tags[*].display_tags`
+  - `create_new_file_ids=true` when a writable bundle is available:
+    - unknown hashes get master `hash_id`/`file_id` rows allocated in `external_master.hashes`
+    - identifier mode returns the new `file_id` immediately
+    - basic/full modes still return missing rows until a real `main.files_info` record exists for that hash
 - full/default `GET /get_files/file_metadata` parity is still incomplete; this slice does not yet implement:
-  - `include_notes=true`
-  - `detailed_url_information=true`
   - exact thumbnail-dimension parity
-- `create_new_file_ids=true` is intentionally rejected in read-only mode
+- `create_new_file_ids=true` is still rejected in read-only/degraded daemon mode
 - no public batch/upload import flow yet
 - no public permanent delete flow yet
 - no rich public import pipeline yet beyond single local-path imports with basic hashing/sniffing

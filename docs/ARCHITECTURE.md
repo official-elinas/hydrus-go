@@ -99,10 +99,11 @@ The current full/default metadata subset includes:
 - aggregate/local/domain modified timestamps
 - archived/inbox/local/trash/deleted state
 - known URLs
+- optional detailed known-URL rows when `detailed_url_information=true`
 - pixel hash
 - IPFS multihashes
+- optional notes objects when `include_notes=true`
 - transparency/EXIF/human-readable/ICC metadata flags
-- explicit rejection of `include_notes=true` and `detailed_url_information=true`
 
 The current daemon startup flow for bundle-backed mode is:
 
@@ -191,11 +192,12 @@ The runtime storage/DB model for this phase is:
 
 - one read bundle opened with `PRAGMA query_only = ON`
 - one separate writable bundle used for public import and trash mutations when writable access is available
-- browse/metadata/asset handlers talk to the read bundle so they only observe committed state
+- browse/asset handlers talk to the read bundle so they only observe committed state
+- metadata reads also use the read bundle by default, but `create_new_file_ids=true` requests are routed through the writable bundle when available so missing master hash IDs can be allocated without widening general read traffic
 
 The deeper Hydrus client-core behaviors are still pending:
 
-- full media-result metadata parity, especially tags/ratings/viewing stats/notes/detailed URL info
+- full media-result metadata parity, especially exact thumbnail sizing semantics and remaining edge-case behavior around metadata payloads
 - broader DB-backed import orchestration beyond the single local-path slice, especially richer upload/batch flows and richer import metadata capture
 - thumbnail generation for additional media types beyond the current JPEG/PNG/GIF still-image subset
 - file serving and broader managed file-store lifecycle behavior

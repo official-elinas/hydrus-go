@@ -109,7 +109,7 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 		}
 
 		serviceProvider = readBundle
-		metadataStore = readBundle
+		metadataStore = newMetadataStoreRouter(readBundle, writeBundle)
 		browseStore = readBundle
 		assetStore = readBundle
 	}

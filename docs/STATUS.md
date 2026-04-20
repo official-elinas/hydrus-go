@@ -40,7 +40,16 @@ Last updated: 2026-04-19
 - expanded full/default DB-backed `file_metadata` with daemon-served `file_viewing_statistics`:
   - always emits media-viewer, preview-viewer, and client-api-viewer entries in Hydrus canvas order
   - uses float-second `viewtime` and `last_viewed_timestamp` values independent of `include_milliseconds`
-- explicitly rejects `include_notes=true` and `detailed_url_information=true` in the current full-mode slice
+- expanded full/default DB-backed `file_metadata` with optional daemon-served `notes`:
+  - emitted only when `include_notes=true`
+  - uses a Hydrus-like note-name → note-text object and returns `{}` for files with no stored notes
+- expanded full/default DB-backed `file_metadata` with optional daemon-served `detailed_known_urls`:
+  - emitted only when `detailed_url_information=true`
+  - preserves `known_urls` while adding Hydrus-like normalized/classified URL rows for the currently implemented URL-detail layer
+- added writable-bundle `create_new_file_ids=true` support for DB-backed `file_metadata`:
+  - unknown hashes now allocate master `hash_id` rows when a writable bundle is available
+  - identifier mode returns the new `file_id` immediately, while basic/full modes still return missing rows until a real `files_info` record exists
+  - read-only/degraded daemon mode still rejects this write-semantics flag
 - added an internal writable Hydrus bundle mode with a serialized `BEGIN IMMEDIATE` transaction runner
 - added a pure managed `client_files` layout package for deterministic file and thumbnail path resolution
 - added an internal managed `client_files` placement layer with lazy directory creation and no-overwrite publication
@@ -129,7 +138,7 @@ Last updated: 2026-04-19
 
 ### Phase 8: Read/Query Expansion After Import + PTR
 
-- [ ] continue `GET /get_files/file_metadata` toward broader parity for notes, detailed URLs, and remaining edge-case payload semantics
+- [ ] continue `GET /get_files/file_metadata` toward broader parity for detailed URLs, exact thumbnail sizing, and remaining edge-case payload semantics
 - [ ] begin DB-backed search and tagging read paths on top of imported and PTR-synced data
 - [ ] refine service/media-result behavior for common client workflows
 
@@ -294,3 +303,26 @@ Last updated: 2026-04-19
 - mirrored Hydrus canvas ordering and labels for media viewer, preview viewer, and client api viewer
 - preserved Hydrus-style float-second `viewtime` and `last_viewed_timestamp` values without tying them to `include_milliseconds`
 - synthesized zeroed default entries when a file has no stored viewing stats for one or more exposed canvas types
+
+### 2026-04-19 — Milestone 18: DB-backed metadata notes slice
+
+- expanded full/default `GET /get_files/file_metadata` rows with optional `notes` when `include_notes=true`
+- added DB-backed reads from `main.file_notes`, `external_master.labels`, and `external_master.notes`
+- mirrored Hydrus API note payload shape as a note-name → note-text object
+- preserved a safe migration fallback by returning empty notes objects when a file has no notes or when note tables are absent in a partial bundle
+- verified with targeted DB/API/app/hydrusdb package tests
+
+### 2026-04-19 — Milestone 19: DB-backed metadata detailed URL slice
+
+- expanded full/default `GET /get_files/file_metadata` rows with optional `detailed_known_urls` when `detailed_url_information=true`
+- preserved the existing sorted `known_urls` field while adding Hydrus-like normalized/classified URL rows alongside it
+- mirrored Hydrus-style unknown-url payloads for valid unrecognised full URLs and current parser-missing semantics for the seeded `otherbooru` post URL fixture
+- verified with targeted DB/API/app/hydrusdb package tests
+
+### 2026-04-19 — Milestone 20: writable metadata file-ID allocation slice
+
+- expanded DB-backed `GET /get_files/file_metadata` to honor `create_new_file_ids=true` when a writable bundle is available
+- added master-hash allocation through `external_master.hashes` so identifier-mode lookups can return newly created `file_id` values for unknown hashes
+- preserved Hydrus-like missing-row behavior for basic/full metadata until a corresponding `main.files_info` row exists
+- kept read-only/degraded daemon mode safe by continuing to reject `create_new_file_ids=true` there
+- verified with targeted DB/API/app/hydrusdb package tests

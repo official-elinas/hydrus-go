@@ -37,6 +37,8 @@ func (b *Bundle) fullMetadataRows(
 	ctx context.Context,
 	orderedHashes []string,
 	hashesToFileIDs map[string]int64,
+	includeDetailedURLInformation bool,
+	includeNotes bool,
 	includeLegacyServiceKeysTags bool,
 	includeMilliseconds bool,
 ) ([]filemetadata.Row, error) {
@@ -128,6 +130,11 @@ func (b *Bundle) fullMetadataRows(
 		return nil, err
 	}
 
+	detailedKnownURLs := map[int64][]map[string]any{}
+	if includeDetailedURLInformation {
+		detailedKnownURLs = buildDetailedKnownURLsByHashID(knownURLs)
+	}
+
 	currentFileServices, deletedFileServices, err := b.lookupFileServiceMemberships(ctx, knownFileIDs)
 	if err != nil {
 		return nil, err
@@ -136,6 +143,14 @@ func (b *Bundle) fullMetadataRows(
 	ipfsMultihashes, err := b.lookupIPFSMultihashes(ctx, knownFileIDs)
 	if err != nil {
 		return nil, err
+	}
+
+	notesByHashID := map[int64]map[string]string{}
+	if includeNotes {
+		notesByHashID, err = b.lookupFileNotes(ctx, knownFileIDs)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	ratingsByHashID, err := b.lookupFileRatings(ctx, knownFileIDs)
@@ -174,12 +189,16 @@ func (b *Bundle) fullMetadataRows(
 			fileModifiedTimestamps,
 			domainModifiedTimestamps,
 			knownURLs,
+			detailedKnownURLs,
 			currentFileServices,
 			deletedFileServices,
 			ipfsMultihashes,
+			notesByHashID,
 			ratingsByHashID,
 			viewingStatsByHashID,
 			tagsByHashID,
+			includeDetailedURLInformation,
+			includeNotes,
 			includeLegacyServiceKeysTags,
 		))
 	}
@@ -200,12 +219,16 @@ func buildFullMetadataRow(
 	fileModifiedTimestamps map[int64]int64,
 	domainModifiedTimestamps map[int64][]domainModifiedTimestamp,
 	knownURLs map[int64][]string,
+	detailedKnownURLs map[int64][]map[string]any,
 	currentFileServices map[int64][]currentFileServiceMembership,
 	deletedFileServices map[int64][]deletedFileServiceMembership,
 	ipfsMultihashes map[int64]map[string]string,
+	notesByHashID map[int64]map[string]string,
 	ratingsByHashID map[int64]map[string]any,
 	viewingStatsByHashID map[int64][]map[string]any,
 	tagsByHashID map[int64]metadataTagsPayload,
+	includeDetailedURLInformation bool,
+	includeNotes bool,
 	includeLegacyServiceKeysTags bool,
 ) filemetadata.Row {
 	row := buildBasicRow(record, true)
@@ -248,7 +271,13 @@ func buildFullMetadataRow(
 	row["has_human_readable_embedded_metadata"] = containsHashID(humanReadableHashIDs, hashID)
 	row["has_icc_profile"] = containsHashID(iccProfileHashIDs, hashID)
 	row["known_urls"] = cloneStringSlice(knownURLs[hashID])
+	if includeDetailedURLInformation {
+		row["detailed_known_urls"] = cloneMapSlice(detailedKnownURLs[hashID])
+	}
 	row["ipfs_multihashes"] = cloneStringMap(ipfsMultihashes[hashID])
+	if includeNotes {
+		row["notes"] = cloneStringMap(notesByHashID[hashID])
+	}
 
 	ratings := ratingsByHashID[hashID]
 	if ratings == nil {

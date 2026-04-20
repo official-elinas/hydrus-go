@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -60,6 +61,32 @@ func TestEnsureFreshClientBundle_EmptyDirRequiresOptIn(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "empty") {
 		t.Fatalf("EnsureFreshClientBundle() error = %v, want empty-dir guidance", err)
+	}
+
+	if !strings.Contains(err.Error(), "HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP") {
+		t.Fatalf("EnsureFreshClientBundle() error = %v, want env guidance", err)
+	}
+
+	if !strings.Contains(err.Error(), "--bootstrap-fresh-client") {
+		t.Fatalf("EnsureFreshClientBundle() error = %v, want runtime flag guidance", err)
+	}
+}
+
+func TestEnsureFreshClientBundle_MissingDirRequiresOptIn(t *testing.T) {
+	parentDir := t.TempDir()
+	dbDir := filepath.Join(parentDir, "missing-bundle")
+
+	_, err := EnsureFreshClientBundle(context.Background(), Options{
+		DBDir:   dbDir,
+		Enabled: false,
+		Timeout: time.Minute,
+	})
+	if err == nil {
+		t.Fatal("EnsureFreshClientBundle() error = nil, want error")
+	}
+
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("EnsureFreshClientBundle() error = %v, want missing-dir guidance", err)
 	}
 
 	if !strings.Contains(err.Error(), "HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP") {
@@ -191,6 +218,105 @@ func TestEnsureFreshClientBundle_PropagatesRunnerFailure(t *testing.T) {
 
 	if !strings.Contains(err.Error(), "forced native bootstrap failure") {
 		t.Fatalf("EnsureFreshClientBundle() error = %v, want runner failure", err)
+	}
+}
+
+func TestEnsureFreshClientBundle_CleansUpFailedCreateArtifacts(t *testing.T) {
+	dbDir := t.TempDir()
+
+	originalCreate := createFreshClientBundle
+	defer func() {
+		createFreshClientBundle = originalCreate
+	}()
+
+	createFreshClientBundle = func(_ context.Context, dir string) error {
+		for _, filename := range append(requiredBundleFiles, "client.temp.db") {
+			mustWriteFile(t, filepath.Join(dir, filename))
+		}
+
+		if err := os.MkdirAll(filepath.Join(dir, "client_files"), 0o755); err != nil {
+			t.Fatalf("MkdirAll(client_files) error = %v", err)
+		}
+
+		return errors.New("forced native bootstrap failure after writing artifacts")
+	}
+
+	_, err := EnsureFreshClientBundle(context.Background(), Options{
+		DBDir:   dbDir,
+		Enabled: true,
+		Timeout: time.Minute,
+	})
+	if err == nil {
+		t.Fatal("EnsureFreshClientBundle() error = nil, want error")
+	}
+
+	if !strings.Contains(err.Error(), "forced native bootstrap failure after writing artifacts") {
+		t.Fatalf("EnsureFreshClientBundle() error = %v, want runner failure", err)
+	}
+
+	observed, inspectErr := inspectBundleDir(dbDir)
+	if inspectErr != nil {
+		t.Fatalf("inspectBundleDir() error = %v", inspectErr)
+	}
+
+	if observed.State != StateEmpty {
+		t.Fatalf("observed.State = %q, want %q after cleanup", observed.State, StateEmpty)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(dbDir, "client.temp.db")); !os.IsNotExist(statErr) {
+		t.Fatalf("client.temp.db stat error = %v, want not exists", statErr)
+	}
+
+	if _, statErr := os.Stat(filepath.Join(dbDir, "client_files")); !os.IsNotExist(statErr) {
+		t.Fatalf("client_files stat error = %v, want not exists", statErr)
+	}
+}
+
+func TestEnsureFreshClientBundle_ReclaimsStaleBootstrapLock(t *testing.T) {
+	dbDir := t.TempDir()
+	lockPath := filepath.Join(dbDir, bootstrapLockFilename)
+	mustWriteFile(t, lockPath)
+
+	staleAt := time.Now().Add(-bootstrapLockStaleAfter - time.Minute)
+	if err := os.Chtimes(lockPath, staleAt, staleAt); err != nil {
+		t.Fatalf("Chtimes(%q) error = %v", lockPath, err)
+	}
+
+	originalCreate := createFreshClientBundle
+	originalVerify := verifyFreshClientBundle
+	defer func() {
+		createFreshClientBundle = originalCreate
+		verifyFreshClientBundle = originalVerify
+	}()
+
+	createFreshClientBundle = func(_ context.Context, dir string) error {
+		for _, filename := range append(requiredBundleFiles, "client.temp.db") {
+			mustWriteFile(t, filepath.Join(dir, filename))
+		}
+
+		if err := os.MkdirAll(filepath.Join(dir, "client_files"), 0o755); err != nil {
+			return err
+		}
+
+		return nil
+	}
+	verifyFreshClientBundle = func(context.Context, string) error { return nil }
+
+	result, err := EnsureFreshClientBundle(context.Background(), Options{
+		DBDir:   dbDir,
+		Enabled: true,
+		Timeout: time.Minute,
+	})
+	if err != nil {
+		t.Fatalf("EnsureFreshClientBundle() error = %v", err)
+	}
+
+	if !result.Bootstrapped {
+		t.Fatal("result.Bootstrapped = false, want true")
+	}
+
+	if _, statErr := os.Stat(lockPath); !os.IsNotExist(statErr) {
+		t.Fatalf("lockPath stat error = %v, want not exists", statErr)
 	}
 }
 
@@ -385,6 +511,58 @@ func TestEnsureFreshClientBundle_NativeBootstrapCreatesUsableBundle(t *testing.T
 	}
 	defer mainDB.Close()
 
+	masterPath := filepath.Join(dbDir, "client.master.db")
+	masterTableNames, err := lookupTableNames(context.Background(), masterPath)
+	if err != nil {
+		t.Fatalf("lookupTableNames(client.master.db) error = %v", err)
+	}
+
+	for _, requiredTable := range []string{
+		"hashes",
+		"blurhashes",
+		"namespaces",
+		"subtags",
+		"tags",
+		"url_domains",
+		"urls",
+	} {
+		if _, ok := masterTableNames[requiredTable]; !ok {
+			t.Fatalf("required master table %q is missing", requiredTable)
+		}
+	}
+
+	masterDB, err := sql.Open("sqlite", masterPath)
+	if err != nil {
+		t.Fatalf("sql.Open(client.master.db) error = %v", err)
+	}
+	defer masterDB.Close()
+
+	var namespaceID int
+	if err := masterDB.QueryRow(
+		`SELECT namespace_id FROM namespaces WHERE namespace = ? LIMIT 1`,
+		"",
+	).Scan(&namespaceID); err != nil {
+		t.Fatalf("QueryRow(null namespace) error = %v", err)
+	}
+
+	if namespaceID != 1 {
+		t.Fatalf("null namespace_id = %d, want 1", namespaceID)
+	}
+
+	var indexCount int
+	if err := masterDB.QueryRow(
+		`SELECT COUNT(*)
+		FROM sqlite_master
+		WHERE type = 'index' AND name = ?`,
+		"tags_namespace_subtag_idx",
+	).Scan(&indexCount); err != nil {
+		t.Fatalf("QueryRow(master tag index) error = %v", err)
+	}
+
+	if indexCount != 1 {
+		t.Fatalf("indexCount = %d, want 1 for tags_namespace_subtag_idx", indexCount)
+	}
+
 	var version int
 	if err := mainDB.QueryRow(`SELECT version FROM version LIMIT 1`).Scan(&version); err != nil {
 		t.Fatalf("QueryRow(version) error = %v", err)
@@ -471,6 +649,25 @@ func TestEnsureFreshClientBundle_NativeBootstrapCreatesUsableBundle(t *testing.T
 		}
 	}
 
+	writeBundle, err := hydrusdb.OpenWritable(context.Background(), dbDir)
+	if err != nil {
+		t.Fatalf("hydrusdb.OpenWritable() error = %v", err)
+	}
+	defer func() {
+		if closeErr := writeBundle.Close(); closeErr != nil {
+			t.Fatalf("writeBundle.Close() error = %v", closeErr)
+		}
+	}()
+
+	tagID, err := writeBundle.EnsureTagID(context.Background(), "creator:alice")
+	if err != nil {
+		t.Fatalf("writeBundle.EnsureTagID() error = %v", err)
+	}
+
+	if tagID <= 0 {
+		t.Fatalf("tagID = %d, want > 0", tagID)
+	}
+
 	var granularity int
 	if err := mainDB.QueryRow(`SELECT granularity FROM current_storage_granularity LIMIT 1`).Scan(&granularity); err != nil {
 		t.Fatalf("QueryRow(storage granularity) error = %v", err)
@@ -551,6 +748,110 @@ func TestEnsureFreshClientBundle_NativeBootstrapCreatesUsableBundle(t *testing.T
 			thumbnailOverrideLocation,
 			storedThumbnailRoot,
 		)
+	}
+}
+
+func TestEnsureFreshClientBundle_SerializesConcurrentBootstrapAttempts(t *testing.T) {
+	dbDir := t.TempDir()
+
+	originalCreate := createFreshClientBundle
+	originalVerify := verifyFreshClientBundle
+	defer func() {
+		createFreshClientBundle = originalCreate
+		verifyFreshClientBundle = originalVerify
+	}()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+
+	var (
+		mu    sync.Mutex
+		calls int
+	)
+
+	createFreshClientBundle = func(_ context.Context, dir string) error {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+
+		close(started)
+		<-release
+
+		for _, filename := range append(requiredBundleFiles, "client.temp.db") {
+			mustWriteFile(t, filepath.Join(dir, filename))
+		}
+
+		if err := os.MkdirAll(filepath.Join(dir, "client_files"), 0o755); err != nil {
+			return err
+		}
+
+		return nil
+	}
+	verifyFreshClientBundle = func(context.Context, string) error { return nil }
+
+	type resultWithError struct {
+		result Result
+		err    error
+	}
+
+	firstDone := make(chan resultWithError, 1)
+	secondDone := make(chan resultWithError, 1)
+
+	go func() {
+		result, err := EnsureFreshClientBundle(context.Background(), Options{
+			DBDir:   dbDir,
+			Enabled: true,
+			Timeout: time.Minute,
+		})
+		firstDone <- resultWithError{result: result, err: err}
+	}()
+
+	<-started
+
+	go func() {
+		result, err := EnsureFreshClientBundle(context.Background(), Options{
+			DBDir:   dbDir,
+			Enabled: true,
+			Timeout: time.Minute,
+		})
+		secondDone <- resultWithError{result: result, err: err}
+	}()
+
+	select {
+	case result := <-secondDone:
+		t.Fatalf("second EnsureFreshClientBundle() returned early with %+v, want it blocked on the bootstrap lock", result)
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(release)
+
+	firstResult := <-firstDone
+	if firstResult.err != nil {
+		t.Fatalf("first EnsureFreshClientBundle() error = %v", firstResult.err)
+	}
+
+	secondResult := <-secondDone
+	if secondResult.err != nil {
+		t.Fatalf("second EnsureFreshClientBundle() error = %v", secondResult.err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	if calls != 1 {
+		t.Fatalf("createFreshClientBundle calls = %d, want 1", calls)
+	}
+
+	if !firstResult.result.Bootstrapped {
+		t.Fatal("firstResult.Bootstrapped = false, want true")
+	}
+
+	if secondResult.result.Bootstrapped {
+		t.Fatal("secondResult.Bootstrapped = true, want false")
+	}
+
+	if secondResult.result.State != StateReady {
+		t.Fatalf("secondResult.State = %q, want %q", secondResult.result.State, StateReady)
 	}
 }
 

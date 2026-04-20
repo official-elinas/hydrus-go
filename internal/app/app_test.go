@@ -14,6 +14,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -319,6 +320,114 @@ func TestNew_AllowsReadOnlyBundleWhenWritableOpenFails(t *testing.T) {
 
 	if importRR.Code != http.StatusForbidden {
 		t.Fatalf("trash status = %d, want %d", importRR.Code, http.StatusForbidden)
+	}
+
+	createReq := httptest.NewRequest(
+		http.MethodGet,
+		"/get_files/file_metadata?hashes=%5B%22"+strings.Repeat("d", 64)+"%22%5D&only_return_identifiers=true&create_new_file_ids=true&include_services_object=false",
+		nil,
+	)
+	createReq.Header.Set("Hydrus-Client-API-Access-Key", application.access.AccessKey())
+	createRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(createRR, createReq)
+
+	if createRR.Code != http.StatusNotImplemented {
+		t.Fatalf("create_new_file_ids status = %d, want %d", createRR.Code, http.StatusNotImplemented)
+	}
+}
+
+func TestApp_CreateNewFileIDsRoundTrip(t *testing.T) {
+	dbDir := createThinClientBundle(t)
+	unknownHash := strings.Repeat("d", 64)
+
+	cfg := config.Config{
+		ListenAddr:               "127.0.0.1:0",
+		DBDir:                    dbDir,
+		AccessKey:                strings.Repeat("a", 64),
+		AccessName:               "test-client",
+		LogLevel:                 "error",
+		ShutdownTimeout:          time.Second,
+		AllowNonLocalConnections: false,
+		EnableCORS:               false,
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	application, err := New(context.Background(), cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer application.closeResources()
+
+	createReq := httptest.NewRequest(
+		http.MethodGet,
+		"/get_files/file_metadata?hashes="+url.QueryEscape(`["`+unknownHash+`"]`)+"&only_return_identifiers=true&create_new_file_ids=true&include_services_object=false",
+		nil,
+	)
+	createReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	createRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(createRR, createReq)
+
+	if createRR.Code != http.StatusOK {
+		t.Fatalf("create_new_file_ids status = %d, want %d", createRR.Code, http.StatusOK)
+	}
+
+	var createPayload map[string]any
+	decodeAppJSON(t, createRR.Body.Bytes(), &createPayload)
+	createRows := createPayload["metadata"].([]any)
+	createRow := createRows[0].(map[string]any)
+	createdFileID := int64(createRow["file_id"].(float64))
+	if createdFileID <= 0 {
+		t.Fatalf("created file_id = %d, want > 0", createdFileID)
+	}
+
+	if createRow["hash"] != unknownHash {
+		t.Fatalf("created hash = %v, want %q", createRow["hash"], unknownHash)
+	}
+
+	repeatedReq := httptest.NewRequest(
+		http.MethodGet,
+		"/get_files/file_metadata?hashes="+url.QueryEscape(`["`+unknownHash+`"]`)+"&only_return_identifiers=true&include_services_object=false",
+		nil,
+	)
+	repeatedReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	repeatedRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(repeatedRR, repeatedReq)
+
+	if repeatedRR.Code != http.StatusOK {
+		t.Fatalf("repeated identifier status = %d, want %d", repeatedRR.Code, http.StatusOK)
+	}
+
+	var repeatedPayload map[string]any
+	decodeAppJSON(t, repeatedRR.Body.Bytes(), &repeatedPayload)
+	repeatedRows := repeatedPayload["metadata"].([]any)
+	repeatedRow := repeatedRows[0].(map[string]any)
+	if got := int64(repeatedRow["file_id"].(float64)); got != createdFileID {
+		t.Fatalf("repeated file_id = %d, want %d", got, createdFileID)
+	}
+
+	basicReq := httptest.NewRequest(
+		http.MethodGet,
+		"/get_files/file_metadata?hashes="+url.QueryEscape(`["`+unknownHash+`"]`)+"&only_return_basic_information=true&include_services_object=false",
+		nil,
+	)
+	basicReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	basicRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(basicRR, basicReq)
+
+	if basicRR.Code != http.StatusOK {
+		t.Fatalf("basic metadata status = %d, want %d", basicRR.Code, http.StatusOK)
+	}
+
+	var basicPayload map[string]any
+	decodeAppJSON(t, basicRR.Body.Bytes(), &basicPayload)
+	basicRows := basicPayload["metadata"].([]any)
+	basicRow := basicRows[0].(map[string]any)
+	if got := basicRow["file_id"]; got != nil {
+		t.Fatalf("basic metadata file_id = %v, want nil for unimported created hash", got)
 	}
 }
 

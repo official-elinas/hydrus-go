@@ -2,11 +2,13 @@ package hydrusdb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
 
 	"github.com/official-elinas/hydrus-go/internal/core/services"
+	coretags "github.com/official-elinas/hydrus-go/internal/core/tags"
 )
 
 const (
@@ -830,10 +832,35 @@ func (b *Bundle) lookupTagsByID(
 		return map[int64]string{}, nil
 	}
 
+	schemaMode, err := b.lookupMasterTagSchemaMode(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	switch schemaMode {
+	case masterTagSchemaSplit:
+		return b.lookupSplitTagsByID(ctx, tagIDs)
+	case masterTagSchemaLegacyFlat:
+		return b.lookupFlatTagsByID(ctx, tagIDs)
+	case masterTagSchemaEmpty:
+		return nil, errors.New("external_master tag schema is missing the tags table")
+	default:
+		return nil, errors.New("unsupported external_master tag schema mode")
+	}
+
+}
+
+func (b *Bundle) lookupSplitTagsByID(
+	ctx context.Context,
+	tagIDs []int64,
+) (map[int64]string, error) {
+
 	query := fmt.Sprintf(
-		`SELECT tag_id, tag
-		FROM external_master.tags
-		WHERE tag_id IN (%s)`,
+		`SELECT t.tag_id, n.namespace, s.subtag
+		FROM external_master.tags t
+		JOIN external_master.namespaces n USING (namespace_id)
+		JOIN external_master.subtags s USING (subtag_id)
+		WHERE t.tag_id IN (%s)`,
 		placeholders(len(tagIDs)),
 	)
 
@@ -846,19 +873,58 @@ func (b *Bundle) lookupTagsByID(
 	tagsByID := map[int64]string{}
 	for rows.Next() {
 		var (
+			tagID     int64
+			namespace string
+			subtag    string
+		)
+
+		if err := rows.Scan(&tagID, &namespace, &subtag); err != nil {
+			return nil, fmt.Errorf("scan tags by ID row: %w", err)
+		}
+
+		tagsByID[tagID] = coretags.Combine(namespace, subtag)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate tags by ID rows: %w", err)
+	}
+
+	return tagsByID, nil
+}
+
+func (b *Bundle) lookupFlatTagsByID(
+	ctx context.Context,
+	tagIDs []int64,
+) (map[int64]string, error) {
+	query := fmt.Sprintf(
+		`SELECT tag_id, tag
+		FROM external_master.tags
+		WHERE tag_id IN (%s)`,
+		placeholders(len(tagIDs)),
+	)
+
+	rows, err := b.conn.QueryContext(ctx, query, int64Args(tagIDs)...)
+	if err != nil {
+		return nil, fmt.Errorf("query flat tags by ID: %w", err)
+	}
+	defer rows.Close()
+
+	tagsByID := map[int64]string{}
+	for rows.Next() {
+		var (
 			tagID int64
 			tag   string
 		)
 
 		if err := rows.Scan(&tagID, &tag); err != nil {
-			return nil, fmt.Errorf("scan tags by ID row: %w", err)
+			return nil, fmt.Errorf("scan flat tags by ID row: %w", err)
 		}
 
 		tagsByID[tagID] = tag
 	}
 
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate tags by ID rows: %w", err)
+		return nil, fmt.Errorf("iterate flat tags by ID rows: %w", err)
 	}
 
 	return tagsByID, nil

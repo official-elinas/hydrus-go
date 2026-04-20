@@ -10,28 +10,15 @@ import (
 	"github.com/official-elinas/hydrus-go/internal/core/mimes"
 )
 
-// GetMetadata returns the currently implemented read-only metadata modes.
+// GetMetadata returns the currently implemented metadata modes, including
+// writable-bundle create_new_file_ids allocation when available.
 func (b *Bundle) GetMetadata(
 	ctx context.Context,
 	request filemetadata.Request,
 ) ([]filemetadata.Row, error) {
-	if request.CreateNewFileIDs {
+	if request.CreateNewFileIDs && b.mode == modeReadOnly {
 		return nil, &filemetadata.UnsupportedError{
 			Message: "create_new_file_ids is not supported in read-only mode",
-		}
-	}
-
-	fullMetadataMode := !request.OnlyReturnIdentifiers && !request.OnlyReturnBasicInformation
-
-	if fullMetadataMode && request.DetailedURLInformation {
-		return nil, &filemetadata.UnsupportedError{
-			Message: "detailed_url_information=true is not implemented yet",
-		}
-	}
-
-	if fullMetadataMode && request.IncludeNotes {
-		return nil, &filemetadata.UnsupportedError{
-			Message: "include_notes=true is not implemented yet",
 		}
 	}
 
@@ -39,6 +26,7 @@ func (b *Bundle) GetMetadata(
 		ctx,
 		request.Hashes,
 		request.FileIDs,
+		request.CreateNewFileIDs,
 	)
 	if err != nil {
 		return nil, err
@@ -61,6 +49,8 @@ func (b *Bundle) GetMetadata(
 		ctx,
 		orderedHashes,
 		hashesToFileIDs,
+		request.DetailedURLInformation,
+		request.IncludeNotes,
 		request.IncludeLegacyServiceKeysTags,
 		request.IncludeMilliseconds,
 	)
@@ -70,8 +60,17 @@ func (b *Bundle) resolveHashes(
 	ctx context.Context,
 	explicitHashes []string,
 	fileIDs []int64,
+	createNewFileIDs bool,
 ) ([]string, map[string]int64, error) {
-	orderedHashes := append([]string{}, explicitHashes...)
+	orderedHashes := make([]string, 0, len(explicitHashes)+len(fileIDs))
+	for _, hash := range explicitHashes {
+		normalized, _, err := normalizePreparedHash(hash)
+		if err != nil {
+			return nil, nil, fmt.Errorf("normalize metadata hash %q: %w", hash, err)
+		}
+
+		orderedHashes = append(orderedHashes, normalized)
+	}
 
 	if len(fileIDs) > 0 {
 		resolvedHashes, err := b.lookupHashesByFileIDs(ctx, fileIDs)
@@ -86,7 +85,13 @@ func (b *Bundle) resolveHashes(
 
 	orderedHashes = dedupeStrings(orderedHashes)
 
-	hashesToFileIDs, err := b.lookupKnownHashIDs(ctx, orderedHashes)
+	var hashesToFileIDs map[string]int64
+	var err error
+	if createNewFileIDs && len(explicitHashes) > 0 {
+		hashesToFileIDs, err = b.ensureHashIDs(ctx, orderedHashes)
+	} else {
+		hashesToFileIDs, err = b.lookupKnownHashIDs(ctx, orderedHashes)
+	}
 	if err != nil {
 		return nil, nil, err
 	}
