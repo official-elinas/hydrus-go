@@ -41,7 +41,7 @@ type App struct {
 	server      *http.Server
 	readBundle  *hydrusdb.Bundle
 	writeBundle *hydrusdb.Bundle
-	ptrManager  coreptrsync.Store
+	ptrManager  *ptrsyncmanager.Manager
 }
 
 // New constructs the bootstrap daemon application.
@@ -192,7 +192,7 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 		server:      server,
 		readBundle:  readBundle,
 		writeBundle: writeBundle,
-		ptrManager:  ptrStore,
+		ptrManager:  ptrManager,
 	}, nil
 }
 
@@ -272,6 +272,12 @@ func (a *App) Run(ctx context.Context) error {
 			return fmt.Errorf("shutdown daemon: %w", err)
 		}
 
+		if a.ptrManager != nil {
+			if err := a.ptrManager.Shutdown(shutdownCtx); err != nil {
+				return fmt.Errorf("shutdown PTR sync manager: %w", err)
+			}
+		}
+
 		if err := <-errCh; err != nil {
 			return fmt.Errorf("wait for server stop: %w", err)
 		}
@@ -287,6 +293,19 @@ func (a *App) Run(ctx context.Context) error {
 }
 
 func (a *App) closeResources() {
+	if a.ptrManager != nil {
+		shutdownTimeout := a.cfg.ShutdownTimeout
+		if shutdownTimeout <= 0 {
+			shutdownTimeout = 30 * time.Second
+		}
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		if err := a.ptrManager.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			a.logger.Error("stop PTR sync manager", "error", err)
+		}
+		cancel()
+	}
+
 	if a.readBundle != nil {
 		if err := a.readBundle.Close(); err != nil {
 			a.logger.Error("close read hydrus DB bundle", "error", err)
