@@ -359,3 +359,23 @@ The desktop client now previews selected JPEG/PNG/GIF originals through
 `/v1/files/content`, but it rejects oversized payloads and very large decoded
 images to keep the thin client responsive while broader preview/export behavior
 remains later work.
+
+---
+
+## 2026-04-20 — anonymous PTR sync remains daemon-owned and API-triggered
+
+**Decision**
+
+Keep anonymous PTR sync inside `hydrusd` as a daemon-owned background job with
+HTTP trigger/status surfaces, rather than letting clients touch PTR network or
+SQLite state directly.
+
+**Why**
+
+- preserves the daemon-first boundary for SQLite, managed files, and repository sync state
+- keeps PTR lease ownership, failure recording, and shutdown cleanup in one place
+- matches the thin-client direction where UI clients poll daemon-owned state instead of opening their own PTR sessions
+
+**Consequence**
+
+The current PTR slice exposes `GET /service/ptr/status` and `POST /service/ptr/sync`, while actual PTR `/update` download/content processing remains later backend work.
