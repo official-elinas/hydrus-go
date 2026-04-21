@@ -15,7 +15,7 @@ workstation UI in `image-tests/hydrus.png`.
 ## Chosen stack
 
 - **Fyne in Go**
-- `hydrusd` remains the owner of SQLite, `client_files`, imports, trash, and later PTR
+- `hydrusd` remains the owner of SQLite, `client_files`, imports, trash, and PTR sync
 
 Why this stack:
 
@@ -79,6 +79,10 @@ The thin-client-specific daemon endpoints for this prototype are:
   - this is the preferred path for the desktop client because it remains safe when `hydrusd` runs on another host or over LAN
 - `POST /v1/files/trash`
   - moves one file into the local trash domain through the public thin-client contract
+- `GET /service/ptr/status`
+  - returns daemon-owned anonymous PTR sync state for polling
+- `POST /service/ptr/sync`
+  - starts one daemon-owned anonymous PTR sync pass and returns the immediate status payload
 
 Important notes:
 
@@ -94,6 +98,7 @@ Important notes:
 - immediate thumbnail availability should currently only be expected for JPEG,
   PNG, and GIF still-image imports; other media types may browse without a
   thumbnail until broader generation support lands
+- the current PTR slice is still on-demand only; clients can poll status and trigger a sync, but automatic scheduling and richer job control remain later work
 
 ## Prototype UI shape
 
@@ -128,4 +133,4 @@ The prototype exists to validate:
 - managed `client_files` correctness under daemon ownership
 - public import round trips from UI -> daemon -> DB -> browse
 - public trash round trips from UI -> daemon -> DB -> browse
-- performance before PTR synchronization work begins
+- daemon-owned PTR status/trigger behavior before deeper `/update` processing work begins
