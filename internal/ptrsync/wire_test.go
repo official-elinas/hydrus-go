@@ -159,6 +159,37 @@ func TestDecodeMetadataResponse(t *testing.T) {
 	})
 }
 
+func TestClassifyUpdatePayload(t *testing.T) {
+	t.Run("classifies definitions update payloads as Hydrus mime 28", func(t *testing.T) {
+		mimeEnum, err := classifyUpdatePayload(hydrusNetworkBytes(t, []any{hydrusSerialisableTypeDefinitionsUpdate, 1, []any{}}))
+		if err != nil {
+			t.Fatalf("classifyUpdatePayload() error = %v", err)
+		}
+
+		if mimeEnum != 28 {
+			t.Fatalf("mimeEnum = %d, want 28", mimeEnum)
+		}
+	})
+
+	t.Run("classifies content update payloads as Hydrus mime 29", func(t *testing.T) {
+		mimeEnum, err := classifyUpdatePayload(hydrusNetworkBytes(t, []any{hydrusSerialisableTypeContentUpdate, 1, []any{}}))
+		if err != nil {
+			t.Fatalf("classifyUpdatePayload() error = %v", err)
+		}
+
+		if mimeEnum != 29 {
+			t.Fatalf("mimeEnum = %d, want 29", mimeEnum)
+		}
+	})
+
+	t.Run("rejects unsupported serialisable types", func(t *testing.T) {
+		_, err := classifyUpdatePayload(hydrusNetworkBytes(t, []any{hydrusSerialisableTypeDictionary, 1, []any{}}))
+		if err == nil || !strings.Contains(err.Error(), "unsupported PTR update serialisable type") {
+			t.Fatalf("classifyUpdatePayload() error = %v, want unsupported type error", err)
+		}
+	})
+}
+
 type hydrusDictEntry struct {
 	key       string
 	metaValue any

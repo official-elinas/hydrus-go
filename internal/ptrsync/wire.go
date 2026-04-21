@@ -18,10 +18,12 @@ const (
 	hydrusMetaTypeJSONBytes          = 1
 	hydrusMetaTypeHydrusSerializable = 2
 
-	hydrusSerialisableTypeDictionary = 21
-	hydrusSerialisableTypeList       = 26
-	hydrusSerialisableTypeMetadata   = 37
-	hydrusSerialisableTypeTagFilter  = 44
+	hydrusSerialisableTypeDictionary        = 21
+	hydrusSerialisableTypeList              = 26
+	hydrusSerialisableTypeContentUpdate     = 34
+	hydrusSerialisableTypeDefinitionsUpdate = 36
+	hydrusSerialisableTypeMetadata          = 37
+	hydrusSerialisableTypeTagFilter         = 44
 )
 
 // Hydrus PTR endpoint bodies are zlib-compressed JSON whose top-level values
@@ -151,6 +153,36 @@ func decodeMetadataResponse(body []byte) (coreptrsync.MetadataSlice, error) {
 	}
 
 	return metadata, nil
+}
+
+func classifyUpdatePayload(body []byte) (int, error) {
+	decoded, err := decodeHydrusNetworkBytes(body)
+	if err != nil {
+		return 0, err
+	}
+
+	tuple, ok := decoded.([]any)
+	if !ok {
+		return 0, fmt.Errorf("expected serialisable tuple, got %T", decoded)
+	}
+
+	if len(tuple) != 3 && len(tuple) != 4 {
+		return 0, fmt.Errorf("serialisable tuple had %d elements", len(tuple))
+	}
+
+	serialisableType, err := anyToInt(tuple[0])
+	if err != nil {
+		return 0, err
+	}
+
+	switch serialisableType {
+	case hydrusSerialisableTypeDefinitionsUpdate:
+		return 28, nil
+	case hydrusSerialisableTypeContentUpdate:
+		return 29, nil
+	default:
+		return 0, fmt.Errorf("unsupported PTR update serialisable type %d", serialisableType)
+	}
 }
 
 func decodeHydrusArgsBytes(body []byte) (map[string]any, error) {

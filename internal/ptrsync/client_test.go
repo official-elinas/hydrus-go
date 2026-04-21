@@ -2,6 +2,8 @@ package ptrsync
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -220,6 +222,81 @@ func TestClientFetchRemoteState(t *testing.T) {
 			t.Fatalf("FetchRemoteState() error = %v, want size limit failure", err)
 		}
 	})
+
+	t.Run("fetches update bytes via update_hash query and classifies content update payload", func(t *testing.T) {
+		const accessKey = "4a285629721ca442541ef2c15ea17d1f7f7578b0c3f4f5f2a05f8f0ab297786f"
+		updateBody := hydrusNetworkBytes(t, []any{hydrusSerialisableTypeContentUpdate, 1, []any{}})
+		updateHash := sha256Hex(updateBody)
+
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/session_key":
+				if got := r.Header.Get("Hydrus-Key"); got != accessKey {
+					t.Errorf("Hydrus-Key = %q, want %q", got, accessKey)
+				}
+				http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "remote-session", Path: "/"})
+				w.WriteHeader(http.StatusOK)
+			case "/update":
+				if err := validateSessionCookie(r); err != nil {
+					t.Error(err)
+					http.Error(w, err.Error(), http.StatusUnauthorized)
+					return
+				}
+
+				if got := r.URL.Query().Get("update_hash"); got != updateHash {
+					t.Fatalf("update_hash = %q, want %q", got, updateHash)
+				}
+
+				_, _ = w.Write(updateBody)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		client, err := NewClient(testPTRConfigFromServer(t, server.URL, accessKey))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+
+		body, mimeEnum, err := client.FetchUpdate(context.Background(), mustDecodeHexString(t, updateHash))
+		if err != nil {
+			t.Fatalf("FetchUpdate() error = %v", err)
+		}
+
+		if string(body) != string(updateBody) {
+			t.Fatalf("FetchUpdate() body mismatch")
+		}
+
+		if mimeEnum != 29 {
+			t.Fatalf("mimeEnum = %d, want 29", mimeEnum)
+		}
+	})
+
+	t.Run("rejects update bodies whose bytes do not match the requested hash", func(t *testing.T) {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/session_key":
+				http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "remote-session", Path: "/"})
+				w.WriteHeader(http.StatusOK)
+			case "/update":
+				_, _ = w.Write(hydrusNetworkBytes(t, []any{hydrusSerialisableTypeDefinitionsUpdate, 1, []any{}}))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		client, err := NewClient(testPTRConfigFromServer(t, server.URL, coreptrsync.DefaultSharedAccessKey))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+
+		_, _, err = client.FetchUpdate(context.Background(), mustDecodeHexString(t, strings.Repeat("ab", 32)))
+		if err == nil || !strings.Contains(err.Error(), "did not match expected") {
+			t.Fatalf("FetchUpdate() error = %v, want hash mismatch", err)
+		}
+	})
 }
 
 func validateSessionCookie(r *http.Request) error {
@@ -255,4 +332,20 @@ func testPTRConfigFromServer(t *testing.T, rawURL string, accessKey string) core
 		AccessKey:   accessKey,
 		ServiceName: coreptrsync.DefaultServiceName,
 	}
+}
+
+func mustDecodeHexString(t *testing.T, value string) []byte {
+	t.Helper()
+
+	decoded, err := hex.DecodeString(value)
+	if err != nil {
+		t.Fatalf("hex.DecodeString(%q) error = %v", value, err)
+	}
+
+	return decoded
+}
+
+func sha256Hex(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
 }

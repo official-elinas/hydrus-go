@@ -3,6 +3,7 @@ package ptrsync
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
 	"fmt"
@@ -125,6 +126,42 @@ func (c *Client) FetchRemoteState(
 		TagFilter:      tagFilter,
 		Metadata:       metadata,
 	}, nil
+}
+
+// FetchUpdate downloads one PTR update body via GET /update?update_hash=<hex>,
+// verifies the payload hash, and classifies the top-level Hydrus serialisable
+// update type into the matching Hydrus update MIME enum.
+func (c *Client) FetchUpdate(
+	ctx context.Context,
+	updateHash []byte,
+) ([]byte, int, error) {
+	if err := c.ensureSession(ctx); err != nil {
+		return nil, 0, err
+	}
+
+	if len(updateHash) == 0 {
+		return nil, 0, fmt.Errorf("PTR update hash is required")
+	}
+
+	query := url.Values{}
+	query.Set("update_hash", hex.EncodeToString(updateHash))
+
+	body, err := c.doGET(ctx, "update", query)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	sum := sha256.Sum256(body)
+	if !equalBytes(sum[:], updateHash) {
+		return nil, 0, fmt.Errorf("PTR /update body hash %x did not match expected %x", sum[:], updateHash)
+	}
+
+	mime, err := classifyUpdatePayload(body)
+	if err != nil {
+		return nil, 0, fmt.Errorf("classify PTR /update payload: %w", err)
+	}
+
+	return body, mime, nil
 }
 
 func (c *Client) ensureSession(ctx context.Context) error {
@@ -324,4 +361,18 @@ func readLimitedBytes(reader io.Reader, maxBytes int64, description string) ([]b
 	}
 
 	return payload, nil
+}
+
+func equalBytes(left []byte, right []byte) bool {
+	if len(left) != len(right) {
+		return false
+	}
+
+	for i := range left {
+		if left[i] != right[i] {
+			return false
+		}
+	}
+
+	return true
 }
