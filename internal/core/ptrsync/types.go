@@ -4,6 +4,7 @@ package ptrsync
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 )
 
 const (
@@ -19,6 +20,17 @@ const (
 	PhaseUnavailable = "unavailable"
 	PhaseIdle        = "idle"
 	PhaseSyncing     = "syncing"
+)
+
+var (
+	// ErrSyncDisabled reports that PTR sync was requested while the daemon-side
+	// PTR feature is disabled.
+	ErrSyncDisabled = errors.New("ptr sync is disabled")
+	// ErrSyncUnavailable reports that PTR sync cannot currently run because the
+	// daemon lacks required local prerequisites.
+	ErrSyncUnavailable = errors.New("ptr sync is unavailable")
+	// ErrSyncAlreadyRunning reports that a PTR sync pass is already in progress.
+	ErrSyncAlreadyRunning = errors.New("ptr sync is already running")
 )
 
 // Config describes daemon-side PTR sync settings.
@@ -73,7 +85,59 @@ type Status struct {
 	UpdatedAtMS              int64  `json:"updated_at_ms,omitempty"`
 }
 
-// Store loads PTR sync status for daemon HTTP endpoints.
+// AccountSnapshot is the daemon-owned subset of remote Hydrus account state we
+// need for PTR diagnostics and gating metadata sync.
+type AccountSnapshot struct {
+	AccountKey     []byte
+	Created        int64
+	Expires        *int64
+	Message        string
+	MessageCreated int64
+	BannedReason   string
+	BannedCreated  *int64
+	BannedExpires  *int64
+}
+
+// ServiceOptions is the daemon-owned subset of repository options needed for
+// update scheduling/nullification parity.
+type ServiceOptions struct {
+	UpdatePeriod        int64
+	NullificationPeriod int64
+}
+
+// TagFilterSnapshot captures the current remote tag filter rules for a PTR.
+type TagFilterSnapshot struct {
+	Rules map[string]int
+}
+
+// MetadataUpdate describes one PTR update index and the update files it points
+// to.
+type MetadataUpdate struct {
+	UpdateIndex  int64
+	UpdateHashes [][]byte
+	Begin        int64
+	End          int64
+}
+
+// MetadataSlice is the daemon-owned subset of remote metadata needed to queue
+// later /update downloads.
+type MetadataSlice struct {
+	Updates       []MetadataUpdate
+	NextUpdateDue int64
+}
+
+// RemoteState is the durable daemon-owned snapshot of the remote PTR state we
+// have fetched so far.
+type RemoteState struct {
+	Account        AccountSnapshot
+	ServiceOptions ServiceOptions
+	TagFilter      TagFilterSnapshot
+	Metadata       MetadataSlice
+}
+
+// Store exposes daemon-owned PTR status and trigger operations for HTTP/UI
+// callers.
 type Store interface {
 	Status(context.Context) (Status, error)
+	Trigger(context.Context) (Status, error)
 }
