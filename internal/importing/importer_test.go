@@ -1,10 +1,13 @@
 package importing
 
 import (
+	"bytes"
+	"compress/zlib"
 	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +18,10 @@ import (
 	"github.com/official-elinas/hydrus-go/internal/db/hydrusdb"
 	"github.com/official-elinas/hydrus-go/internal/storage/clientfiles"
 	_ "modernc.org/sqlite"
+)
+
+const (
+	testHydrusSerialisableTypeDefinitionsUpdate = 36
 )
 
 func TestImporterImportPreparedFile(t *testing.T) {
@@ -445,6 +452,57 @@ func TestImporterImportPreparedFile(t *testing.T) {
 			t.Fatalf("second.FileID = %d, want %d", second.FileID, first.FileID)
 		}
 	})
+
+	t.Run("imports extensionless repository update bytes into managed storage", func(t *testing.T) {
+		dir, _ := createImportTestBundle(t)
+
+		bundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		mainDB := openSQLiteForTest(t, filepath.Join(dir, "client.db"))
+		defer mainDB.Close()
+		mustExec(t, mainDB, `INSERT INTO services (service_id, service_key, service_type, name, dictionary_string) VALUES (?, ?, ?, ?, ?)`, 16, []byte("repository updates"), int(services.TypeLocalFileUpdateDomain), "repository updates", "{}")
+		mustExec(t, mainDB, `CREATE TABLE current_files_16 (hash_id INTEGER PRIMARY KEY, timestamp_ms INTEGER);`)
+
+		importer, err := NewDefaultImporter(bundle, dir)
+		if err != nil {
+			t.Fatalf("NewDefaultImporter() error = %v", err)
+		}
+
+		body := hydrusNetworkBytes(t, []any{testHydrusSerialisableTypeDefinitionsUpdate, 1, []any{}})
+		hashHex := sha256Hex(body)
+
+		result, err := importer.ImportPreparedBytes(context.Background(), PreparedFile{
+			HashHex:             hashHex,
+			Size:                int64(len(body)),
+			Mime:                28,
+			ImportedAtMS:        970123,
+			LocalFileServiceKey: hex.EncodeToString([]byte("repository updates")),
+		}, body)
+		if err != nil {
+			t.Fatalf("ImportPreparedBytes() error = %v", err)
+		}
+
+		managedBytes, err := os.ReadFile(result.ManagedPath)
+		if err != nil {
+			t.Fatalf("ReadFile(managed path) error = %v", err)
+		}
+
+		if string(managedBytes) != string(body) {
+			t.Fatal("managed update bytes mismatch")
+		}
+
+		if filepath.Ext(result.ManagedPath) != "" {
+			t.Fatalf("filepath.Ext(result.ManagedPath) = %q, want empty", filepath.Ext(result.ManagedPath))
+		}
+	})
 }
 
 type importTestFixture struct {
@@ -635,4 +693,30 @@ func writePreparedSourceFile(
 
 	sum := sha256.Sum256(contents)
 	return path, hex.EncodeToString(sum[:]), int64(len(contents))
+}
+
+func hydrusNetworkBytes(t *testing.T, serialisable any) []byte {
+	t.Helper()
+
+	payload, err := json.Marshal(serialisable)
+	if err != nil {
+		t.Fatalf("json.Marshal(serialisable) error = %v", err)
+	}
+
+	var compressed bytes.Buffer
+	writer := zlib.NewWriter(&compressed)
+	if _, err := writer.Write(payload); err != nil {
+		t.Fatalf("writer.Write() error = %v", err)
+	}
+
+	if err := writer.Close(); err != nil {
+		t.Fatalf("writer.Close() error = %v", err)
+	}
+
+	return compressed.Bytes()
+}
+
+func sha256Hex(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
 }
