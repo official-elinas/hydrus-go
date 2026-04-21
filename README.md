@@ -27,6 +27,7 @@ This repository currently provides the following early migration slices:
 - an internal prepared-file import checkpoint that composes managed placement with serialized DB writes
 - first thin-client browse/asset endpoints for recent local files, originals, and thumbnails
 - public local-path import and trash endpoints for thin-client-driven library testing
+- daemon-owned anonymous PTR sync foundations, remote snapshot persistence, and first status/trigger APIs
 - an initial Fyne-based desktop prototype for `hydrusd`, including selected JPEG/PNG/GIF original preview through daemon APIs
 - real `hydrusd --listen host:port` runtime overrides for temporary LAN testing
 - explicit Linux/Windows desktop build targets, including a Windows GUI-subsystem executable for Explorer launches
@@ -51,9 +52,11 @@ Project notes live in:
   - `GET /get_services`
   - `GET /get_service`
   - `GET /get_files/file_metadata`
+  - `GET /service/ptr/status`
   - `GET /v1/library/recent`
   - `GET /v1/files/content`
   - `GET /v1/files/thumbnail`
+  - `POST /service/ptr/sync`
   - `POST /v1/files/trash`
   - `POST /v1/import/local_file`
 
@@ -80,9 +83,11 @@ behavior:
 - `GET /get_services`
 - `GET /get_service`
 - `GET /get_files/file_metadata`
+- `GET /service/ptr/status`
 - `GET /v1/library/recent`
 - `GET /v1/files/content`
 - `GET /v1/files/thumbnail`
+- `POST /service/ptr/sync`
 - `POST /v1/files/trash`
 - `POST /v1/import/local_file`
 
@@ -241,14 +246,16 @@ Important current limitations:
 - no public batch import flow yet
 - no public permanent delete flow yet
 - staged upload is still a narrow single-file flow rather than a broader Hydrus-style import pipeline
-- PTR work has now started in the daemon, but the current slice only provides:
+- PTR work now provides:
   - opt-in public PTR defaults (shared read-only anonymous key, host, port)
   - local PTR service/mapping-table provisioning
   - persisted daemon-side PTR status/state foundation
   - real anonymous PTR session/account/options/tag-filter/metadata fetch plumbing
   - durable remote snapshot and repository-metadata persistence in daemon-owned storage
+  - daemon-owned single-flight background sync triggering with shutdown-safe lease cleanup
   - `GET /service/ptr/status` for thin-client polling
-- there is not yet a public daemon trigger/background runner for the real PTR fetch path
+  - `POST /service/ptr/sync` for manual daemon-owned sync starts
+- PTR sync is currently on-demand only; automatic scheduling/backoff and richer job control are not implemented yet
 - actual PTR `/update` download/processing is not implemented yet, so the daemon still does not sync definitions/content from the live repository
 - no search/tagging engine yet
 - no downloader/subscription/parsing system yet
@@ -446,7 +453,7 @@ This bootstrap currently targets the Go toolchain declared in `go.mod`
 - iterate on the Fyne prototype's preview caching, paging, reconnect behavior, and metadata ergonomics now that the first connect/browse/add/trash/original-preview loop is wired
 - run real Windows-over-LAN smoke tests against a live `hydrusd` + Hydrus library and tighten any failures quickly
 - validate add/trash latency and recent-grid refresh behavior on a real Hydrus library through the prototype
-- implement live anonymous PTR metadata/update download and processing in the backend daemon
-- expose daemon-owned PTR sync progress and job control for the thin client
+- implement live anonymous PTR `/update` download and processing in the backend daemon
+- broaden daemon-owned PTR sync progress and job control for the thin client beyond the current status + manual trigger
 - broaden default/full metadata parity for `GET /get_files/file_metadata`
 - search/tagging model on top of imported and PTR-synced data

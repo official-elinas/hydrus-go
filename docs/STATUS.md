@@ -1,6 +1,6 @@
 # hydrus-go status
 
-Last updated: 2026-04-19
+Last updated: 2026-04-20
 
 ## Completed
 
@@ -72,6 +72,9 @@ Last updated: 2026-04-19
 - expanded the native first-start service-list seed with `downloader tags` and `favourites`, including a Hydrus-style favourites rating dictionary
 - added DB and app-wiring tests using a copied minimal SQLite fixture bundle
 - added tests for config validation, HTTP/auth behavior, and shutdown lifecycle
+- added daemon-owned anonymous PTR status persistence, remote snapshot fetch/decode/persist, and repository metadata durability
+- added `POST /service/ptr/sync` for daemon-owned single-flight background PTR sync triggering
+- added PTR manager/app shutdown handling so active anonymous PTR sync leases are cleared before daemon teardown
 - documented the daemon-first migration direction and current bootstrap limits
 
 ## In Progress
@@ -136,6 +139,7 @@ Last updated: 2026-04-19
 - [x] define PTR service configuration defaults, shared read-only anonymous auth, and local daemon status/state requirements
 - [x] add daemon-side PTR service/mapping-table/state foundations and a pollable status endpoint
 - [x] add real anonymous PTR session/account/options/tag-filter/metadata fetch and durable snapshot persistence
+- [x] add a daemon-owned background trigger/lifecycle slice for anonymous PTR sync
 - [ ] implement actual PTR `/update` download and local processing
 - [ ] make imported files eligible for PTR-driven tag/update retrieval
 - [ ] verify end-to-end value from local import through PTR sync and tag acquisition
@@ -338,3 +342,13 @@ Last updated: 2026-04-19
 - tightened duplicate handling so conflicting auxiliary metadata is rejected instead of silently widening `pixel_hash_map` state
 - intentionally left animated-media and blurhash import-time enrichment for later parity work
 - verified with targeted DB/import/app tests plus a full `go test ./...` pass
+
+### 2026-04-20 — Milestone 22: daemon-owned PTR trigger and lifecycle slice
+
+- recovered and normalized daemon-owned PTR runtime state safely at manager startup without stealing active leases during normal ensure paths
+- added durable PTR sync runtime persistence with guarded `run_token` ownership, remote snapshot storage, and repository metadata append/replace behavior
+- added real anonymous PTR client/wire handling for `/session_key`, `/account`, `/options`, `/tag_filter`, and `/metadata`
+- added a daemon-owned single-flight background trigger path so `POST /service/ptr/sync` starts one real PTR sync pass and repeated triggers do not start a second run
+- added shutdown-safe PTR manager/app lifecycle handling so daemon teardown cancels in-flight work and clears active leases before bundle close
+- kept actual PTR `/update` download/content processing out of scope for this slice; status/triggering now exist, but repository definitions/content are still not applied locally
+- verified with targeted `internal/ptrsync`, `internal/api/httpapi`, and `internal/app` package tests plus app-level trigger/shutdown manual QA
