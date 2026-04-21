@@ -27,7 +27,7 @@ This repository currently provides the following early migration slices:
 - an internal prepared-file import checkpoint that composes managed placement with serialized DB writes
 - first thin-client browse/asset endpoints for recent local files, originals, and thumbnails
 - public local-path import and trash endpoints for thin-client-driven library testing
-- daemon-owned anonymous PTR sync foundations, remote snapshot persistence, and first status/trigger APIs
+- daemon-owned anonymous PTR sync foundations, remote snapshot persistence, real `/update` download plus local repository-updates registration, and first status/trigger APIs
 - an initial Fyne-based desktop prototype for `hydrusd`, including selected JPEG/PNG/GIF original preview through daemon APIs
 - real `hydrusd --listen host:port` runtime overrides for temporary LAN testing
 - explicit Linux/Windows desktop build targets, including a Windows GUI-subsystem executable for Explorer launches
@@ -252,11 +252,15 @@ Important current limitations:
   - persisted daemon-side PTR status/state foundation
   - real anonymous PTR session/account/options/tag-filter/metadata fetch plumbing
   - durable remote snapshot and repository-metadata persistence in daemon-owned storage
+  - real anonymous PTR `/update` download with expected-hash verification
+  - Hydrus-style classification plus extensionless managed storage for downloaded repository update blobs
+  - local registration of downloaded update blobs in the daemon-owned `repository updates` file domain
+  - daemon-side downloaded-update bookkeeping driven by real local registration state
   - daemon-owned single-flight background sync triggering with shutdown-safe lease cleanup
   - `GET /service/ptr/status` for thin-client polling
   - `POST /service/ptr/sync` for manual daemon-owned sync starts
 - PTR sync is currently on-demand only; automatic scheduling/backoff and richer job control are not implemented yet
-- actual PTR `/update` download/processing is not implemented yet, so the daemon still does not sync definitions/content from the live repository
+- actual PTR definitions/content processing is not implemented yet, so the daemon now downloads and locally registers repository update blobs but still does not apply definitions/content into local mappings/tag state
 - no search/tagging engine yet
 - no downloader/subscription/parsing system yet
 
@@ -453,7 +457,7 @@ This bootstrap currently targets the Go toolchain declared in `go.mod`
 - iterate on the Fyne prototype's preview caching, paging, reconnect behavior, and metadata ergonomics now that the first connect/browse/add/trash/original-preview loop is wired
 - run real Windows-over-LAN smoke tests against a live `hydrusd` + Hydrus library and tighten any failures quickly
 - validate add/trash latency and recent-grid refresh behavior on a real Hydrus library through the prototype
-- implement live anonymous PTR `/update` download and processing in the backend daemon
+- process downloaded anonymous PTR definitions/content into local mappings and tag/query state
 - broaden daemon-owned PTR sync progress and job control for the thin client beyond the current status + manual trigger
 - broaden default/full metadata parity for `GET /get_files/file_metadata`
 - search/tagging model on top of imported and PTR-synced data

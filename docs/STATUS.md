@@ -75,6 +75,8 @@ Last updated: 2026-04-20
 - added daemon-owned anonymous PTR status persistence, remote snapshot fetch/decode/persist, and repository metadata durability
 - added `POST /service/ptr/sync` for daemon-owned single-flight background PTR sync triggering
 - added PTR manager/app shutdown handling so active anonymous PTR sync leases are cleared before daemon teardown
+- added real anonymous PTR `/update` download with expected-hash verification, extensionless managed-file placement, and local `repository updates` registration
+- added daemon-owned PTR download bookkeeping so persisted status reflects real locally registered update counts
 - documented the daemon-first migration direction and current bootstrap limits
 
 ## In Progress
@@ -140,7 +142,8 @@ Last updated: 2026-04-20
 - [x] add daemon-side PTR service/mapping-table/state foundations and a pollable status endpoint
 - [x] add real anonymous PTR session/account/options/tag-filter/metadata fetch and durable snapshot persistence
 - [x] add a daemon-owned background trigger/lifecycle slice for anonymous PTR sync
-- [ ] implement actual PTR `/update` download and local processing
+- [x] implement anonymous PTR `/update` download and local repository-updates registration
+- [ ] process downloaded PTR definitions/content into local mappings and tag/query state
 - [ ] make imported files eligible for PTR-driven tag/update retrieval
 - [ ] verify end-to-end value from local import through PTR sync and tag acquisition
 
@@ -352,3 +355,12 @@ Last updated: 2026-04-20
 - added shutdown-safe PTR manager/app lifecycle handling so daemon teardown cancels in-flight work and clears active leases before bundle close
 - kept actual PTR `/update` download/content processing out of scope for this slice; status/triggering now exist, but repository definitions/content are still not applied locally
 - verified with targeted `internal/ptrsync`, `internal/api/httpapi`, and `internal/app` package tests plus app-level trigger/shutdown manual QA
+
+### 2026-04-20 — Milestone 23: daemon-owned PTR update download slice
+
+- added real anonymous PTR `GET /update?update_hash=...` fetch support with expected SHA-256 body verification
+- classified downloaded update payloads as Hydrus definitions/content update mimes and stored them with Hydrus-style extensionless managed filenames
+- registered downloaded update blobs in the local `repository updates` file domain and cleared pending unregistered-update rows after successful local import
+- updated PTR status persistence so `downloaded_update_count` reflects real daemon-owned local registration state rather than declared remote metadata only
+- intentionally left definitions/content processing and tag-application behavior for the next PTR slice
+- verified with targeted `./internal/ptrsync ./internal/db/hydrusdb ./internal/importing ./internal/storage/clientfiles` package tests plus live daemon + mock PTR server manual QA

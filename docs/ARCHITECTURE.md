@@ -180,6 +180,7 @@ The daemon now also owns the first real anonymous PTR runtime slice:
 
 - `internal/ptrsync` provisions daemon-owned PTR sync state against the Hydrus bundle
 - remote anonymous PTR snapshot fetches run inside the daemon, not in the client
+- daemon-owned PTR sync now also downloads repository `/update` blobs, verifies them against the requested hash, and registers them in the local `repository updates` file domain
 - `GET /service/ptr/status` exposes daemon-visible PTR sync status for polling
 - `POST /service/ptr/sync` starts one daemon-owned background sync pass and returns the immediate persisted status
 - repeated trigger requests are deduplicated in-process and also guarded by durable DB lease ownership
@@ -215,4 +216,5 @@ The deeper Hydrus client-core behaviors are still pending:
 - file serving and broader managed file-store lifecycle behavior
 - search/tagging engine behavior
 - richer stateful background processing
-- actual PTR `/update` download, definition/content processing, and broader PTR job control beyond the current manual trigger + status slice
+- broader PTR job control beyond the current manual trigger + status slice
+- downloaded PTR definition/content application into local mappings, tags, and query-visible state

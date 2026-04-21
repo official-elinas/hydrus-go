@@ -378,4 +378,4 @@ SQLite state directly.
 
 **Consequence**
 
-The current PTR slice exposes `GET /service/ptr/status` and `POST /service/ptr/sync`, while actual PTR `/update` download/content processing remains later backend work.
+The current PTR slice exposes `GET /service/ptr/status` and `POST /service/ptr/sync`, and the daemon now also owns anonymous PTR `/update` download plus local `repository updates` registration. Downloaded definitions/content are still not applied into local mappings or tag/query state; that remains later backend work.
