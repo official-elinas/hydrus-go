@@ -98,7 +98,7 @@ Important notes:
 - immediate thumbnail availability should currently only be expected for JPEG,
   PNG, and GIF still-image imports; other media types may browse without a
   thumbnail until broader generation support lands
-- the current PTR slice is still on-demand only; clients can poll status and trigger a sync, but automatic scheduling and richer job control remain later work
+- the current PTR slice is still on-demand only; clients can poll status and trigger a sync, and the daemon now downloads/registers repository update blobs, but automatic scheduling, richer job control, and definition/content application remain later work
 
 ## Prototype UI shape
 
@@ -133,4 +133,4 @@ The prototype exists to validate:
 - managed `client_files` correctness under daemon ownership
 - public import round trips from UI -> daemon -> DB -> browse
 - public trash round trips from UI -> daemon -> DB -> browse
-- daemon-owned PTR status/trigger behavior before deeper `/update` processing work begins
+- daemon-owned PTR status/trigger behavior before downloaded definitions/content are processed into local tag/query state
