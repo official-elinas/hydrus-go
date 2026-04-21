@@ -3,14 +3,17 @@ package ptrsync
 
 import (
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sync"
 	"time"
 
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
 	"github.com/official-elinas/hydrus-go/internal/db/hydrusdb"
+	"github.com/official-elinas/hydrus-go/internal/importing"
 )
 
 // Manager provides daemon-visible PTR sync status backed by the Hydrus bundle.
@@ -351,7 +354,7 @@ func (m *Manager) runStartedSync(ctx context.Context, started startedSync) (stat
 		return status, err
 	}
 
-	status, err = m.writeBundle.FinishPTRSyncSuccess(
+	status, err = m.writeBundle.PersistPTRSyncMetadata(
 		ctx,
 		m.cfg,
 		started.lease.RunToken,
@@ -359,7 +362,61 @@ func (m *Manager) runStartedSync(ctx context.Context, started startedSync) (stat
 		started.replaceMetadata,
 	)
 	if err != nil {
-		err = fmt.Errorf("persist PTR sync success: %w", err)
+		err = fmt.Errorf("persist PTR sync metadata: %w", err)
+		return status, err
+	}
+
+	if status.IsRunning {
+		importer, importerErr := importing.NewDefaultImporter(m.writeBundle, filepath.Dir(m.writeBundle.MainDBPath()))
+		if importerErr != nil {
+			err = fmt.Errorf("construct PTR update importer: %w", importerErr)
+			return status, err
+		}
+
+		pendingHashes, listErr := m.writeBundle.ListPTRPendingUpdateHashes(ctx, m.cfg, started.lease.RunToken)
+		if listErr != nil {
+			err = fmt.Errorf("list PTR pending update hashes: %w", listErr)
+			return status, err
+		}
+
+		for _, pendingHash := range pendingHashes {
+			body, mimeEnum, fetchErr := started.client.FetchUpdate(ctx, pendingHash)
+			if fetchErr != nil {
+				err = fmt.Errorf("fetch PTR update %x: %w", pendingHash, fetchErr)
+				return status, err
+			}
+
+			result, importErr := importer.ImportPreparedBytes(ctx, importing.PreparedFile{
+				HashHex:             hex.EncodeToString(pendingHash),
+				Size:                int64(len(body)),
+				Mime:                mimeEnum,
+				ImportedAtMS:        time.Now().UTC().UnixMilli(),
+				LocalFileServiceKey: hex.EncodeToString([]byte("repository updates")),
+			}, body)
+			if importErr != nil {
+				err = fmt.Errorf("import PTR update %x: %w", pendingHash, importErr)
+				return status, err
+			}
+
+			if status, err = m.writeBundle.FinalizePTRDownloadedUpdate(
+				ctx,
+				m.cfg,
+				started.lease.RunToken,
+				hex.EncodeToString(pendingHash),
+			); err != nil {
+				err = fmt.Errorf("finalize PTR downloaded update %d: %w", result.FileID, err)
+				return status, err
+			}
+		}
+	}
+
+	status, err = m.writeBundle.CompletePTRSyncSuccess(
+		ctx,
+		m.cfg,
+		started.lease.RunToken,
+	)
+	if err != nil {
+		err = fmt.Errorf("complete PTR sync success: %w", err)
 		return status, err
 	}
 

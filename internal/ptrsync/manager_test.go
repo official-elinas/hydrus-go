@@ -3,6 +3,7 @@ package ptrsync
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,6 +21,8 @@ import (
 func TestManagerSyncOnce(t *testing.T) {
 	t.Run("fetches and persists one real remote snapshot pass", func(t *testing.T) {
 		dir := createPTRManagerTestBundle(t)
+		updateBody := hydrusNetworkBytes(t, []any{hydrusSerialisableTypeDefinitionsUpdate, 1, []any{}})
+		updateHash := sha256Hex(updateBody)
 
 		readBundle, err := hydrusdb.Open(context.Background(), dir)
 		if err != nil {
@@ -95,8 +98,13 @@ func TestManagerSyncOnce(t *testing.T) {
 				}
 				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{
 					key:       "metadata_slice",
-					metaValue: metaHydrus(serialisableMetadata(1700000200, metadataRow{updateIndex: 0, updateHashes: []string{strings.Repeat("11", 32)}, begin: 10, end: 20})),
+					metaValue: metaHydrus(serialisableMetadata(1700000200, metadataRow{updateIndex: 0, updateHashes: []string{updateHash}, begin: 10, end: 20})),
 				}))
+			case "/update":
+				if got := r.URL.Query().Get("update_hash"); got != updateHash {
+					t.Fatalf("update_hash = %q, want %q", got, updateHash)
+				}
+				_, _ = w.Write(updateBody)
 			default:
 				http.NotFound(w, r)
 			}
@@ -196,6 +204,8 @@ func TestManagerSyncOnce(t *testing.T) {
 
 	t.Run("cleans up the runtime lease when success persistence fails", func(t *testing.T) {
 		dir := createPTRManagerTestBundle(t)
+		updateBody := hydrusNetworkBytes(t, []any{hydrusSerialisableTypeDefinitionsUpdate, 1, []any{}})
+		updateHash := sha256Hex(updateBody)
 
 		readBundle, err := hydrusdb.Open(context.Background(), dir)
 		if err != nil {
@@ -271,8 +281,13 @@ func TestManagerSyncOnce(t *testing.T) {
 				}
 				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{
 					key:       "metadata_slice",
-					metaValue: metaHydrus(serialisableMetadata(1700000200, metadataRow{updateIndex: 0, updateHashes: []string{strings.Repeat("11", 32)}, begin: 10, end: 20})),
+					metaValue: metaHydrus(serialisableMetadata(1700000200, metadataRow{updateIndex: 0, updateHashes: []string{updateHash}, begin: 10, end: 20})),
 				}))
+			case "/update":
+				if got := r.URL.Query().Get("update_hash"); got != updateHash {
+					t.Fatalf("update_hash = %q, want %q", got, updateHash)
+				}
+				_, _ = w.Write(updateBody)
 			default:
 				http.NotFound(w, r)
 			}
@@ -318,11 +333,110 @@ func TestManagerSyncOnce(t *testing.T) {
 			t.Fatalf("status.MetadataSlice = %d, want 1", status.MetadataSlice)
 		}
 	})
+
+	t.Run("downloads and registers pending update files before finishing the run", func(t *testing.T) {
+		dir := createPTRManagerTestBundle(t)
+
+		readBundle, err := hydrusdb.Open(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.Open() error = %v", err)
+		}
+		defer func() {
+			if err := readBundle.Close(); err != nil {
+				t.Fatalf("readBundle.Close() error = %v", err)
+			}
+		}()
+
+		writeBundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := writeBundle.Close(); err != nil {
+				t.Fatalf("writeBundle.Close() error = %v", err)
+			}
+		}()
+
+		updateBody := hydrusNetworkBytes(t, []any{hydrusSerialisableTypeContentUpdate, 1, []any{}})
+		updateHash := sha256Hex(updateBody)
+
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/session_key":
+				http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "manager-session", Path: "/"})
+				w.WriteHeader(http.StatusOK)
+			case "/account":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "account", metaValue: metaJSON([]any{strings.Repeat("aa", 32), unsupportedSerialisable(102), int64(1699990000), nil, serialisableDictionaryString(t, hydrusDictEntry{key: "banned_info", metaValue: metaJSON(nil)}, hydrusDictEntry{key: "bandwidth_tracker", metaValue: metaHydrus(unsupportedSerialisable(39))}, hydrusDictEntry{key: "message", metaValue: metaJSON("shared read-only")}, hydrusDictEntry{key: "message_created", metaValue: metaJSON(int64(1699990100))})})}))
+			case "/options":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "service_options", metaValue: metaHydrus(serialisableDictionary(hydrusDictEntry{key: "update_period", metaValue: metaJSON(int64(3600))}, hydrusDictEntry{key: "nullification_period", metaValue: metaJSON(int64(86400))}))}))
+			case "/tag_filter":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "tag_filter", metaValue: metaHydrus(serialisableTagFilter(map[string]int{":": 1}))}))
+			case "/metadata":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "metadata_slice", metaValue: metaHydrus(serialisableMetadata(1700000200, metadataRow{updateIndex: 0, updateHashes: []string{updateHash}, begin: 10, end: 20}))}))
+			case "/update":
+				if got := r.URL.Query().Get("update_hash"); got != updateHash {
+					t.Fatalf("update_hash = %q, want %q", got, updateHash)
+				}
+				_, _ = w.Write(updateBody)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		manager, err := NewManager(context.Background(), nil, testPTRConfigFromServer(t, server.URL, defaultManagerAccessKey()), readBundle, writeBundle)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
+		}
+
+		status, err := manager.SyncOnce(context.Background())
+		if err != nil {
+			t.Fatalf("SyncOnce() error = %v", err)
+		}
+
+		if status.DownloadedUpdateCount != 1 {
+			t.Fatalf("status.DownloadedUpdateCount = %d, want 1", status.DownloadedUpdateCount)
+		}
+
+		managedLayout, err := writeBundle.ManagedLayout(context.Background())
+		if err != nil {
+			t.Fatalf("ManagedLayout() error = %v", err)
+		}
+
+		managedPath, err := managedLayout.ResolveFilePath(updateHash, "")
+		if err != nil {
+			t.Fatalf("ResolveFilePath() error = %v", err)
+		}
+
+		managedBytes, err := os.ReadFile(managedPath)
+		if err != nil {
+			t.Fatalf("ReadFile(managedPath) error = %v", err)
+		}
+
+		if string(managedBytes) != string(updateBody) {
+			t.Fatal("managed update bytes mismatch")
+		}
+
+		serviceKey := hex.EncodeToString([]byte("repository updates"))
+		service, ok, err := writeBundle.ByKey(context.Background(), serviceKey)
+		if err != nil {
+			t.Fatalf("ByKey(repository updates) error = %v", err)
+		}
+		if !ok {
+			t.Fatal("repository updates service missing")
+		}
+
+		if service.Type != 20 {
+			t.Fatalf("repository updates service type = %d, want 20", service.Type)
+		}
+	})
 }
 
 func TestManagerTrigger(t *testing.T) {
 	t.Run("starts one background run and deduplicates repeated triggers", func(t *testing.T) {
 		dir := createPTRManagerTestBundle(t)
+		updateBody := hydrusNetworkBytes(t, []any{hydrusSerialisableTypeDefinitionsUpdate, 1, []any{}})
+		updateHash := sha256Hex(updateBody)
 
 		readBundle, err := hydrusdb.Open(context.Background(), dir)
 		if err != nil {
@@ -420,9 +534,15 @@ func TestManagerTrigger(t *testing.T) {
 					key: "metadata_slice",
 					metaValue: metaHydrus(serialisableMetadata(
 						1700000200,
-						metadataRow{updateIndex: 0, updateHashes: []string{strings.Repeat("11", 32)}, begin: 10, end: 20},
+						metadataRow{updateIndex: 0, updateHashes: []string{updateHash}, begin: 10, end: 20},
 					)),
 				}))
+			case "/update":
+				if got := r.URL.Query().Get("update_hash"); got != updateHash {
+					t.Fatalf("update_hash = %q, want %q", got, updateHash)
+				}
+				<-accountRelease
+				_, _ = w.Write(updateBody)
 			default:
 				http.NotFound(w, r)
 			}
@@ -592,6 +712,17 @@ func createPTRManagerTestBundle(t *testing.T) string {
 	mainDB := openSQLiteForPTRManagerTest(t, filepath.Join(dir, "client.db"))
 	defer mainDB.Close()
 	mustExecPTRManagerTest(t, mainDB, `CREATE TABLE services (service_id INTEGER PRIMARY KEY AUTOINCREMENT, service_key BLOB UNIQUE, service_type INTEGER, name TEXT, dictionary_string TEXT);`)
+	mustExecPTRManagerTest(t, mainDB, `CREATE TABLE files_info (hash_id INTEGER PRIMARY KEY, size INTEGER, mime INTEGER, width INTEGER, height INTEGER, duration INTEGER, num_frames INTEGER, has_audio INTEGER, num_words INTEGER);`)
+	mustExecPTRManagerTest(t, mainDB, `CREATE TABLE file_modified_timestamps (hash_id INTEGER PRIMARY KEY, file_modified_timestamp_ms INTEGER);`)
+	mustExecPTRManagerTest(t, mainDB, `CREATE TABLE file_inbox (hash_id INTEGER PRIMARY KEY);`)
+	mustExecPTRManagerTest(t, mainDB, `CREATE TABLE pixel_hash_map (hash_id INTEGER, pixel_hash_id INTEGER, PRIMARY KEY (hash_id, pixel_hash_id));`)
+	mustExecPTRManagerTest(t, mainDB, `CREATE TABLE has_transparency (hash_id INTEGER PRIMARY KEY);`)
+	mustExecPTRManagerTest(t, mainDB, `CREATE TABLE current_storage_granularity (granularity INTEGER);`)
+	mustExecPTRManagerTest(t, mainDB, `CREATE TABLE current_client_files_locations (location_id INTEGER PRIMARY KEY, location TEXT UNIQUE);`)
+	mustExecPTRManagerTest(t, mainDB, `CREATE TABLE client_files_subfolders (prefix TEXT, location_id INTEGER, PRIMARY KEY (prefix, location_id));`)
+	mustExecPTRManagerTest(t, mainDB, `CREATE TABLE ideal_client_files_locations (location_id INTEGER PRIMARY KEY, weight INTEGER, max_num_bytes INTEGER);`)
+	mustExecPTRManagerTest(t, mainDB, `CREATE TABLE ideal_thumbnail_override_location (location_id INTEGER);`)
+	seedPTRManagerTestStorage(t, mainDB, dir)
 
 	masterDB := openSQLiteForPTRManagerTest(t, filepath.Join(dir, "client.master.db"))
 	defer masterDB.Close()
@@ -604,6 +735,46 @@ func createPTRManagerTestBundle(t *testing.T) string {
 	defer mappingsDB.Close()
 
 	return dir
+}
+
+func seedPTRManagerTestStorage(t *testing.T, db *sql.DB, dbDir string) {
+	t.Helper()
+
+	fileRoot := filepath.Join(dirClean(dbDir), "client_files")
+	thumbnailRoot := filepath.Join(filepath.Dir(dirClean(dbDir)), "thumbnails")
+	mustExecPTRManagerTest(t, db, `INSERT INTO current_storage_granularity (granularity) VALUES (2);`)
+	mustExecPTRManagerTest(t, db, `INSERT INTO current_client_files_locations (location_id, location) VALUES (?, ?), (?, ?);`, 1, fileRoot, 2, thumbnailRoot)
+	mustExecPTRManagerTest(t, db, `INSERT INTO ideal_client_files_locations (location_id, weight, max_num_bytes) VALUES (?, ?, NULL);`, 1, 1)
+	mustExecPTRManagerTest(t, db, `INSERT INTO ideal_thumbnail_override_location (location_id) VALUES (?);`, 2)
+
+	for _, prefix := range ptrManagerTestStoragePrefixes("f") {
+		mustExecPTRManagerTest(t, db, `INSERT INTO client_files_subfolders (prefix, location_id) VALUES (?, ?);`, prefix, 1)
+	}
+	for _, prefix := range ptrManagerTestStoragePrefixes("t") {
+		mustExecPTRManagerTest(t, db, `INSERT INTO client_files_subfolders (prefix, location_id) VALUES (?, ?);`, prefix, 2)
+	}
+
+	if err := os.MkdirAll(fileRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(fileRoot) error = %v", err)
+	}
+	if err := os.MkdirAll(thumbnailRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(thumbnailRoot) error = %v", err)
+	}
+}
+
+func ptrManagerTestStoragePrefixes(kind string) []string {
+	prefixes := make([]string, 0, 256)
+	for _, first := range "0123456789abcdef" {
+		for _, second := range "0123456789abcdef" {
+			prefixes = append(prefixes, kind+string(first)+string(second))
+		}
+	}
+
+	return prefixes
+}
+
+func dirClean(value string) string {
+	return filepath.Clean(strings.TrimSpace(value))
 }
 
 func openSQLiteForPTRManagerTest(t *testing.T, path string) *sql.DB {
