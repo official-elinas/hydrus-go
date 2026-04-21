@@ -79,6 +79,7 @@ func NewHandler(
 	mux.Handle("/v1/import/local_file", server.post("/v1/import/local_file", server.handleImportLocalFile))
 	mux.Handle("/v1/import/upload", server.post("/v1/import/upload", server.handleImportUpload))
 	mux.Handle("/service/ptr/status", server.get("/service/ptr/status", server.handleGetPTRStatus))
+	mux.Handle("/service/ptr/sync", server.post("/service/ptr/sync", server.handlePostPTRSync))
 
 	return server.withGlobalMiddleware(mux)
 }

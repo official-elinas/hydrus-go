@@ -364,6 +364,121 @@ func TestProtectedEndpoints(t *testing.T) {
 		}
 	})
 
+	t.Run("ptr trigger returns immediate daemon-owned status", func(t *testing.T) {
+		ptrStore := stubPTRStore{
+			triggerStatus: coreptrsync.Status{
+				Enabled:     true,
+				Configured:  true,
+				ServiceName: "public tag repository",
+				Phase:       coreptrsync.PhaseSyncing,
+				IsRunning:   true,
+			},
+		}
+
+		handler := newHandlerWithPTRStore(t, ptrStore)
+		req := httptest.NewRequest(http.MethodPost, "/service/ptr/sync", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", access.AccessKey())
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		ptr, ok := payload["ptr"].(map[string]any)
+		if !ok {
+			t.Fatalf("ptr payload type = %T, want map[string]any", payload["ptr"])
+		}
+
+		if ptr["phase"] != coreptrsync.PhaseSyncing {
+			t.Fatalf("phase = %v, want %s", ptr["phase"], coreptrsync.PhaseSyncing)
+		}
+
+		if ptr["is_running"] != true {
+			t.Fatalf("is_running = %v, want true", ptr["is_running"])
+		}
+	})
+
+	t.Run("ptr trigger returns status payload when disabled", func(t *testing.T) {
+		ptrStore := stubPTRStore{
+			triggerStatus: coreptrsync.Status{
+				Enabled:   false,
+				Phase:     coreptrsync.PhaseDisabled,
+				IsRunning: false,
+			},
+			triggerErr: coreptrsync.ErrSyncDisabled,
+		}
+
+		handler := newHandlerWithPTRStore(t, ptrStore)
+		req := httptest.NewRequest(http.MethodPost, "/service/ptr/sync", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", access.AccessKey())
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		ptr := payload["ptr"].(map[string]any)
+		if ptr["phase"] != coreptrsync.PhaseDisabled {
+			t.Fatalf("phase = %v, want %s", ptr["phase"], coreptrsync.PhaseDisabled)
+		}
+	})
+
+	t.Run("ptr trigger returns not implemented without a store", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodPost, "/service/ptr/sync", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", access.AccessKey())
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotImplemented)
+		}
+	})
+
+	t.Run("ptr trigger requires import and delete permission", func(t *testing.T) {
+		searchOnlyAccess, err := NewAccessControl(
+			strings.Repeat("f", 64),
+			"search-only",
+			[]Permission{PermissionSearchAndFetchFiles},
+		)
+		if err != nil {
+			t.Fatalf("NewAccessControl() error = %v", err)
+		}
+
+		handler := NewHandler(
+			slog.New(slog.NewTextHandler(io.Discard, nil)),
+			searchOnlyAccess,
+			services.DefaultProvider(),
+			nil,
+			nil,
+			nil,
+			nil,
+			nil,
+			stubPTRStore{},
+			false,
+		)
+
+		req := httptest.NewRequest(http.MethodPost, "/service/ptr/sync", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", searchOnlyAccess.AccessKey())
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusForbidden)
+		}
+	})
+
 	t.Run("hidden service key returns unavailable", func(t *testing.T) {
 		req := httptest.NewRequest(
 			http.MethodGet,
@@ -1996,12 +2111,18 @@ func newHandlerWithPTRStore(t *testing.T, ptrStore coreptrsync.Store) http.Handl
 }
 
 type stubPTRStore struct {
-	status coreptrsync.Status
-	err    error
+	status        coreptrsync.Status
+	err           error
+	triggerStatus coreptrsync.Status
+	triggerErr    error
 }
 
 func (s stubPTRStore) Status(context.Context) (coreptrsync.Status, error) {
 	return s.status, s.err
+}
+
+func (s stubPTRStore) Trigger(context.Context) (coreptrsync.Status, error) {
+	return s.triggerStatus, s.triggerErr
 }
 
 type fakeMetadataStore struct {
