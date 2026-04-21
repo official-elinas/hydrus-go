@@ -67,6 +67,15 @@ func OpenWritable(ctx context.Context, dir string) (*Bundle, error) {
 	return openBundle(ctx, dir, modeReadWrite)
 }
 
+// MainDBPath returns the canonical path to client.db for this bundle.
+func (b *Bundle) MainDBPath() string {
+	if b == nil {
+		return ""
+	}
+
+	return b.paths.main
+}
+
 func openBundle(ctx context.Context, dir string, mode openMode) (*Bundle, error) {
 	paths, err := resolveBundlePaths(dir)
 	if err != nil {

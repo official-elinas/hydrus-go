@@ -3,6 +3,7 @@ package hydrusdb
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -277,6 +278,81 @@ func TestBundleRecordPreparedLocalImport(t *testing.T) {
 
 		if archivedRetry.FileID != result.FileID {
 			t.Fatalf("archivedRetry.FileID = %d, want %d", archivedRetry.FileID, result.FileID)
+		}
+	})
+
+	t.Run("records repository updates into only the local update domain", func(t *testing.T) {
+		dir, _ := createTestBundle(t)
+
+		bundle, err := OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		if _, err := bundle.conn.ExecContext(
+			context.Background(),
+			`INSERT INTO main.services (service_id, service_key, service_type, name, dictionary_string) VALUES (?, ?, ?, ?, ?)`,
+			16,
+			[]byte("repository updates"),
+			int(services.TypeLocalFileUpdateDomain),
+			"repository updates",
+			"{}",
+		); err != nil {
+			t.Fatalf("insert repository updates service error = %v", err)
+		}
+
+		if _, err := bundle.conn.ExecContext(
+			context.Background(),
+			`CREATE TABLE main.current_files_16 (hash_id INTEGER PRIMARY KEY, timestamp_ms INTEGER)`,
+		); err != nil {
+			t.Fatalf("create current_files_16 error = %v", err)
+		}
+
+		prepared := PreparedLocalImport{
+			HashHex:             strings.Repeat("09", 32),
+			Size:                777,
+			Mime:                29,
+			ImportedAtMS:        930123,
+			LocalFileServiceKey: hex.EncodeToString([]byte("repository updates")),
+		}
+
+		result, err := bundle.RecordPreparedLocalImport(context.Background(), prepared)
+		if err != nil {
+			t.Fatalf("RecordPreparedLocalImport() error = %v", err)
+		}
+
+		if !rowExistsInDB(
+			t,
+			bundle.conn,
+			`SELECT 1 FROM main.current_files_16 WHERE hash_id = ?`,
+			result.FileID,
+		) {
+			t.Fatal("repository updates membership row missing")
+		}
+
+		if rowExistsInDB(
+			t,
+			bundle.conn,
+			`SELECT 1 FROM main.file_inbox WHERE hash_id = ?`,
+			result.FileID,
+		) {
+			t.Fatal("file_inbox row present for repository update")
+		}
+
+		for _, tableName := range []string{"current_files_2", "current_files_3", "current_files_4", "current_files_5"} {
+			if rowExistsInDB(
+				t,
+				bundle.conn,
+				fmt.Sprintf(`SELECT 1 FROM main.%s WHERE hash_id = ?`, tableName),
+				result.FileID,
+			) {
+				t.Fatalf("unexpected repository update membership in %s", tableName)
+			}
 		}
 	})
 
