@@ -112,6 +112,28 @@ func TestLayoutPlaceFileFromPath(t *testing.T) {
 		assertFileContents(t, sourcePath, []byte("image-bytes"))
 	})
 
+	t.Run("places extensionless managed files for repository updates", func(t *testing.T) {
+		updateHash := repeatHex("ef", 32)
+		updateSource := writeTestFile(
+			t,
+			filepath.Join(t.TempDir(), "update.bin"),
+			[]byte("update-bytes"),
+			time.Unix(1_701_000_000, 0),
+		)
+
+		result, err := layout.PlaceFileFromPath(updateSource, updateHash, "")
+		if err != nil {
+			t.Fatalf("PlaceFileFromPath() error = %v", err)
+		}
+
+		expectedPath := filepath.Join(root, "fef", updateHash)
+		if result.Path != expectedPath {
+			t.Fatalf("result.Path = %q, want %q", result.Path, expectedPath)
+		}
+
+		assertFileContents(t, result.Path, []byte("update-bytes"))
+	})
+
 	t.Run("rejects conflicting existing destination", func(t *testing.T) {
 		otherHash := repeatHex("cd", 32)
 		conflictingPath, err := layout.ResolveFilePath(otherHash, ".png")

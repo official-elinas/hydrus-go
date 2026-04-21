@@ -226,7 +226,7 @@ func RelativeDirectory(kind Kind, hashHex string, prefixLength int) (string, err
 func normalizeExtension(ext string) (string, error) {
 	normalized := strings.ToLower(strings.TrimSpace(ext))
 	if normalized == "" {
-		return "", fmt.Errorf("managed file extension is required")
+		return "", nil
 	}
 
 	normalized = strings.TrimPrefix(normalized, ".")
