@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -20,6 +21,7 @@ const (
 	ptrRepositoryUpdatesTablePrefix      = "repository_updates_"
 	ptrRepositoryUnregisteredTablePrefix = "repository_unregistered_updates_"
 	ptrRepositoryProcessedTablePrefix    = "repository_updates_processed_"
+	ptrRepositoryUpdatesServiceName      = "repository updates"
 )
 
 // ErrPTRServiceNameCollision reports that the configured PTR display name is
@@ -133,9 +135,9 @@ func (b *Bundle) BeginPTRSync(
 	return lease, nil
 }
 
-// FinishPTRSyncSuccess persists the first real remote PTR snapshot and metadata
-// slice, then returns the daemon-visible idle status.
-func (b *Bundle) FinishPTRSyncSuccess(
+// PersistPTRSyncMetadata persists the fetched remote PTR snapshot and metadata
+// slice while keeping the sync lease active for follow-up update downloads.
+func (b *Bundle) PersistPTRSyncMetadata(
 	ctx context.Context,
 	cfg coreptrsync.Config,
 	runToken string,
@@ -161,6 +163,11 @@ func (b *Bundle) FinishPTRSyncSuccess(
 			return err
 		}
 
+		_, updateServiceID, err := ensurePTRRepositoryUpdatesService(ctx, tx)
+		if err != nil {
+			return err
+		}
+
 		hashIDsByHash, err := ensureHashIDsTx(ctx, tx, ptrUpdateHashesHex(remoteState.Metadata))
 		if err != nil {
 			return fmt.Errorf("ensure PTR update hash ids: %w", err)
@@ -170,10 +177,11 @@ func (b *Bundle) FinishPTRSyncSuccess(
 			return err
 		}
 
-		nextUpdateIndex, err := applyPTRRepositoryMetadata(
+		_, err = applyPTRRepositoryMetadata(
 			ctx,
 			tx,
 			serviceID,
+			updateServiceID,
 			remoteState.Metadata,
 			hashIDsByHash,
 			replaceMetadata,
@@ -182,7 +190,200 @@ func (b *Bundle) FinishPTRSyncSuccess(
 			return err
 		}
 
+		downloadedCount, err := queryPTRDownloadedUpdateCount(ctx, tx, updateServiceID)
+		if err != nil {
+			return err
+		}
+
+		if err := updatePTRSyncDownloadedUpdateCount(ctx, tx, runToken, downloadedCount); err != nil {
+			return err
+		}
+
+		status, err = lookupPTRSyncStatus(ctx, tx, cfg, service)
+		return err
+	})
+	if err != nil {
+		return coreptrsync.Status{}, err
+	}
+
+	return status, nil
+}
+
+// CompletePTRSyncSuccess ends an active PTR sync lease after metadata
+// persistence and update downloads are finished.
+func (b *Bundle) CompletePTRSyncSuccess(
+	ctx context.Context,
+	cfg coreptrsync.Config,
+	runToken string,
+) (coreptrsync.Status, error) {
+	if !cfg.Enabled {
+		return coreptrsync.Status{}, coreptrsync.ErrSyncDisabled
+	}
+
+	status := coreptrsync.Status{}
+	err := b.WithImmediateTx(ctx, func(tx *ImmediateTx) error {
+		service, serviceID, err := lookupPTRServiceTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+
+		repositoryUpdatesTableName, _, _ := generatePTRRepositoryTableNames(serviceID)
+		nextUpdateIndex, err := queryPTRNextUpdateIndex(ctx, tx, repositoryUpdatesTableName)
+		if err != nil {
+			return err
+		}
+
 		if err := setPTRSyncIdle(ctx, tx, serviceID, runToken, nextUpdateIndex, ""); err != nil {
+			return err
+		}
+
+		status, err = lookupPTRSyncStatus(ctx, tx, cfg, service)
+		return err
+	})
+	if err != nil {
+		return coreptrsync.Status{}, err
+	}
+
+	return status, nil
+}
+
+// FinishPTRSyncSuccess preserves the original wrapper behavior for callers that
+// complete PTR sync in one step.
+func (b *Bundle) FinishPTRSyncSuccess(
+	ctx context.Context,
+	cfg coreptrsync.Config,
+	runToken string,
+	remoteState coreptrsync.RemoteState,
+	replaceMetadata bool,
+) (coreptrsync.Status, error) {
+	if _, err := b.PersistPTRSyncMetadata(ctx, cfg, runToken, remoteState, replaceMetadata); err != nil {
+		return coreptrsync.Status{}, err
+	}
+
+	return b.CompletePTRSyncSuccess(ctx, cfg, runToken)
+}
+
+// ListPTRPendingUpdateHashes returns the currently unregistered PTR update
+// hashes in deterministic hash_id order for an active run.
+func (b *Bundle) ListPTRPendingUpdateHashes(
+	ctx context.Context,
+	cfg coreptrsync.Config,
+	runToken string,
+) ([][]byte, error) {
+	if !cfg.Enabled {
+		return nil, coreptrsync.ErrSyncDisabled
+	}
+
+	var hashes [][]byte
+	err := b.WithImmediateTx(ctx, func(tx *ImmediateTx) error {
+		_, serviceID, err := lookupPTRServiceTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+
+		if err := ensurePTRSyncRunActive(ctx, tx, serviceID, runToken); err != nil {
+			return err
+		}
+
+		_, repositoryUnregisteredTableName, _ := generatePTRRepositoryTableNames(serviceID)
+		rows, err := tx.QueryContext(
+			ctx,
+			fmt.Sprintf(
+				`SELECT h.hash
+				FROM %s ru
+				JOIN external_master.hashes h USING (hash_id)
+				ORDER BY ru.hash_id ASC`,
+				repositoryUnregisteredTableName,
+			),
+		)
+		if err != nil {
+			return fmt.Errorf("query PTR pending update hashes: %w", err)
+		}
+		defer rows.Close()
+
+		hashes = nil
+		for rows.Next() {
+			var hash []byte
+			if err := rows.Scan(&hash); err != nil {
+				return fmt.Errorf("scan PTR pending update hash: %w", err)
+			}
+
+			hashes = append(hashes, append([]byte(nil), hash...))
+		}
+
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("iterate PTR pending update hashes: %w", err)
+		}
+
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return hashes, nil
+}
+
+// FinalizePTRDownloadedUpdate marks one successfully downloaded PTR update as
+// locally registered while keeping the sync lease active.
+func (b *Bundle) FinalizePTRDownloadedUpdate(
+	ctx context.Context,
+	cfg coreptrsync.Config,
+	runToken string,
+	hashHex string,
+) (coreptrsync.Status, error) {
+	if !cfg.Enabled {
+		return coreptrsync.Status{}, coreptrsync.ErrSyncDisabled
+	}
+
+	status := coreptrsync.Status{}
+	err := b.WithImmediateTx(ctx, func(tx *ImmediateTx) error {
+		service, serviceID, err := lookupPTRServiceTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+
+		if err := ensurePTRSyncPersistenceTables(ctx, tx, serviceID); err != nil {
+			return err
+		}
+
+		if err := ensurePTRSyncRunActive(ctx, tx, serviceID, runToken); err != nil {
+			return err
+		}
+
+		_, updateServiceID, err := ensurePTRRepositoryUpdatesService(ctx, tx)
+		if err != nil {
+			return err
+		}
+
+		hashBytes, decodeErr := hex.DecodeString(strings.ToLower(strings.TrimSpace(hashHex)))
+		if decodeErr != nil {
+			return fmt.Errorf("decode PTR downloaded update hash: %w", decodeErr)
+		}
+
+		hashID, ok, err := lookupHashIDByHash(ctx, tx, hashBytes)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("PTR downloaded update hash %s is not registered locally", hashHex)
+		}
+
+		_, repositoryUnregisteredTableName, _ := generatePTRRepositoryTableNames(serviceID)
+		if _, err := tx.ExecContext(
+			ctx,
+			fmt.Sprintf("DELETE FROM %s WHERE hash_id = ?", repositoryUnregisteredTableName),
+			hashID,
+		); err != nil {
+			return fmt.Errorf("delete PTR repository unregistered update row: %w", err)
+		}
+
+		downloadedCount, err := queryPTRDownloadedUpdateCount(ctx, tx, updateServiceID)
+		if err != nil {
+			return err
+		}
+
+		if err := updatePTRSyncDownloadedUpdateCount(ctx, tx, runToken, downloadedCount); err != nil {
 			return err
 		}
 
@@ -289,6 +490,10 @@ func preparePTRSyncFoundationTxWithMode(
 	}
 
 	if err := ensurePTRMappingsTables(ctx, tx, serviceID); err != nil {
+		return services.Service{}, 0, err
+	}
+
+	if _, _, err := ensurePTRRepositoryUpdatesService(ctx, tx); err != nil {
 		return services.Service{}, 0, err
 	}
 
@@ -471,6 +676,84 @@ func ensurePTRMappingsTables(ctx context.Context, tx *ImmediateTx, serviceID int
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("ensure PTR mappings table: %w", err)
 		}
+	}
+
+	return nil
+}
+
+func ensurePTRRepositoryUpdatesService(
+	ctx context.Context,
+	tx *ImmediateTx,
+) (services.Service, int64, error) {
+	serviceKeyHex := hex.EncodeToString([]byte(ptrRepositoryUpdatesServiceName))
+	service, ok, err := lookupServiceByKeyTx(ctx, tx, serviceKeyHex)
+	if err != nil {
+		return services.Service{}, 0, err
+	}
+
+	if ok {
+		if service.Type != services.TypeLocalFileUpdateDomain {
+			return services.Service{}, 0, fmt.Errorf(
+				"existing repository updates service key belongs to service type %d, want %d",
+				service.Type,
+				services.TypeLocalFileUpdateDomain,
+			)
+		}
+
+		serviceID, err := lookupServiceIDByKeyTx(ctx, tx, service.ServiceKey)
+		if err != nil {
+			return services.Service{}, 0, err
+		}
+
+		if err := ensureCurrentFilesTable(ctx, tx, serviceID); err != nil {
+			return services.Service{}, 0, err
+		}
+
+		return service, serviceID, nil
+	}
+
+	result, err := tx.ExecContext(
+		ctx,
+		`INSERT INTO main.services (service_key, service_type, name, dictionary_string)
+		VALUES (?, ?, ?, ?)`,
+		[]byte(ptrRepositoryUpdatesServiceName),
+		int(services.TypeLocalFileUpdateDomain),
+		ptrRepositoryUpdatesServiceName,
+		"{}",
+	)
+	if err != nil {
+		return services.Service{}, 0, fmt.Errorf("insert repository updates service: %w", err)
+	}
+
+	serviceID, err := result.LastInsertId()
+	if err != nil {
+		return services.Service{}, 0, fmt.Errorf("read repository updates service id: %w", err)
+	}
+
+	if err := ensureCurrentFilesTable(ctx, tx, serviceID); err != nil {
+		return services.Service{}, 0, err
+	}
+
+	return services.Service{
+		Name:       ptrRepositoryUpdatesServiceName,
+		ServiceKey: serviceKeyHex,
+		Type:       services.TypeLocalFileUpdateDomain,
+		TypePretty: services.TypePretty(services.TypeLocalFileUpdateDomain),
+	}, serviceID, nil
+}
+
+func ensureCurrentFilesTable(ctx context.Context, tx *ImmediateTx, serviceID int64) error {
+	if _, err := tx.ExecContext(
+		ctx,
+		fmt.Sprintf(
+			`CREATE TABLE IF NOT EXISTS main.current_files_%d (
+				hash_id INTEGER PRIMARY KEY,
+				timestamp_ms INTEGER
+			)`,
+			serviceID,
+		),
+	); err != nil {
+		return fmt.Errorf("ensure current_files_%d table: %w", serviceID, err)
 	}
 
 	return nil
@@ -773,6 +1056,40 @@ func lookupPTRSyncStatus(
 	return status, nil
 }
 
+func updatePTRSyncDownloadedUpdateCount(
+	ctx context.Context,
+	tx *ImmediateTx,
+	runToken string,
+	downloadedCount int64,
+) error {
+	nowMS := time.Now().UTC().UnixMilli()
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE main.ptr_sync_state
+		SET downloaded_update_count = ?,
+			updated_at_ms = ?
+		WHERE singleton = ? AND is_running = 1 AND run_token = ?`,
+		downloadedCount,
+		nowMS,
+		ptrSyncStateSingleton,
+		runToken,
+	)
+	if err != nil {
+		return fmt.Errorf("update ptr_sync_state downloaded update count: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read ptr_sync_state downloaded update count rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return errPTRSyncRunNotActive
+	}
+
+	return nil
+}
+
 func defaultPTRSyncStatus(cfg coreptrsync.Config) coreptrsync.Status {
 	phase := coreptrsync.PhaseDisabled
 	if cfg.Enabled {
@@ -1065,12 +1382,14 @@ func applyPTRRepositoryMetadata(
 	ctx context.Context,
 	tx *ImmediateTx,
 	serviceID int64,
+	updateServiceID int64,
 	metadata coreptrsync.MetadataSlice,
 	hashIDsByHash map[string]int64,
 	replaceMetadata bool,
 ) (int64, error) {
 	repositoryUpdatesTableName, repositoryUnregisteredTableName, repositoryProcessedTableName :=
 		generatePTRRepositoryTableNames(serviceID)
+	currentUpdatesTableName := fmt.Sprintf("current_files_%d", updateServiceID)
 
 	type repositoryUpdateRow struct {
 		updateIndex int64
@@ -1102,6 +1421,17 @@ func applyPTRRepositoryMetadata(
 
 		if err := prunePTRProcessedUpdates(ctx, tx, repositoryProcessedTableName, allFutureHashIDs); err != nil {
 			return 0, err
+		}
+
+		if _, err := tx.ExecContext(
+			ctx,
+			fmt.Sprintf(
+				"DELETE FROM %s WHERE hash_id NOT IN (SELECT hash_id FROM %s)",
+				currentUpdatesTableName,
+				repositoryUpdatesTableName,
+			),
+		); err != nil {
+			return 0, fmt.Errorf("prune stale repository update current rows: %w", err)
 		}
 	}
 
@@ -1228,6 +1558,475 @@ func ptrUpdateHashesHex(metadata coreptrsync.MetadataSlice) []string {
 	}
 
 	return hashes
+}
+
+func resolvePTRUpdateDomainService(definitions []serviceDefinition) (serviceDefinition, error) {
+	servicesByType := []serviceDefinition{}
+	for _, definition := range definitions {
+		if definition.serviceType != services.TypeLocalFileUpdateDomain {
+			continue
+		}
+
+		servicesByType = append(servicesByType, definition)
+	}
+
+	if len(servicesByType) == 0 {
+		return serviceDefinition{}, errors.New("required repository updates local file domain is missing")
+	}
+
+	if len(servicesByType) > 1 {
+		return serviceDefinition{}, errors.New("multiple repository updates local file domains are configured")
+	}
+
+	return servicesByType[0], nil
+}
+
+func queryPTRDownloadedUpdateCount(
+	ctx context.Context,
+	q queryRowContextQuerier,
+	updateServiceID int64,
+) (int64, error) {
+	row := q.QueryRowContext(
+		ctx,
+		fmt.Sprintf("SELECT COUNT(*) FROM main.current_files_%d", updateServiceID),
+	)
+
+	var count int64
+	if err := row.Scan(&count); err != nil {
+		return 0, fmt.Errorf("query PTR downloaded update count: %w", err)
+	}
+
+	return count, nil
+}
+
+func recordPreparedLocalImportTx(
+	ctx context.Context,
+	tx *ImmediateTx,
+	prepared PreparedLocalImport,
+) (PreparedLocalImportResult, error) {
+	normalized, err := normalizePreparedLocalImport(prepared)
+	if err != nil {
+		return PreparedLocalImportResult{}, err
+	}
+
+	plan, err := resolvePreparedLocalImportPlanTx(ctx, tx, normalized.localFileServiceKey)
+	if err != nil {
+		return PreparedLocalImportResult{}, err
+	}
+
+	result := PreparedLocalImportResult{}
+
+	hashID, hashExists, err := lookupHashIDByHash(ctx, tx, normalized.hashBytes)
+	if err != nil {
+		return PreparedLocalImportResult{}, err
+	}
+
+	if hashExists {
+		record, ok, err := lookupBasicRecordByHashID(ctx, tx, hashID)
+		if err != nil {
+			return PreparedLocalImportResult{}, err
+		}
+
+		if ok {
+			matches, err := preparedLocalImportMatchesExistingTx(ctx, tx, hashID, normalized, plan, record)
+			if err != nil {
+				return PreparedLocalImportResult{}, err
+			}
+
+			if !matches {
+				return PreparedLocalImportResult{}, fmt.Errorf(
+					"prepared import conflicts with existing file_id %d",
+					hashID,
+				)
+			}
+
+			result = PreparedLocalImportResult{FileID: hashID, AlreadyImported: true}
+			if err := ensurePreparedAuxiliaryMetadata(ctx, tx, hashID, normalized, plan); err != nil {
+				return PreparedLocalImportResult{}, err
+			}
+
+			return result, nil
+		}
+	} else {
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO external_master.hashes (hash) VALUES (?)`,
+			normalized.hashBytes,
+		); err != nil {
+			return PreparedLocalImportResult{}, fmt.Errorf("insert external_master.hashes row: %w", err)
+		}
+
+		hashID, hashExists, err = lookupHashIDByHash(ctx, tx, normalized.hashBytes)
+		if err != nil {
+			return PreparedLocalImportResult{}, err
+		}
+
+		if !hashExists {
+			return PreparedLocalImportResult{}, errors.New("inserted hash row was not readable inside transaction")
+		}
+	}
+
+	if err := insertPreparedFilesInfo(ctx, tx, hashID, normalized); err != nil {
+		return PreparedLocalImportResult{}, err
+	}
+
+	if err := ensurePreparedAuxiliaryMetadata(ctx, tx, hashID, normalized, plan); err != nil {
+		return PreparedLocalImportResult{}, err
+	}
+
+	if plan.createInbox {
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO main.file_inbox (hash_id) VALUES (?)`,
+			hashID,
+		); err != nil {
+			return PreparedLocalImportResult{}, fmt.Errorf("insert file_inbox row: %w", err)
+		}
+	}
+
+	if normalized.fileModifiedAtMS.Valid {
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO main.file_modified_timestamps (hash_id, file_modified_timestamp_ms) VALUES (?, ?)`,
+			hashID,
+			normalized.fileModifiedAtMS.Int64,
+		); err != nil {
+			return PreparedLocalImportResult{}, fmt.Errorf("insert file_modified_timestamps row: %w", err)
+		}
+	}
+
+	for _, membership := range plan.currentMemberships {
+		if err := insertPreparedCurrentMembership(ctx, tx, hashID, membership, normalized.importedAtMS); err != nil {
+			return PreparedLocalImportResult{}, err
+		}
+	}
+
+	result = PreparedLocalImportResult{FileID: hashID}
+	return result, nil
+}
+
+func resolvePreparedLocalImportPlanTx(
+	ctx context.Context,
+	tx *ImmediateTx,
+	localFileServiceKey string,
+) (preparedLocalImportPlan, error) {
+	definitions, err := lookupAllServiceDefinitionsQuerier(ctx, tx)
+	if err != nil {
+		return preparedLocalImportPlan{}, err
+	}
+
+	tableNames, err := lookupSchemaTableNamesTx(ctx, tx, "main")
+	if err != nil {
+		return preparedLocalImportPlan{}, err
+	}
+
+	localFileService, err := resolveTargetLocalFileService(definitions, localFileServiceKey)
+	if err != nil {
+		return preparedLocalImportPlan{}, err
+	}
+
+	hydrusLocalStorage, ok, err := findUniqueServiceByType(definitions, services.TypeHydrusLocalFileStorage)
+	if err != nil {
+		return preparedLocalImportPlan{}, err
+	}
+	if !ok && localFileService.serviceType != services.TypeLocalFileUpdateDomain {
+		return preparedLocalImportPlan{}, errors.New("required hydrus local file storage service is missing")
+	}
+
+	plan := preparedLocalImportPlan{}
+	_, plan.hasPixelHashMap = tableNames["pixel_hash_map"]
+	_, plan.hasTransparency = tableNames["has_transparency"]
+	plan.createInbox = localFileService.serviceType == services.TypeLocalFileDomain
+
+	if localFileService.serviceType == services.TypeLocalFileUpdateDomain {
+		if err := appendPreparedCurrentMembership(&plan, tableNames, localFileService, true, true); err != nil {
+			return preparedLocalImportPlan{}, err
+		}
+
+		return plan, nil
+	}
+
+	if err := appendPreparedCurrentMembership(&plan, tableNames, localFileService, true, true); err != nil {
+		return preparedLocalImportPlan{}, err
+	}
+
+	if err := appendPreparedCurrentMembership(&plan, tableNames, hydrusLocalStorage, true, true); err != nil {
+		return preparedLocalImportPlan{}, err
+	}
+
+	if combinedLocal, ok, err := findUniqueServiceByType(definitions, services.TypeCombinedLocalFileDomains); err != nil {
+		return preparedLocalImportPlan{}, err
+	} else if ok {
+		if err := appendPreparedCurrentMembership(&plan, tableNames, combinedLocal, true, false); err != nil {
+			return preparedLocalImportPlan{}, err
+		}
+	}
+
+	if combinedFile, ok, err := findUniqueServiceByType(definitions, services.TypeCombinedFile); err != nil {
+		return preparedLocalImportPlan{}, err
+	} else if ok {
+		if err := appendPreparedCurrentMembership(&plan, tableNames, combinedFile, false, false); err != nil {
+			return preparedLocalImportPlan{}, err
+		}
+	}
+
+	return plan, nil
+}
+
+func lookupSchemaTableNamesTx(
+	ctx context.Context,
+	q queryRowContextQuerier,
+	schemaName string,
+) (map[string]struct{}, error) {
+	switch schemaName {
+	case "main", "external_master", "external_caches", "external_mappings":
+	default:
+		return nil, fmt.Errorf("unsupported sqlite schema name %q", schemaName)
+	}
+
+	rows, err := q.QueryContext(
+		ctx,
+		fmt.Sprintf(`SELECT name FROM %s.sqlite_master WHERE type = 'table'`, schemaName),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query sqlite table names for schema %s: %w", schemaName, err)
+	}
+	defer rows.Close()
+
+	tableNames := map[string]struct{}{}
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scan sqlite table name for schema %s: %w", schemaName, err)
+		}
+
+		tableNames[name] = struct{}{}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate sqlite table names for schema %s: %w", schemaName, err)
+	}
+
+	return tableNames, nil
+}
+
+func preparedLocalImportMatchesExistingTx(
+	ctx context.Context,
+	q queryRowContextQuerier,
+	hashID int64,
+	prepared normalizedPreparedLocalImport,
+	plan preparedLocalImportPlan,
+	record basicRecord,
+) (bool, error) {
+	if !basicRecordMatchesPreparedImport(record, prepared) {
+		return false, nil
+	}
+
+	fileModifiedTimestamp, fileModifiedExists, err := lookupNullableInt64(
+		ctx,
+		q,
+		`SELECT file_modified_timestamp_ms
+		FROM main.file_modified_timestamps
+		WHERE hash_id = ?`,
+		hashID,
+	)
+	if err != nil {
+		return false, err
+	}
+	if !fileModifiedRowMatches(fileModifiedTimestamp, fileModifiedExists, prepared.fileModifiedAtMS) {
+		return false, nil
+	}
+
+	currentByHashID, _, err := lookupFileServiceMembershipsTx(ctx, q, []int64{hashID})
+	if err != nil {
+		return false, err
+	}
+
+	if !currentMembershipsMatchPlan(currentByHashID[hashID], plan) {
+		return false, nil
+	}
+
+	if plan.hasPixelHashMap {
+		pixelHashHex, pixelHashExists, err := lookupPreparedPixelHashHexByHashID(ctx, q, hashID)
+		if err != nil {
+			return false, err
+		}
+
+		if !optionalHashHexMatches(pixelHashHex, pixelHashExists, prepared.pixelHashHex) {
+			return false, nil
+		}
+	}
+
+	if plan.hasTransparency {
+		hasTransparency, err := lookupPreparedHasTransparencyByHashID(ctx, q, hashID)
+		if err != nil {
+			return false, err
+		}
+
+		if !optionalTransparencyMatches(hasTransparency, prepared.hasTransparency) {
+			return false, nil
+		}
+	}
+
+	return true, nil
+}
+
+func lookupFileServiceMembershipsTx(
+	ctx context.Context,
+	q queryRowContextQuerier,
+	fileIDs []int64,
+) (map[int64][]currentFileServiceMembership, map[int64][]deletedFileServiceMembership, error) {
+	if len(fileIDs) == 0 {
+		return map[int64][]currentFileServiceMembership{}, map[int64][]deletedFileServiceMembership{}, nil
+	}
+
+	definitions, err := lookupAllServiceDefinitionsQuerier(ctx, q)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	tableNames, err := lookupSchemaTableNamesTx(ctx, q, "main")
+	if err != nil {
+		return nil, nil, err
+	}
+
+	currentByHashID := make(map[int64][]currentFileServiceMembership, len(fileIDs))
+	deletedByHashID := make(map[int64][]deletedFileServiceMembership, len(fileIDs))
+	for _, fileID := range fileIDs {
+		currentByHashID[fileID] = []currentFileServiceMembership{}
+		deletedByHashID[fileID] = []deletedFileServiceMembership{}
+	}
+
+	sortedFileIDs := append([]int64(nil), fileIDs...)
+	sort.Slice(sortedFileIDs, func(i, j int) bool { return sortedFileIDs[i] < sortedFileIDs[j] })
+
+	for _, service := range definitions {
+		currentTableName := fmt.Sprintf("current_files_%d", service.id)
+		if _, ok := tableNames[currentTableName]; ok {
+			memberships, err := lookupCurrentMembershipsTx(ctx, q, currentTableName, service, sortedFileIDs)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			for hashID, rows := range memberships {
+				currentByHashID[hashID] = append(currentByHashID[hashID], rows...)
+			}
+		}
+
+		deletedTableName := fmt.Sprintf("deleted_files_%d", service.id)
+		if _, ok := tableNames[deletedTableName]; ok {
+			memberships, err := lookupDeletedMembershipsTx(ctx, q, deletedTableName, service, sortedFileIDs)
+			if err != nil {
+				return nil, nil, err
+			}
+
+			for hashID, rows := range memberships {
+				deletedByHashID[hashID] = append(deletedByHashID[hashID], rows...)
+			}
+		}
+	}
+
+	return currentByHashID, deletedByHashID, nil
+}
+
+func lookupCurrentMembershipsTx(
+	ctx context.Context,
+	q queryRowContextQuerier,
+	tableName string,
+	service serviceDefinition,
+	fileIDs []int64,
+) (map[int64][]currentFileServiceMembership, error) {
+	rows, err := q.QueryContext(
+		ctx,
+		fmt.Sprintf(`SELECT hash_id, timestamp_ms FROM main.%s`, tableName),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query current file service %s rows: %w", tableName, err)
+	}
+	defer rows.Close()
+
+	allowed := make(map[int64]struct{}, len(fileIDs))
+	for _, fileID := range fileIDs {
+		allowed[fileID] = struct{}{}
+	}
+
+	memberships := map[int64][]currentFileServiceMembership{}
+	for rows.Next() {
+		var (
+			hashID            int64
+			importedTimestamp sql.NullInt64
+		)
+
+		if err := rows.Scan(&hashID, &importedTimestamp); err != nil {
+			return nil, fmt.Errorf("scan current file service %s row: %w", tableName, err)
+		}
+
+		if _, ok := allowed[hashID]; !ok {
+			continue
+		}
+
+		memberships[hashID] = append(memberships[hashID], currentFileServiceMembership{
+			service:             service,
+			importedTimestampMS: importedTimestamp,
+		})
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate current file service %s rows: %w", tableName, err)
+	}
+
+	return memberships, nil
+}
+
+func lookupDeletedMembershipsTx(
+	ctx context.Context,
+	q queryRowContextQuerier,
+	tableName string,
+	service serviceDefinition,
+	fileIDs []int64,
+) (map[int64][]deletedFileServiceMembership, error) {
+	rows, err := q.QueryContext(
+		ctx,
+		fmt.Sprintf(`SELECT hash_id, timestamp_ms, original_timestamp_ms FROM main.%s`, tableName),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query deleted file service %s rows: %w", tableName, err)
+	}
+	defer rows.Close()
+
+	allowed := make(map[int64]struct{}, len(fileIDs))
+	for _, fileID := range fileIDs {
+		allowed[fileID] = struct{}{}
+	}
+
+	memberships := map[int64][]deletedFileServiceMembership{}
+	for rows.Next() {
+		var (
+			hashID            int64
+			deletedTimestamp  sql.NullInt64
+			originalTimestamp sql.NullInt64
+		)
+
+		if err := rows.Scan(&hashID, &deletedTimestamp, &originalTimestamp); err != nil {
+			return nil, fmt.Errorf("scan deleted file service %s row: %w", tableName, err)
+		}
+
+		if _, ok := allowed[hashID]; !ok {
+			continue
+		}
+
+		memberships[hashID] = append(memberships[hashID], deletedFileServiceMembership{
+			service:                   service,
+			deletedTimestampMS:        deletedTimestamp,
+			originalImportedTimestamp: originalTimestamp,
+		})
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate deleted file service %s rows: %w", tableName, err)
+	}
+
+	return memberships, nil
 }
 
 func newPTRSyncRunToken() (string, error) {

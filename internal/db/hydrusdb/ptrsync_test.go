@@ -3,6 +3,7 @@ package hydrusdb
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -106,10 +107,17 @@ func TestBundleEnsurePTRSyncFoundation(t *testing.T) {
 
 		repositoryUpdatesTableName, repositoryUnregisteredTableName, repositoryProcessedTableName :=
 			generatePTRRepositoryTableNames(serviceID)
+		repositoryUpdatesServiceID := selectInt64(
+			t,
+			bundle.conn,
+			`SELECT service_id FROM main.services WHERE service_key = ?`,
+			[]byte("repository updates"),
+		)
 		for _, tableName := range []string{
 			repositoryUpdatesTableName,
 			repositoryUnregisteredTableName,
 			repositoryProcessedTableName,
+			fmt.Sprintf("current_files_%d", repositoryUpdatesServiceID),
 			"ptr_sync_remote_state",
 		} {
 			if !rowExistsInDB(
@@ -570,6 +578,90 @@ func TestBundleEnsurePTRSyncFoundation(t *testing.T) {
 		_, err = bundle.EnsurePTRSyncFoundation(context.Background(), cfg)
 		if !errors.Is(err, ErrPTRServiceNameCollision) {
 			t.Fatalf("EnsurePTRSyncFoundation() error = %v, want ErrPTRServiceNameCollision", err)
+		}
+	})
+
+	t.Run("finalize downloaded update removes unregistered row and updates counters from table state", func(t *testing.T) {
+		dir, _ := createTestBundle(t)
+
+		bundle, err := OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		cfg := coreptrsync.DefaultConfig()
+		cfg.Enabled = true
+
+		remoteState := testPTRRemoteState(
+			t,
+			1700000200,
+			testPTRMetadataUpdate(t, 0, 10, 20, strings.Repeat("11", 32)),
+		)
+		lease, err := bundle.BeginPTRSync(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("BeginPTRSync() error = %v", err)
+		}
+
+		status, err := bundle.PersistPTRSyncMetadata(context.Background(), cfg, lease.RunToken, remoteState, true)
+		if err != nil {
+			t.Fatalf("PersistPTRSyncMetadata() error = %v", err)
+		}
+
+		if !status.IsRunning {
+			t.Fatal("status.IsRunning = false, want true")
+		}
+
+		if status.DownloadedUpdateCount != 0 {
+			t.Fatalf("status.DownloadedUpdateCount = %d, want 0", status.DownloadedUpdateCount)
+		}
+
+		if _, err := bundle.RecordPreparedLocalImport(context.Background(), PreparedLocalImport{
+			HashHex:             strings.Repeat("11", 32),
+			Size:                17,
+			Mime:                29,
+			ImportedAtMS:        1111,
+			LocalFileServiceKey: hex.EncodeToString([]byte("repository updates")),
+		}); err != nil {
+			t.Fatalf("RecordPreparedLocalImport() error = %v", err)
+		}
+
+		status, err = bundle.FinalizePTRDownloadedUpdate(context.Background(), cfg, lease.RunToken, strings.Repeat("11", 32))
+		if err != nil {
+			t.Fatalf("FinalizePTRDownloadedUpdate() error = %v", err)
+		}
+
+		if status.DownloadedUpdateCount != 1 {
+			t.Fatalf("status.DownloadedUpdateCount = %d, want 1", status.DownloadedUpdateCount)
+		}
+
+		serviceID := selectInt64(
+			t,
+			bundle.conn,
+			`SELECT service_id FROM main.services WHERE service_key = ?`,
+			mustDecodeHex(t, coreptrsync.DaemonServiceKeyHex()),
+		)
+		_, repositoryUnregisteredTableName, _ := generatePTRRepositoryTableNames(serviceID)
+
+		if count := selectInt64(
+			t,
+			bundle.conn,
+			fmt.Sprintf("SELECT COUNT(*) FROM %s", repositoryUnregisteredTableName),
+		); count != 0 {
+			t.Fatalf("repository unregistered row count = %d, want 0", count)
+		}
+
+		status, err = bundle.CompletePTRSyncSuccess(context.Background(), cfg, lease.RunToken)
+		if err != nil {
+			t.Fatalf("CompletePTRSyncSuccess() error = %v", err)
+		}
+
+		if status.Phase != coreptrsync.PhaseIdle {
+			t.Fatalf("status.Phase = %q, want %q", status.Phase, coreptrsync.PhaseIdle)
 		}
 	})
 }
