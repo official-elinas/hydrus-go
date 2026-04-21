@@ -135,7 +135,8 @@ Last updated: 2026-04-19
 
 - [x] define PTR service configuration defaults, shared read-only anonymous auth, and local daemon status/state requirements
 - [x] add daemon-side PTR service/mapping-table/state foundations and a pollable status endpoint
-- [ ] implement actual PTR metadata/update download and local processing
+- [x] add real anonymous PTR session/account/options/tag-filter/metadata fetch and durable snapshot persistence
+- [ ] implement actual PTR `/update` download and local processing
 - [ ] make imported files eligible for PTR-driven tag/update retrieval
 - [ ] verify end-to-end value from local import through PTR sync and tag acquisition
 

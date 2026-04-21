@@ -245,8 +245,11 @@ Important current limitations:
   - opt-in public PTR defaults (shared read-only anonymous key, host, port)
   - local PTR service/mapping-table provisioning
   - persisted daemon-side PTR status/state foundation
+  - real anonymous PTR session/account/options/tag-filter/metadata fetch plumbing
+  - durable remote snapshot and repository-metadata persistence in daemon-owned storage
   - `GET /service/ptr/status` for thin-client polling
-- actual PTR update download/processing is not implemented yet, so the daemon still does not sync definitions/content from the live repository
+- there is not yet a public daemon trigger/background runner for the real PTR fetch path
+- actual PTR `/update` download/processing is not implemented yet, so the daemon still does not sync definitions/content from the live repository
 - no search/tagging engine yet
 - no downloader/subscription/parsing system yet
 
@@ -430,6 +433,10 @@ This bootstrap currently targets the Go toolchain declared in `go.mod`
 - The daemon is local-only by default.
 - `HYDRUS_GO_ALLOW_NON_LOCAL_CONNECTIONS=true` is an explicit opt-in.
 - CORS is disabled by default.
+- PTR sync is opt-in and currently mirrors Hydrus anonymous PTR transport parity:
+  - remote PTR TLS accepts self-signed certificates
+  - login/session redirects are refused so the shared `Hydrus-Key` header is not forwarded
+  - PTR responses are bounded both before and after Hydrus zlib decompression
 - `HYDRUS_GO_ENABLE_CORS=true` is intentionally broad in this bootstrap slice
   and should currently be treated as a development convenience rather than a
   hardened browser security policy.
