@@ -30,6 +30,7 @@ The first prototype iteration is intentionally narrow:
 
 - connect to the local or remote daemon
 - browse recent local files in a dense thumbnail grid
+  - load additional recent results as the user scrolls, backed by the daemon's existing offset/limit API
 - queue imports from:
   - a single-file picker
   - a folder picker
@@ -44,6 +45,7 @@ The first prototype iteration is intentionally narrow:
   - keep preview bounded for thin-client responsiveness (currently 16 MiB payload,
     8192px maximum dimension, 16,000,000 decoded pixels)
 - show selected-file metadata in a left-side details pane, including daemon-served tag groups for the selected file
+- show daemon-owned PTR sync status and a manual sync action in a dedicated popup launched from the top-level `Network` menu, mirroring a small part of Hydrus's review-services visibility without moving PTR network logic into the client
 - trash one selected file through the daemon's trash endpoint
 - refresh the grid and metadata state after each mutation
 
@@ -105,6 +107,7 @@ Important notes:
 Current minimum window structure:
 
 - compact top action bar: connect, refresh, add file, add folder, trash selected
+- top menu bar with File / Pages / Database / Network / Services / Help entries
 - left Fyne-managed split pane:
   - upper controls/import pane:
     - daemon connection state
@@ -113,7 +116,9 @@ Current minimum window structure:
     - last action/result text
   - lower details pane:
     - selected-file preview for supported JPEG/PNG/GIF image types
-    - selected-file metadata
+    - selected-file tag metadata
+    - selected-file metadata details
+- `Network > PTR Sync` opens a dedicated popup window for daemon-owned PTR status, refresh, and manual sync actions
 - dominant center thumbnail grid
 - bottom status line
 

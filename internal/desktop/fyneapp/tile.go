@@ -42,6 +42,7 @@ func newMediaTile() *mediaTile {
 	tile.selectionBox.StrokeWidth = 2
 	tile.selectionBox.StrokeColor = color.NRGBA{R: 58, G: 58, B: 62, A: 255}
 	tile.preview.FillMode = canvas.ImageFillContain
+	tile.preview.ScaleMode = canvas.ImageScaleSmooth
 	tile.overlay.Alignment = fyne.TextAlignCenter
 	tile.title.Wrapping = fyne.TextWrapWord
 	tile.subtitle.Wrapping = fyne.TextWrapWord
@@ -92,15 +93,18 @@ func (t *mediaTile) CreateRenderer() fyne.WidgetRenderer {
 		container.NewCenter(t.overlay),
 		t.selectionBox,
 	)
-	content := container.NewVBox(
+	textBlock := container.NewVBox(t.title, t.subtitle)
+	content := container.NewBorder(
+		nil,
+		container.NewPadded(textBlock),
+		nil,
+		nil,
 		container.NewPadded(previewArea),
-		container.NewPadded(t.title),
-		container.NewPadded(t.subtitle),
 	)
 
 	return widget.NewSimpleRenderer(container.NewStack(t.background, content))
 }
 
 func (t *mediaTile) MinSize() fyne.Size {
-	return fyne.NewSize(180, 220)
+	return fyne.NewSize(220, 248)
 }

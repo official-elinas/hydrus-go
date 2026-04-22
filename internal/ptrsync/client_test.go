@@ -12,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
 )
@@ -295,6 +296,154 @@ func TestClientFetchRemoteState(t *testing.T) {
 		_, _, err = client.FetchUpdate(context.Background(), mustDecodeHexString(t, strings.Repeat("ab", 32)))
 		if err == nil || !strings.Contains(err.Error(), "did not match expected") {
 			t.Fatalf("FetchUpdate() error = %v, want hash mismatch", err)
+		}
+	})
+}
+
+func TestClientFetchRemoteStateRetriesBusyResponses(t *testing.T) {
+	originalDelays := ptrSyncBusyRetryDelays
+	ptrSyncBusyRetryDelays = []time.Duration{0, 0}
+	t.Cleanup(func() {
+		ptrSyncBusyRetryDelays = originalDelays
+	})
+
+	t.Run("retries PTR session login when the remote is temporarily busy", func(t *testing.T) {
+		var sessionAttempts atomic.Int32
+
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/session_key":
+				if sessionAttempts.Add(1) <= 2 {
+					http.Error(
+						w,
+						`{"error":"This server is busy, please try again later.","exception_type":"ServerBusyException","status_code":503}`,
+						http.StatusServiceUnavailable,
+					)
+					return
+				}
+
+				http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "remote-session", Path: "/"})
+				w.WriteHeader(http.StatusOK)
+			case "/account":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{
+					key: "account",
+					metaValue: metaJSON([]any{
+						strings.Repeat("aa", 32),
+						unsupportedSerialisable(102),
+						int64(1699990000),
+						nil,
+						serialisableDictionaryString(t,
+							hydrusDictEntry{key: "banned_info", metaValue: metaJSON(nil)},
+							hydrusDictEntry{key: "bandwidth_tracker", metaValue: metaHydrus(unsupportedSerialisable(39))},
+							hydrusDictEntry{key: "message", metaValue: metaJSON("shared read-only")},
+							hydrusDictEntry{key: "message_created", metaValue: metaJSON(int64(1699990100))},
+						),
+					}),
+				}))
+			case "/options":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{
+					key: "service_options",
+					metaValue: metaHydrus(serialisableDictionary(
+						hydrusDictEntry{key: "update_period", metaValue: metaJSON(int64(3600))},
+						hydrusDictEntry{key: "nullification_period", metaValue: metaJSON(int64(86400))},
+					)),
+				}))
+			case "/tag_filter":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{
+					key:       "tag_filter",
+					metaValue: metaHydrus(serialisableTagFilter(map[string]int{"creator:": 0})),
+				}))
+			case "/metadata":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{
+					key:       "metadata_slice",
+					metaValue: metaHydrus(serialisableMetadata(1700000200, metadataRow{updateIndex: 2, updateHashes: []string{strings.Repeat("11", 32)}, begin: 10, end: 20})),
+				}))
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		client, err := NewClient(testPTRConfigFromServer(t, server.URL, coreptrsync.DefaultSharedAccessKey))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+
+		_, err = client.FetchRemoteState(context.Background(), 0)
+		if err != nil {
+			t.Fatalf("FetchRemoteState() error = %v", err)
+		}
+
+		if got := sessionAttempts.Load(); got != 3 {
+			t.Fatalf("session attempts = %d, want 3", got)
+		}
+	})
+
+	t.Run("returns the final busy error after exhausting GET retries", func(t *testing.T) {
+		var accountAttempts atomic.Int32
+
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/session_key":
+				http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "remote-session", Path: "/"})
+				w.WriteHeader(http.StatusOK)
+			case "/account":
+				accountAttempts.Add(1)
+				http.Error(
+					w,
+					`{"error":"This server is busy, please try again later.","exception_type":"ServerBusyException","status_code":503}`,
+					http.StatusServiceUnavailable,
+				)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		client, err := NewClient(testPTRConfigFromServer(t, server.URL, coreptrsync.DefaultSharedAccessKey))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+
+		_, err = client.FetchRemoteState(context.Background(), 0)
+		if err == nil || !strings.Contains(err.Error(), `PTR GET /account returned 503 Service Unavailable`) {
+			t.Fatalf("FetchRemoteState() error = %v, want exhausted /account 503 error", err)
+		}
+
+		if got := accountAttempts.Load(); got != 3 {
+			t.Fatalf("account attempts = %d, want 3", got)
+		}
+	})
+
+	t.Run("does not retry non-503 GET failures", func(t *testing.T) {
+		var accountAttempts atomic.Int32
+
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/session_key":
+				http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "remote-session", Path: "/"})
+				w.WriteHeader(http.StatusOK)
+			case "/account":
+				accountAttempts.Add(1)
+				http.Error(w, `{"error":"boom","status_code":500}`, http.StatusInternalServerError)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		client, err := NewClient(testPTRConfigFromServer(t, server.URL, coreptrsync.DefaultSharedAccessKey))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+
+		_, err = client.FetchRemoteState(context.Background(), 0)
+		if err == nil || !strings.Contains(err.Error(), `PTR GET /account returned 500 Internal Server Error`) {
+			t.Fatalf("FetchRemoteState() error = %v, want immediate /account 500 error", err)
+		}
+
+		if got := accountAttempts.Load(); got != 1 {
+			t.Fatalf("account attempts = %d, want 1", got)
 		}
 	})
 }

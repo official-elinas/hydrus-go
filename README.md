@@ -28,7 +28,7 @@ This repository currently provides the following early migration slices:
 - first thin-client browse/asset endpoints for recent local files, originals, and thumbnails
 - public local-path import and trash endpoints for thin-client-driven library testing
 - daemon-owned anonymous PTR sync foundations, remote snapshot persistence, real `/update` download plus local repository-updates registration, and first status/trigger APIs
-- an initial Fyne-based desktop prototype for `hydrusd`, including selected JPEG/PNG/GIF original preview through daemon APIs
+- an initial Fyne-based desktop prototype for `hydrusd`, including selected JPEG/PNG/GIF original preview, recent-page navigation, and PTR status/manual sync through daemon APIs
 - real `hydrusd --listen host:port` runtime overrides for temporary LAN testing
 - explicit Linux/Windows desktop build targets, including a Windows GUI-subsystem executable for Explorer launches
 - an opt-in native-Go fresh Hydrus client bundle bootstrap for empty or missing DB directories
@@ -36,6 +36,7 @@ This repository currently provides the following early migration slices:
 Project notes live in:
 
 - [`docs/STATUS.md`](docs/STATUS.md) — what is done, active, and next
+- [`docs/PARITY_ROADMAP.md`](docs/PARITY_ROADMAP.md) — prioritized parity gaps and next milestone order
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — current system shape
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — important architectural decisions
 - [`docs/thin-client-mvp.md`](docs/thin-client-mvp.md) — first desktop client scope and daemon contract
@@ -454,10 +455,11 @@ This bootstrap currently targets the Go toolchain declared in `go.mod`
 
 ## Immediate next milestones
 
-- iterate on the Fyne prototype's preview caching, paging, reconnect behavior, and metadata ergonomics now that the first connect/browse/add/trash/original-preview loop is wired
+- iterate on the Fyne prototype's preview caching, reconnect behavior, and metadata ergonomics now that the first connect/browse/add/trash/original-preview loop, paging, and PTR status/manual sync are wired
 - run real Windows-over-LAN smoke tests against a live `hydrusd` + Hydrus library and tighten any failures quickly
 - validate add/trash latency and recent-grid refresh behavior on a real Hydrus library through the prototype
 - process downloaded anonymous PTR definitions/content into local mappings and tag/query state
+- add the first daemon-side search/query foundation for tags and file-domain constraints
+- add daemon-side tag mutation and pending-state APIs as the prerequisite for PTR sync-out/upload
 - broaden daemon-owned PTR sync progress and job control for the thin client beyond the current status + manual trigger
 - broaden default/full metadata parity for `GET /get_files/file_metadata`
-- search/tagging model on top of imported and PTR-synced data

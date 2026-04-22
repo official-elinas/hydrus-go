@@ -15,6 +15,7 @@ The prototype is intentionally narrow:
 
 - connect to local or remote `hydrusd`
 - load recent local files into a thumbnail grid
+  - load additional recent results as you scroll, backed by the daemon's recent-files endpoint
 - queue imports from:
   - the single-file picker
   - the folder picker
@@ -27,7 +28,8 @@ The prototype is intentionally narrow:
 - preview selected JPEG/PNG/GIF originals through the daemon's content endpoint
   - preview is intentionally bounded to keep the thin client responsive
   - current limits: 16 MiB payload, 8192px maximum dimension, 16,000,000 decoded pixels
-- inspect selected-file metadata, including daemon-served tag groups grouped by service/status in the details pane
+- inspect selected-file tag metadata and file metadata in separate details sections
+- inspect daemon-owned PTR sync state and trigger a manual sync pass from a dedicated popup launched through `Network > PTR Sync`
 - clear the queue when idle or prune/retry finished items from the queue review pane
 - trash one selected file through the daemon's trash endpoint
 

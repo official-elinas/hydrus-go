@@ -22,6 +22,12 @@ import (
 const ptrSyncUserAgent = "hydrus-go-ptrsync/0.1"
 
 var (
+	ptrSyncBusyRetryDelays = []time.Duration{
+		250 * time.Millisecond,
+		500 * time.Millisecond,
+		time.Second,
+	}
+
 	// ptrSyncMaxCompressedResponseBytes bounds the raw HTTP response body before
 	// any Hydrus zlib decompression is attempted.
 	ptrSyncMaxCompressedResponseBytes int64 = 32 << 20
@@ -169,22 +175,13 @@ func (c *Client) ensureSession(ctx context.Context) error {
 		return nil
 	}
 
-	req, err := c.newGETRequest(ctx, "session_key", nil)
+	resp, err := c.doPTRGETWithRetry(ctx, "session_key", nil, func(req *http.Request) {
+		req.Header.Set("Hydrus-Key", c.accessKey)
+	})
 	if err != nil {
 		return err
-	}
-
-	req.Header.Set("Hydrus-Key", c.accessKey)
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("request PTR /session_key: %w", err)
 	}
 	defer resp.Body.Close()
-
-	if err := checkPTRResponse(resp, "GET", "/session_key"); err != nil {
-		return err
-	}
 
 	if _, err := readLimitedBytes(resp.Body, ptrSyncMaxCompressedResponseBytes, "PTR /session_key response body"); err != nil {
 		return fmt.Errorf("read PTR /session_key response: %w", err)
@@ -260,20 +257,11 @@ func (c *Client) fetchMetadata(
 }
 
 func (c *Client) doGET(ctx context.Context, path string, query url.Values) ([]byte, error) {
-	req, err := c.newGETRequest(ctx, path, query)
+	resp, err := c.doPTRGETWithRetry(ctx, path, query, nil)
 	if err != nil {
 		return nil, err
-	}
-
-	resp, err := c.httpClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request PTR /%s: %w", path, err)
 	}
 	defer resp.Body.Close()
-
-	if err := checkPTRResponse(resp, http.MethodGet, "/"+strings.TrimPrefix(path, "/")); err != nil {
-		return nil, err
-	}
 
 	body, err := readLimitedBytes(
 		resp.Body,
@@ -285,6 +273,54 @@ func (c *Client) doGET(ctx context.Context, path string, query url.Values) ([]by
 	}
 
 	return body, nil
+}
+
+func (c *Client) doPTRGETWithRetry(
+	ctx context.Context,
+	path string,
+	query url.Values,
+	configure func(*http.Request),
+) (*http.Response, error) {
+	endpoint := "/" + strings.TrimPrefix(path, "/")
+	for attempt := 0; attempt <= len(ptrSyncBusyRetryDelays); attempt++ {
+		req, err := c.newGETRequest(ctx, path, query)
+		if err != nil {
+			return nil, err
+		}
+
+		if configure != nil {
+			configure(req)
+		}
+
+		resp, err := c.httpClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("request PTR %s: %w", endpoint, err)
+		}
+
+		if resp.StatusCode == http.StatusServiceUnavailable {
+			retryErr := checkPTRResponse(resp, http.MethodGet, endpoint)
+			_ = resp.Body.Close()
+
+			if attempt == len(ptrSyncBusyRetryDelays) {
+				return nil, retryErr
+			}
+
+			if err := waitPTRRetryDelay(ctx, ptrSyncBusyRetryDelays[attempt]); err != nil {
+				return nil, err
+			}
+
+			continue
+		}
+
+		if err := checkPTRResponse(resp, http.MethodGet, endpoint); err != nil {
+			_ = resp.Body.Close()
+			return nil, err
+		}
+
+		return resp, nil
+	}
+
+	return nil, fmt.Errorf("PTR %s request failed without a response", endpoint)
 }
 
 func (c *Client) newGETRequest(
@@ -361,6 +397,18 @@ func readLimitedBytes(reader io.Reader, maxBytes int64, description string) ([]b
 	}
 
 	return payload, nil
+}
+
+func waitPTRRetryDelay(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func equalBytes(left []byte, right []byte) bool {

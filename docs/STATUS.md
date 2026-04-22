@@ -1,6 +1,6 @@
 # hydrus-go status
 
-Last updated: 2026-04-20
+Last updated: 2026-04-21
 
 ## Completed
 
@@ -77,13 +77,17 @@ Last updated: 2026-04-20
 - added PTR manager/app shutdown handling so active anonymous PTR sync leases are cleared before daemon teardown
 - added real anonymous PTR `/update` download with expected-hash verification, extensionless managed-file placement, and local `repository updates` registration
 - added daemon-owned PTR download bookkeeping so persisted status reflects real locally registered update counts
+- added daemonclient PTR status/trigger support plus a Fyne-side PTR status/manual-sync popup under the desktop Network menu that stays daemon-first
+- added Fyne recent-grid incremental loading on top of the daemon's existing recent offset/limit API
+- added a dedicated parity roadmap document covering the next backend, PTR, performance, and UI priorities
 - documented the daemon-first migration direction and current bootstrap limits
 
 ## In Progress
 
-- iterating on the Fyne prototype's preview, reconnect, and metadata UX after landing the first connect/browse/import/trash/original-preview loop
+- iterating on the Fyne prototype's preview, reconnect, and metadata UX after landing the first connect/browse/import/trash/original-preview loop, recent paging, and PTR status/manual sync
 - preparing real Windows-over-LAN smoke testing against a live `hydrusd` instance, now without requiring a pre-existing Hydrus bundle for first-start setup
 - preparing thin-client-driven performance validation for SQLite and managed `client_files` behavior alongside the first PTR daemon work
+- converting the latest parity reconnaissance into a concrete implementation order in `docs/PARITY_ROADMAP.md`
 
 ### Active reconnaissance notes
 
@@ -97,6 +101,8 @@ Last updated: 2026-04-20
 ## Next
 
 ### Roadmap checklist
+
+See also: [`docs/PARITY_ROADMAP.md`](./PARITY_ROADMAP.md) for the prioritized parity order and must-have UI list.
 
 - [x] Phase 1: headless bootstrap daemon
 - [x] Phase 2: read-only DB-backed service discovery and basic metadata
@@ -126,6 +132,8 @@ Last updated: 2026-04-20
 - [x] connect a desktop client to the local daemon with the existing auth/bootstrap flow
 - [x] support basic import, browse, add, and trash workflows against daemon APIs
 - [x] preview selected JPEG/PNG/GIF originals through daemon APIs with bounded client-side safety limits
+- [x] add recent-page navigation to the prototype's browse grid
+- [x] surface daemon-owned PTR status and a manual sync trigger in the prototype
 - [ ] validate the daemon/client contract with a simple multi-platform desktop UI before attempting Hydrus UI parity
 - [x] keep the first client closer to `comfyui-image-browser` scope than full Hydrus parity
 
@@ -146,11 +154,15 @@ Last updated: 2026-04-20
 - [ ] process downloaded PTR definitions/content into local mappings and tag/query state
 - [ ] make imported files eligible for PTR-driven tag/update retrieval
 - [ ] verify end-to-end value from local import through PTR sync and tag acquisition
+- [ ] add PTR pending/upload state foundations for eventual sync-out parity
+- [ ] implement PTR sync-out/upload for locally pending mappings and petitions
 
 ### Phase 8: Read/Query Expansion After Import + PTR
 
 - [ ] continue `GET /get_files/file_metadata` toward broader parity for detailed URLs, exact thumbnail sizing, and remaining edge-case payload semantics
 - [ ] begin DB-backed search and tagging read paths on top of imported and PTR-synced data
+- [ ] add daemon-side search/query endpoints that can drive a real Hydrus-like search page
+- [ ] add daemon-side tag mutation and pending-state APIs as a prerequisite for PTR sync-out and UI parity
 - [ ] refine service/media-result behavior for common client workflows
 
 ## Later / Out of Scope for Now

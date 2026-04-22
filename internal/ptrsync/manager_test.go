@@ -408,13 +408,22 @@ func TestManagerSyncOnce(t *testing.T) {
 			t.Fatalf("ResolveFilePath() error = %v", err)
 		}
 
-		managedBytes, err := os.ReadFile(managedPath)
-		if err != nil {
-			t.Fatalf("ReadFile(managedPath) error = %v", err)
+		if _, err := os.Stat(managedPath); !os.IsNotExist(err) {
+			t.Fatalf("managedPath stat err = %v, want not exists", err)
 		}
 
-		if string(managedBytes) != string(updateBody) {
-			t.Fatal("managed update bytes mismatch")
+		artifactPath, err := resolvePTRUpdateArtifactPath(writeBundle, updateHash)
+		if err != nil {
+			t.Fatalf("resolvePTRUpdateArtifactPath() error = %v", err)
+		}
+
+		artifactBytes, err := os.ReadFile(artifactPath)
+		if err != nil {
+			t.Fatalf("ReadFile(artifactPath) error = %v", err)
+		}
+
+		if string(artifactBytes) != string(updateBody) {
+			t.Fatal("PTR update artifact bytes mismatch")
 		}
 
 		serviceKey := hex.EncodeToString([]byte("repository updates"))

@@ -5,6 +5,7 @@ package fyneapp
 import (
 	"testing"
 
+	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
 	"github.com/official-elinas/hydrus-go/internal/desktop/daemonclient"
 )
 
@@ -92,6 +93,67 @@ func TestFormatMetadata(t *testing.T) {
 
 		if got != want {
 			t.Fatalf("formatMetadata() = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestFormatPTRStatus(t *testing.T) {
+	t.Run("renders basic idle status", func(t *testing.T) {
+		status := coreptrsync.Status{
+			Enabled:                  true,
+			ServiceName:              "public tag repository",
+			Host:                     "ptr.hydrus.network",
+			Port:                     45871,
+			AccountMode:              coreptrsync.AccountModeSharedReadOnly,
+			Phase:                    "idle",
+			IsRunning:                false,
+			MetadataSlice:            7,
+			ProcessedDefinitionCount: 100,
+			ProcessedContentCount:    200,
+			DownloadedUpdateCount:    5,
+		}
+
+		got := formatPTRStatus(status)
+		want := "Service: public tag repository\n" +
+			"Endpoint: ptr.hydrus.network:45871\n" +
+			"Account: shared-read-only\n" +
+			"Phase: idle\n" +
+			"Status: Idle\n" +
+			"Metadata Slice: 7\n" +
+			"Processed Definitions: 100\n" +
+			"Processed Content: 200\n" +
+			"Downloaded Updates: 5"
+
+		if got != want {
+			t.Fatalf("formatPTRStatus() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("renders error status", func(t *testing.T) {
+		status := coreptrsync.Status{
+			Enabled:                  true,
+			ServiceName:              "public tag repository",
+			Phase:                    "syncing",
+			IsRunning:                true,
+			MetadataSlice:            12,
+			LastError:                "connection reset by peer",
+			ProcessedDefinitionCount: 0,
+			ProcessedContentCount:    0,
+			DownloadedUpdateCount:    0,
+		}
+
+		got := formatPTRStatus(status)
+		want := "Service: public tag repository\n" +
+			"Phase: syncing\n" +
+			"Status: Sync is currently running\n" +
+			"Metadata Slice: 12\n" +
+			"Last error: connection reset by peer\n" +
+			"Processed Definitions: 0\n" +
+			"Processed Content: 0\n" +
+			"Downloaded Updates: 0"
+
+		if got != want {
+			t.Fatalf("formatPTRStatus() = %q, want %q", got, want)
 		}
 	})
 }
