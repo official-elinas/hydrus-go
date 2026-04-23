@@ -1570,6 +1570,60 @@ func TestBundleWriteTransactions(t *testing.T) {
 		}
 	})
 
+	t.Run("read bundles can run integrity checks", func(t *testing.T) {
+		dir, _ := createTestBundle(t)
+
+		bundle, err := Open(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("Open() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		result, err := bundle.CheckIntegrity(context.Background())
+		if err != nil {
+			t.Fatalf("CheckIntegrity() error = %v", err)
+		}
+
+		if !result.Passed {
+			t.Fatalf("result.Passed = false, want true (results=%v)", result.Results)
+		}
+
+		if len(result.Results) != 1 || result.Results[0] != "ok" {
+			t.Fatalf("result.Results = %v, want [ok]", result.Results)
+		}
+	})
+
+	t.Run("writable bundles can run integrity checks", func(t *testing.T) {
+		dir, _ := createTestBundle(t)
+
+		bundle, err := OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		result, err := bundle.CheckIntegrity(context.Background())
+		if err != nil {
+			t.Fatalf("CheckIntegrity() error = %v", err)
+		}
+
+		if !result.Passed {
+			t.Fatalf("result.Passed = false, want true (results=%v)", result.Results)
+		}
+
+		if len(result.Results) != 1 || result.Results[0] != "ok" {
+			t.Fatalf("result.Results = %v, want [ok]", result.Results)
+		}
+	})
+
 	t.Run("writable bundles roll back on callback error", func(t *testing.T) {
 		dir, _ := createTestBundle(t)
 
