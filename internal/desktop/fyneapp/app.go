@@ -202,7 +202,7 @@ func newPrototype() *prototype {
 	p.previewImage.FillMode = canvas.ImageFillContain
 	p.previewImage.Hide()
 	p.previewLabel = widget.NewLabel(defaultPreviewText)
-	p.previewLabel.Wrapping = fyne.TextTruncate
+	p.previewLabel.Wrapping = fyne.TextWrapWord
 	p.previewLabel.Alignment = fyne.TextAlignCenter
 	p.tagsRichText = widget.NewRichText()
 	p.tagsRichText.Wrapping = fyne.TextWrapWord
@@ -521,7 +521,7 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 	previewPanel := container.NewStack(
 		canvas.NewRectangle(color.NRGBA{R: 18, G: 18, B: 20, A: 255}),
 		p.previewImage,
-		container.NewPadded(p.previewLabel),
+		container.NewPadded(container.NewCenter(p.previewLabel)),
 	)
 	previewSection := container.NewBorder(
 		widget.NewLabelWithStyle("Selected preview", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
