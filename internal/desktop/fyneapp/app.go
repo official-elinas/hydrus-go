@@ -38,6 +38,7 @@ const (
 	recentPageLimit     = 120
 	recentLoadTick      = 200 * time.Millisecond
 	ptrPollTick         = time.Second
+	ptrPollErrorLimit   = 3
 	previewByteLimit    = 16 << 20
 	previewPixelLimit   = 16_000_000
 	previewMaxDimension = 8192
@@ -3223,6 +3224,7 @@ func (p *prototype) pollPTRStatusUntilSettled(connection connectionSnapshot, req
 	go func(connection connectionSnapshot, requestID uint64) {
 		ticker := time.NewTicker(ptrPollTick)
 		defer ticker.Stop()
+		consecutiveErrors := 0
 
 		for {
 			<-ticker.C
@@ -3235,8 +3237,31 @@ func (p *prototype) pollPTRStatusUntilSettled(connection connectionSnapshot, req
 			status, err := connection.client.GetPTRStatus(ctx)
 			cancel()
 			if err != nil {
+				consecutiveErrors++
+				shouldContinue := shouldContinuePTRPollingAfterError(consecutiveErrors)
+				fyne.Do(func() {
+					if !p.isCurrentOperation(connection) || !p.isCurrentPTRStatusRequest(requestID) {
+						return
+					}
+
+					if shouldContinue {
+						p.ptrStatusLabel.SetText(ptrPollingErrorStatusText(err, consecutiveErrors))
+						p.setStatus("PTR status refresh hit a transient error. Retrying...")
+						return
+					}
+
+					p.setPTRVisualState("PTR sync: status poll failed", false)
+					p.ptrStatusLabel.SetText(fmt.Sprintf("Polling stopped after repeated status errors: %v", err))
+					p.setStatus("PTR status polling stopped after repeated errors.")
+					p.updateActionState()
+				})
+				if shouldContinue {
+					continue
+				}
+
 				return
 			}
+			consecutiveErrors = 0
 
 			stillPolling := shouldPollPTRStatus(status.PTR)
 			fyne.Do(func() {
@@ -3320,6 +3345,23 @@ func ptrHeadlineText(status coreptrsync.Status) string {
 	default:
 		return "PTR sync: idle"
 	}
+}
+
+func shouldContinuePTRPollingAfterError(consecutiveErrors int) bool {
+	return consecutiveErrors < ptrPollErrorLimit
+}
+
+func ptrPollingErrorStatusText(err error, consecutiveErrors int) string {
+	if err == nil {
+		return "PTR status refresh hit a transient error."
+	}
+
+	return fmt.Sprintf(
+		"PTR status refresh hit a transient error (%d/%d): %v",
+		consecutiveErrors,
+		ptrPollErrorLimit,
+		err,
+	)
 }
 
 func ptrCompletionStatusText(status coreptrsync.Status) string {

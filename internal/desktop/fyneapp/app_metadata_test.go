@@ -4,6 +4,7 @@ package fyneapp
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -263,6 +264,32 @@ func TestPTRStatusSummaryText(t *testing.T) {
 		status.IsComplete = true
 		if got := ptrHeadlineText(status); got != "PTR sync: ✓ complete" {
 			t.Fatalf("ptrHeadlineText() = %q, want %q", got, "PTR sync: ✓ complete")
+		}
+	})
+}
+
+func TestPTRPollingRetryHelpers(t *testing.T) {
+	t.Run("continues polling before the error limit", func(t *testing.T) {
+		if !shouldContinuePTRPollingAfterError(1) {
+			t.Fatal("shouldContinuePTRPollingAfterError(1) = false, want true")
+		}
+
+		if !shouldContinuePTRPollingAfterError(ptrPollErrorLimit - 1) {
+			t.Fatalf("shouldContinuePTRPollingAfterError(%d) = false, want true", ptrPollErrorLimit-1)
+		}
+	})
+
+	t.Run("stops polling at the error limit", func(t *testing.T) {
+		if shouldContinuePTRPollingAfterError(ptrPollErrorLimit) {
+			t.Fatalf("shouldContinuePTRPollingAfterError(%d) = true, want false", ptrPollErrorLimit)
+		}
+	})
+
+	t.Run("formats transient error status with retry counters", func(t *testing.T) {
+		got := ptrPollingErrorStatusText(errors.New("temporary network failure"), 2)
+		want := "PTR status refresh hit a transient error (2/3): temporary network failure"
+		if got != want {
+			t.Fatalf("ptrPollingErrorStatusText() = %q, want %q", got, want)
 		}
 	})
 }
