@@ -299,6 +299,7 @@ func TestProtectedEndpoints(t *testing.T) {
 				Port:                     45871,
 				AccountMode:              coreptrsync.AccountModeSharedReadOnly,
 				Phase:                    coreptrsync.PhaseIdle,
+				IsComplete:               true,
 				MetadataSlice:            7,
 				DownloadedUpdateCount:    11,
 				ProcessedDefinitionCount: 5,
@@ -336,6 +337,10 @@ func TestProtectedEndpoints(t *testing.T) {
 
 		if ptr["phase"] != coreptrsync.PhaseIdle {
 			t.Fatalf("phase = %v, want %s", ptr["phase"], coreptrsync.PhaseIdle)
+		}
+
+		if ptr["is_complete"] != true {
+			t.Fatalf("is_complete = %v, want true", ptr["is_complete"])
 		}
 	})
 

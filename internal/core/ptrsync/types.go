@@ -20,6 +20,8 @@ const (
 	PhaseUnavailable = "unavailable"
 	PhaseIdle        = "idle"
 	PhaseSyncing     = "syncing"
+	PhaseRetrying    = "retrying"
+	PhaseThrottling  = PhaseRetrying
 )
 
 var (
@@ -76,10 +78,13 @@ type Status struct {
 	AccountMode              string `json:"account_mode,omitempty"`
 	Phase                    string `json:"phase"`
 	IsRunning                bool   `json:"is_running"`
+	IsComplete               bool   `json:"is_complete"`
 	MetadataSlice            int64  `json:"metadata_slice"`
 	DownloadedUpdateCount    int64  `json:"downloaded_update_count"`
 	ProcessedDefinitionCount int64  `json:"processed_definition_count"`
 	ProcessedContentCount    int64  `json:"processed_content_count"`
+	RetryAtMS                int64  `json:"retry_at_ms,omitempty"`
+	RetryAttempt             int64  `json:"retry_attempt,omitempty"`
 	LastError                string `json:"last_error,omitempty"`
 	UnavailableReason        string `json:"unavailable_reason,omitempty"`
 	UpdatedAtMS              int64  `json:"updated_at_ms,omitempty"`

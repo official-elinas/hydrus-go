@@ -176,6 +176,10 @@ func TestRun_ShutsDownActivePTRTriggerWithoutStuckLease(t *testing.T) {
 	if status.IsRunning {
 		t.Fatal("status.IsRunning = true, want false")
 	}
+
+	if status.LastError != "" {
+		t.Fatalf("status.LastError = %q, want empty after app shutdown cancellation", status.LastError)
+	}
 	t.Logf("post-shutdown ptr status: phase=%s is_running=%t last_error=%q", status.Phase, status.IsRunning, status.LastError)
 
 	writeBundle, err := hydrusdb.OpenWritable(context.Background(), dbDir)

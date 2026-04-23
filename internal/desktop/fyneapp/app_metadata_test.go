@@ -182,17 +182,43 @@ func TestFormatPTRStatus(t *testing.T) {
 			t.Fatalf("formatPTRStatus() = %q, want %q", got, want)
 		}
 	})
+
+	t.Run("renders explicit complete status", func(t *testing.T) {
+		status := coreptrsync.Status{
+			Enabled:                  true,
+			ServiceName:              "public tag repository",
+			Phase:                    coreptrsync.PhaseIdle,
+			IsComplete:               true,
+			MetadataSlice:            7,
+			ProcessedDefinitionCount: 2,
+			ProcessedContentCount:    3,
+			DownloadedUpdateCount:    5,
+		}
+
+		got := formatPTRStatus(status)
+		want := "Service: public tag repository\n" +
+			"Phase: idle\n" +
+			"Status: Complete\n" +
+			"Metadata Slice: 7\n" +
+			"Processed Definitions: 2\n" +
+			"Processed Content: 3\n" +
+			"Downloaded Update Files: 5"
+
+		if got != want {
+			t.Fatalf("formatPTRStatus() = %q, want %q", got, want)
+		}
+	})
 }
 
 func TestPTRStatusSummaryText(t *testing.T) {
 	t.Run("headline prefers retrying over generic failure wording", func(t *testing.T) {
 		retryAtMS := time.Now().Add(45 * time.Second).UnixMilli()
 		status := coreptrsync.Status{
-			Enabled:     true,
-			Phase:       coreptrsync.PhaseRetrying,
-			RetryAtMS:   retryAtMS,
+			Enabled:      true,
+			Phase:        coreptrsync.PhaseRetrying,
+			RetryAtMS:    retryAtMS,
 			RetryAttempt: 1,
-			LastError:   "old error",
+			LastError:    "old error",
 		}
 
 		got := ptrHeadlineText(status)
@@ -204,9 +230,9 @@ func TestPTRStatusSummaryText(t *testing.T) {
 	t.Run("completion text includes retry countdown", func(t *testing.T) {
 		retryAtMS := time.Now().Add(45 * time.Second).UnixMilli()
 		status := coreptrsync.Status{
-			Enabled:     true,
-			Phase:       coreptrsync.PhaseRetrying,
-			RetryAtMS:   retryAtMS,
+			Enabled:      true,
+			Phase:        coreptrsync.PhaseRetrying,
+			RetryAtMS:    retryAtMS,
 			RetryAttempt: 1,
 		}
 
@@ -214,6 +240,24 @@ func TestPTRStatusSummaryText(t *testing.T) {
 		want := "PTR server is busy. Retrying in 45s."
 		if got != want {
 			t.Fatalf("ptrCompletionStatusText() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("headline only marks complete when daemon says complete", func(t *testing.T) {
+		status := coreptrsync.Status{
+			Enabled:               true,
+			Phase:                 coreptrsync.PhaseIdle,
+			MetadataSlice:         7,
+			DownloadedUpdateCount: 5,
+		}
+
+		if got := ptrHeadlineText(status); got != "PTR sync: idle" {
+			t.Fatalf("ptrHeadlineText() = %q, want %q", got, "PTR sync: idle")
+		}
+
+		status.IsComplete = true
+		if got := ptrHeadlineText(status); got != "PTR sync: ✓ complete" {
+			t.Fatalf("ptrHeadlineText() = %q, want %q", got, "PTR sync: ✓ complete")
 		}
 	})
 }

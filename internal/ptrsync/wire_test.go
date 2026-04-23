@@ -190,6 +190,64 @@ func TestClassifyUpdatePayload(t *testing.T) {
 	})
 }
 
+func TestDecodeDefinitionsUpdatePayload(t *testing.T) {
+	body := hydrusNetworkBytes(t, []any{
+		hydrusSerialisableTypeDefinitionsUpdate,
+		1,
+		[]any{
+			[]any{hydrusDefinitionsTypeHashes, []any{[]any{int64(101), strings.Repeat("11", 32)}, []any{int64(102), strings.Repeat("22", 32)}}},
+			[]any{hydrusDefinitionsTypeTags, []any{[]any{int64(201), "creator:alice"}, []any{int64(202), "series:zeta"}}},
+		},
+	})
+
+	decoded, err := decodeDefinitionsUpdatePayload(body)
+	if err != nil {
+		t.Fatalf("decodeDefinitionsUpdatePayload() error = %v", err)
+	}
+
+	if got := decoded.ServiceHashIDsToHashes[101]; got != strings.Repeat("11", 32) {
+		t.Fatalf("ServiceHashIDsToHashes[101] = %q, want %q", got, strings.Repeat("11", 32))
+	}
+
+	if got := decoded.ServiceTagIDsToTags[202]; got != "series:zeta" {
+		t.Fatalf("ServiceTagIDsToTags[202] = %q, want %q", got, "series:zeta")
+	}
+}
+
+func TestDecodeMappingsUpdatePayload(t *testing.T) {
+	body := hydrusNetworkBytes(t, []any{
+		hydrusSerialisableTypeContentUpdate,
+		1,
+		[]any{
+			[]any{hydrusContentTypeMappings, []any{
+				[]any{hydrusContentUpdateAdd, []any{[]any{int64(201), []any{int64(101), int64(102)}}}},
+				[]any{hydrusContentUpdateDelete, []any{[]any{int64(202), []any{int64(103)}}}},
+			}},
+		},
+	})
+
+	decoded, err := decodeMappingsUpdatePayload(body)
+	if err != nil {
+		t.Fatalf("decodeMappingsUpdatePayload() error = %v", err)
+	}
+
+	if len(decoded.Adds) != 1 {
+		t.Fatalf("len(decoded.Adds) = %d, want 1", len(decoded.Adds))
+	}
+
+	if decoded.Adds[0].ServiceTagID != 201 {
+		t.Fatalf("decoded.Adds[0].ServiceTagID = %d, want 201", decoded.Adds[0].ServiceTagID)
+	}
+
+	if len(decoded.Adds[0].ServiceHashIDs) != 2 || decoded.Adds[0].ServiceHashIDs[1] != 102 {
+		t.Fatalf("decoded.Adds[0].ServiceHashIDs = %v, want [101 102]", decoded.Adds[0].ServiceHashIDs)
+	}
+
+	if len(decoded.Deletes) != 1 || decoded.Deletes[0].ServiceTagID != 202 {
+		t.Fatalf("decoded.Deletes = %+v, want one delete for tag 202", decoded.Deletes)
+	}
+}
+
 type hydrusDictEntry struct {
 	key       string
 	metaValue any

@@ -87,6 +87,14 @@ func TestBundleEnsurePTRSyncFoundation(t *testing.T) {
 		if err != nil {
 			t.Fatalf("mappingsDB.Conn() error = %v", err)
 		}
+
+		masterDB := openSQLiteForTest(t, filepath.Join(dir, "client.master.db"))
+		defer masterDB.Close()
+		masterConn, err := masterDB.Conn(context.Background())
+		if err != nil {
+			t.Fatalf("masterDB.Conn() error = %v", err)
+		}
+		defer masterConn.Close()
 		defer mappingsConn.Close()
 
 		for _, tableName := range []string{
@@ -107,6 +115,8 @@ func TestBundleEnsurePTRSyncFoundation(t *testing.T) {
 
 		repositoryUpdatesTableName, repositoryUnregisteredTableName, repositoryProcessedTableName :=
 			generatePTRRepositoryTableNames(serviceID)
+		repositoryHashIDMapTableName, repositoryTagIDMapTableName :=
+			generatePTRRepositoryDefinitionTableNames(serviceID)
 		repositoryUpdatesServiceID := selectInt64(
 			t,
 			bundle.conn,
@@ -127,6 +137,20 @@ func TestBundleEnsurePTRSyncFoundation(t *testing.T) {
 				tableName,
 			) {
 				t.Fatalf("expected main table %q to exist", tableName)
+			}
+		}
+
+		for _, tableName := range []string{
+			strings.TrimPrefix(repositoryHashIDMapTableName, "external_master."),
+			strings.TrimPrefix(repositoryTagIDMapTableName, "external_master."),
+		} {
+			if !rowExistsInDB(
+				t,
+				masterConn,
+				`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?`,
+				tableName,
+			) {
+				t.Fatalf("expected master table %q to exist", tableName)
 			}
 		}
 
@@ -432,6 +456,71 @@ func TestBundleEnsurePTRSyncFoundation(t *testing.T) {
 		}
 	})
 
+	t.Run("preserves persisted retrying state during recovery", func(t *testing.T) {
+		dir, _ := createTestBundle(t)
+
+		bundle, err := OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		cfg := coreptrsync.DefaultConfig()
+		cfg.Enabled = true
+
+		status, err := bundle.EnsurePTRSyncFoundation(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("EnsurePTRSyncFoundation() error = %v", err)
+		}
+
+		serviceID := selectInt64(
+			t,
+			bundle.conn,
+			`SELECT service_id FROM main.services WHERE service_key = ?`,
+			mustDecodeHex(t, status.ServiceKey),
+		)
+
+		const (
+			retryAtMS    int64 = 987654321
+			retryAttempt int64 = 3
+		)
+
+		if _, err := bundle.conn.ExecContext(
+			context.Background(),
+			`UPDATE main.ptr_sync_state
+			SET phase = ?, is_running = 0, run_token = NULL, retry_at_ms = ?, retry_attempt = ?, service_id = ?
+			WHERE singleton = ?`,
+			coreptrsync.PhaseRetrying,
+			retryAtMS,
+			retryAttempt,
+			serviceID,
+			ptrSyncStateSingleton,
+		); err != nil {
+			t.Fatalf("UPDATE ptr_sync_state retrying error = %v", err)
+		}
+
+		recovered, err := bundle.RecoverPTRSyncFoundation(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("RecoverPTRSyncFoundation() error = %v", err)
+		}
+
+		if recovered.Phase != coreptrsync.PhaseRetrying {
+			t.Fatalf("recovered.Phase = %q, want %q", recovered.Phase, coreptrsync.PhaseRetrying)
+		}
+
+		if recovered.RetryAtMS != retryAtMS {
+			t.Fatalf("recovered.RetryAtMS = %d, want %d", recovered.RetryAtMS, retryAtMS)
+		}
+
+		if recovered.RetryAttempt != retryAttempt {
+			t.Fatalf("recovered.RetryAttempt = %d, want %d", recovered.RetryAttempt, retryAttempt)
+		}
+	})
+
 	t.Run("ensure foundation does not steal an active sync lease", func(t *testing.T) {
 		dir, _ := createTestBundle(t)
 
@@ -620,6 +709,10 @@ func TestBundleEnsurePTRSyncFoundation(t *testing.T) {
 			t.Fatalf("status.DownloadedUpdateCount = %d, want 0", status.DownloadedUpdateCount)
 		}
 
+		if status.IsComplete {
+			t.Fatal("status.IsComplete = true, want false while updates are still pending")
+		}
+
 		if _, err := bundle.RecordPreparedLocalImport(context.Background(), PreparedLocalImport{
 			HashHex:             strings.Repeat("11", 32),
 			Size:                17,
@@ -663,6 +756,10 @@ func TestBundleEnsurePTRSyncFoundation(t *testing.T) {
 		if status.Phase != coreptrsync.PhaseIdle {
 			t.Fatalf("status.Phase = %q, want %q", status.Phase, coreptrsync.PhaseIdle)
 		}
+
+		if !status.IsComplete {
+			t.Fatal("status.IsComplete = false, want true after completion with no pending work")
+		}
 	})
 }
 
@@ -698,6 +795,10 @@ func TestBundleGetPTRSyncStatus(t *testing.T) {
 
 		if status.Phase != coreptrsync.PhaseIdle {
 			t.Fatalf("status.Phase = %q, want %q", status.Phase, coreptrsync.PhaseIdle)
+		}
+
+		if status.IsComplete {
+			t.Fatal("status.IsComplete = true, want false before any successful sync")
 		}
 	})
 
@@ -790,6 +891,10 @@ func TestBundlePTRSyncRuntime(t *testing.T) {
 
 		if failed.LastError != "network boom" {
 			t.Fatalf("failed.LastError = %q, want %q", failed.LastError, "network boom")
+		}
+
+		if failed.IsComplete {
+			t.Fatal("failed.IsComplete = true, want false after failure")
 		}
 	})
 
@@ -1219,6 +1324,349 @@ func TestBundlePTRSyncRuntime(t *testing.T) {
 			hashTwoID,
 		); count != 0 {
 			t.Fatalf("stale processed row count = %d, want 0", count)
+		}
+	})
+}
+
+func TestBundlePTRApplyPipeline(t *testing.T) {
+	t.Run("finalizes downloaded updates that are already imported outside the repository-updates domain", func(t *testing.T) {
+		dir, _ := createTestBundle(t)
+
+		bundle, err := OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		cfg := coreptrsync.DefaultConfig()
+		cfg.Enabled = true
+
+		hashHex := strings.Repeat("cc", 32)
+		lease, err := bundle.BeginPTRSync(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("BeginPTRSync() error = %v", err)
+		}
+
+		remoteState := testPTRRemoteState(
+			t,
+			1700000300,
+			testPTRMetadataUpdate(t, 0, 10, 20, hashHex),
+		)
+		if _, err := bundle.PersistPTRSyncMetadata(context.Background(), cfg, lease.RunToken, remoteState, true); err != nil {
+			t.Fatalf("PersistPTRSyncMetadata() error = %v", err)
+		}
+
+		localFileService := mustUniqueServiceDefinitionByType(t, bundle, services.TypeLocalFileDomain)
+		localImport, err := bundle.RecordPreparedLocalImport(context.Background(), PreparedLocalImport{
+			HashHex:             hashHex,
+			Size:                21,
+			Mime:                29,
+			ImportedAtMS:        3333,
+			LocalFileServiceKey: localFileService.serviceKey,
+		})
+		if err != nil {
+			t.Fatalf("RecordPreparedLocalImport() error = %v", err)
+		}
+
+		if err := bundle.Close(); err != nil {
+			t.Fatalf("Close() before restart error = %v", err)
+		}
+
+		bundle, err = OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() after restart error = %v", err)
+		}
+
+		status, err := bundle.FinalizePTRDownloadedUpdatesBatch(
+			context.Background(),
+			cfg,
+			lease.RunToken,
+			[]PTRDownloadedUpdateBatchItem{{
+				HashHex: hashHex,
+				PreparedImport: PreparedLocalImport{
+					HashHex:             hashHex,
+					Size:                21,
+					Mime:                29,
+					ImportedAtMS:        4444,
+					LocalFileServiceKey: hex.EncodeToString([]byte("repository updates")),
+				},
+			}},
+		)
+		if err != nil {
+			t.Fatalf("FinalizePTRDownloadedUpdatesBatch() error = %v", err)
+		}
+
+		if status.DownloadedUpdateCount != 1 {
+			t.Fatalf("status.DownloadedUpdateCount = %d, want 1", status.DownloadedUpdateCount)
+		}
+
+		serviceID := selectInt64(
+			t,
+			bundle.conn,
+			`SELECT service_id FROM main.services WHERE service_key = ?`,
+			mustDecodeHex(t, coreptrsync.DaemonServiceKeyHex()),
+		)
+		_, repositoryUnregisteredTableName, _ := generatePTRRepositoryTableNames(serviceID)
+		repositoryUpdatesServiceID := selectInt64(
+			t,
+			bundle.conn,
+			`SELECT service_id FROM main.services WHERE service_key = ?`,
+			[]byte("repository updates"),
+		)
+
+		if count := selectInt64(
+			t,
+			bundle.conn,
+			fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE hash_id = ?", repositoryUnregisteredTableName),
+			localImport.FileID,
+		); count != 0 {
+			t.Fatalf("repository unregistered row count = %d, want 0", count)
+		}
+
+		if !rowExistsInDB(
+			t,
+			bundle.conn,
+			fmt.Sprintf(`SELECT 1 FROM main.current_files_%d WHERE hash_id = ?`, repositoryUpdatesServiceID),
+			localImport.FileID,
+		) {
+			t.Fatal("repository updates membership row missing after finalize replay")
+		}
+
+		if count := selectInt64(
+			t,
+			bundle.conn,
+			`SELECT COUNT(*) FROM main.files_info WHERE hash_id = ?`,
+			localImport.FileID,
+		); count != 1 {
+			t.Fatalf("files_info row count = %d, want 1", count)
+		}
+	})
+
+	t.Run("reconciles local updates, orders definitions first, and applies mappings", func(t *testing.T) {
+		dir, fixture := createTestBundle(t)
+
+		bundle, err := OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		cfg := coreptrsync.DefaultConfig()
+		cfg.Enabled = true
+
+		definitionsHash := strings.Repeat("aa", 32)
+		mappingsHash := strings.Repeat("bb", 32)
+
+		lease, err := bundle.BeginPTRSync(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("BeginPTRSync() error = %v", err)
+		}
+
+		remoteState := testPTRRemoteState(
+			t,
+			1700000200,
+			testPTRMetadataUpdate(t, 0, 10, 20, definitionsHash),
+			testPTRMetadataUpdate(t, 1, 21, 30, mappingsHash),
+		)
+		if _, err := bundle.PersistPTRSyncMetadata(context.Background(), cfg, lease.RunToken, remoteState, true); err != nil {
+			t.Fatalf("PersistPTRSyncMetadata() error = %v", err)
+		}
+
+		batch := []PTRDownloadedUpdateBatchItem{
+			{
+				HashHex: definitionsHash,
+				PreparedImport: PreparedLocalImport{
+					HashHex:             definitionsHash,
+					Size:                11,
+					Mime:                28,
+					ImportedAtMS:        1111,
+					LocalFileServiceKey: hex.EncodeToString([]byte("repository updates")),
+				},
+			},
+			{
+				HashHex: mappingsHash,
+				PreparedImport: PreparedLocalImport{
+					HashHex:             mappingsHash,
+					Size:                12,
+					Mime:                29,
+					ImportedAtMS:        2222,
+					LocalFileServiceKey: hex.EncodeToString([]byte("repository updates")),
+				},
+			},
+		}
+		if _, err := bundle.FinalizePTRDownloadedUpdatesBatch(context.Background(), cfg, lease.RunToken, batch); err != nil {
+			t.Fatalf("FinalizePTRDownloadedUpdatesBatch() error = %v", err)
+		}
+
+		processable, err := bundle.ListPTRProcessableUpdates(context.Background(), cfg, lease.RunToken)
+		if err != nil {
+			t.Fatalf("ListPTRProcessableUpdates() error = %v", err)
+		}
+
+		if len(processable) != 2 {
+			t.Fatalf("len(processable) = %d, want 2", len(processable))
+		}
+
+		if processable[0].ContentType != PTRContentTypeDefinitions || processable[1].ContentType != PTRContentTypeMappings {
+			t.Fatalf("processable content types = [%d %d], want [%d %d]", processable[0].ContentType, processable[1].ContentType, PTRContentTypeDefinitions, PTRContentTypeMappings)
+		}
+
+		definitions := PTRDefinitionsUpdate{
+			ServiceHashIDsToHashes: map[int64]string{101: fixture.hash1Hex, 102: fixture.hash2Hex},
+			ServiceTagIDsToTags:    map[int64]string{201: "creator:alice", 202: "old:tag"},
+		}
+		if err := bundle.ApplyPTRDefinitions(context.Background(), cfg, lease.RunToken, definitionsHash, definitions); err != nil {
+			t.Fatalf("ApplyPTRDefinitions() error = %v", err)
+		}
+
+		serviceID := selectInt64(
+			t,
+			bundle.conn,
+			`SELECT service_id FROM main.services WHERE service_key = ?`,
+			mustDecodeHex(t, coreptrsync.DaemonServiceKeyHex()),
+		)
+		hashIDMapTableName, tagIDMapTableName := generatePTRRepositoryDefinitionTableNames(serviceID)
+
+		if got := selectInt64(
+			t,
+			bundle.conn,
+			fmt.Sprintf("SELECT hash_id FROM %s WHERE service_hash_id = ?", hashIDMapTableName),
+			101,
+		); got != 1 {
+			t.Fatalf("service_hash_id 101 mapped hash_id = %d, want 1", got)
+		}
+
+		if got := selectInt64(
+			t,
+			bundle.conn,
+			fmt.Sprintf("SELECT tag_id FROM %s WHERE service_tag_id = ?", tagIDMapTableName),
+			202,
+		); got != 3 {
+			t.Fatalf("service_tag_id 202 mapped tag_id = %d, want 3", got)
+		}
+
+		if _, err := bundle.conn.ExecContext(
+			context.Background(),
+			fmt.Sprintf(`INSERT INTO external_mappings.deleted_mappings_%d (tag_id, hash_id) VALUES (?, ?);`, serviceID),
+			1,
+			1,
+		); err != nil {
+			t.Fatalf("insert deleted_mappings row error = %v", err)
+		}
+		if _, err := bundle.conn.ExecContext(
+			context.Background(),
+			fmt.Sprintf(`INSERT INTO external_mappings.pending_mappings_%d (tag_id, hash_id) VALUES (?, ?);`, serviceID),
+			1,
+			2,
+		); err != nil {
+			t.Fatalf("insert pending_mappings row error = %v", err)
+		}
+		if _, err := bundle.conn.ExecContext(
+			context.Background(),
+			fmt.Sprintf(`INSERT INTO external_mappings.current_mappings_%d (tag_id, hash_id) VALUES (?, ?);`, serviceID),
+			3,
+			1,
+		); err != nil {
+			t.Fatalf("insert current_mappings row error = %v", err)
+		}
+		if _, err := bundle.conn.ExecContext(
+			context.Background(),
+			fmt.Sprintf(`INSERT INTO external_mappings.petitioned_mappings_%d (tag_id, hash_id, reason_id) VALUES (?, ?, ?);`, serviceID),
+			3,
+			1,
+			1,
+		); err != nil {
+			t.Fatalf("insert petitioned_mappings row error = %v", err)
+		}
+
+		mappings := PTRMappingsUpdate{
+			Adds:    []PTRMappingUpdateRow{{ServiceTagID: 201, ServiceHashIDs: []int64{101, 102}}},
+			Deletes: []PTRMappingUpdateRow{{ServiceTagID: 202, ServiceHashIDs: []int64{101}}},
+		}
+		if err := bundle.ApplyPTRMappings(context.Background(), cfg, lease.RunToken, mappingsHash, mappings); err != nil {
+			t.Fatalf("ApplyPTRMappings() error = %v", err)
+		}
+
+		if count := selectInt64(
+			t,
+			bundle.conn,
+			fmt.Sprintf(`SELECT COUNT(*) FROM external_mappings.current_mappings_%d WHERE tag_id = ? AND hash_id IN (?, ?)`, serviceID),
+			1,
+			1,
+			2,
+		); count != 2 {
+			t.Fatalf("current mapping add row count = %d, want 2", count)
+		}
+
+		if count := selectInt64(
+			t,
+			bundle.conn,
+			fmt.Sprintf(`SELECT COUNT(*) FROM external_mappings.deleted_mappings_%d WHERE tag_id = ? AND hash_id = ?`, serviceID),
+			1,
+			1,
+		); count != 0 {
+			t.Fatalf("deleted mapping stale add row count = %d, want 0", count)
+		}
+
+		if count := selectInt64(
+			t,
+			bundle.conn,
+			fmt.Sprintf(`SELECT COUNT(*) FROM external_mappings.pending_mappings_%d WHERE tag_id = ? AND hash_id = ?`, serviceID),
+			1,
+			2,
+		); count != 0 {
+			t.Fatalf("pending mapping stale add row count = %d, want 0", count)
+		}
+
+		if count := selectInt64(
+			t,
+			bundle.conn,
+			fmt.Sprintf(`SELECT COUNT(*) FROM external_mappings.current_mappings_%d WHERE tag_id = ? AND hash_id = ?`, serviceID),
+			3,
+			1,
+		); count != 0 {
+			t.Fatalf("current mapping delete row count = %d, want 0", count)
+		}
+
+		if count := selectInt64(
+			t,
+			bundle.conn,
+			fmt.Sprintf(`SELECT COUNT(*) FROM external_mappings.petitioned_mappings_%d WHERE tag_id = ? AND hash_id = ?`, serviceID),
+			3,
+			1,
+		); count != 0 {
+			t.Fatalf("petitioned mapping delete row count = %d, want 0", count)
+		}
+
+		if count := selectInt64(
+			t,
+			bundle.conn,
+			fmt.Sprintf(`SELECT COUNT(*) FROM external_mappings.deleted_mappings_%d WHERE tag_id = ? AND hash_id = ?`, serviceID),
+			3,
+			1,
+		); count != 1 {
+			t.Fatalf("deleted mapping delete row count = %d, want 1", count)
+		}
+
+		status, err := bundle.GetPTRSyncStatus(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("GetPTRSyncStatus() error = %v", err)
+		}
+
+		if status.ProcessedDefinitionCount != 1 {
+			t.Fatalf("status.ProcessedDefinitionCount = %d, want 1", status.ProcessedDefinitionCount)
+		}
+
+		if status.ProcessedContentCount != 1 {
+			t.Fatalf("status.ProcessedContentCount = %d, want 1", status.ProcessedContentCount)
 		}
 	})
 }

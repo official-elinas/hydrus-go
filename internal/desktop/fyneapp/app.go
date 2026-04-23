@@ -395,7 +395,7 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 
 	detailPane := container.NewVSplit(previewSection, tagAndMetadataPane)
 	detailPane.SetOffset(0.42)
- 	detailPaneHost := newMinSizeBox(detailPane, fyne.NewSize(360, 480))
+	detailPaneHost := newMinSizeBox(detailPane, fyne.NewSize(360, 480))
 
 	queueHelp := widget.NewLabel(
 		"Queue files with Add File, Add Folder, or by dragging\nfiles and folders anywhere into the window.",
@@ -2203,7 +2203,7 @@ func ptrHeadlineText(status coreptrsync.Status) string {
 		return "PTR sync: unavailable"
 	case !status.Enabled:
 		return "PTR sync: disabled"
-	case status.DownloadedUpdateCount > 0 || status.ProcessedDefinitionCount > 0 || status.ProcessedContentCount > 0 || status.MetadataSlice > 0:
+	case status.IsComplete:
 		return "PTR sync: ✓ complete"
 	default:
 		return "PTR sync: idle"
@@ -2221,6 +2221,10 @@ func ptrCompletionStatusText(status coreptrsync.Status) string {
 
 	if status.LastError != "" {
 		return "PTR sync finished with an error in hydrusd."
+	}
+
+	if !status.IsComplete {
+		return "PTR sync is idle in hydrusd."
 	}
 
 	return fmt.Sprintf(
@@ -2251,6 +2255,8 @@ func formatPTRStatus(status coreptrsync.Status) string {
 		} else {
 			buf.WriteString("Status: Remote PTR busy; retrying\n")
 		}
+	} else if status.IsComplete {
+		buf.WriteString("Status: Complete\n")
 	} else {
 		buf.WriteString("Status: Idle\n")
 	}
