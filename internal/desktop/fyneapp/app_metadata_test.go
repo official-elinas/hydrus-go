@@ -3,6 +3,7 @@
 package fyneapp
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -258,6 +259,28 @@ func TestPTRStatusSummaryText(t *testing.T) {
 		status.IsComplete = true
 		if got := ptrHeadlineText(status); got != "PTR sync: ✓ complete" {
 			t.Fatalf("ptrHeadlineText() = %q, want %q", got, "PTR sync: ✓ complete")
+		}
+	})
+}
+
+func TestNativeWatcherFallbackMessage(t *testing.T) {
+	t.Run("supports still images without fallback", func(t *testing.T) {
+		if got := nativeWatcherFallbackMessage("image/png"); got != "" {
+			t.Fatalf("nativeWatcherFallbackMessage(image/png) = %q, want empty string", got)
+		}
+	})
+
+	t.Run("explains native video limitation in app", func(t *testing.T) {
+		got := nativeWatcherFallbackMessage("video/mp4")
+		if got == "" || !strings.Contains(got, "Native video playback") {
+			t.Fatalf("nativeWatcherFallbackMessage(video/mp4) = %q, want native video explanation", got)
+		}
+	})
+
+	t.Run("reports generic unsupported types", func(t *testing.T) {
+		got := nativeWatcherFallbackMessage("application/pdf")
+		if got != "Viewer not available for application/pdf." {
+			t.Fatalf("nativeWatcherFallbackMessage(application/pdf) = %q, want generic unsupported message", got)
 		}
 	})
 }

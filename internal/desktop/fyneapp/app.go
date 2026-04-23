@@ -39,6 +39,9 @@ const (
 	previewByteLimit    = 16 << 20
 	previewPixelLimit   = 16_000_000
 	previewMaxDimension = 8192
+	watcherByteLimit    = 64 << 20
+	watcherPixelLimit   = 64_000_000
+	watcherMaxDimension = 16384
 	defaultDaemonURL    = "http://127.0.0.1:45869"
 	defaultMetadataText = "Select a file from the grid to inspect the daemon-backed metadata state.\n\nThis prototype is focused on validating daemon-backed import/trash flows and early Hydrus-like layout work, not full UI parity yet."
 	defaultPreviewText  = "Select a supported still image to\npreview the daemon-served original file."
@@ -56,6 +59,7 @@ type prototype struct {
 	window        fyne.Window
 	connectWindow fyne.Window
 	ptrWindow     fyne.Window
+	watcherWindow fyne.Window
 	stateMu       sync.RWMutex
 	client        *daemonclient.Client
 
@@ -104,6 +108,9 @@ type prototype struct {
 	previewRequestID uint64
 	previewCancel    context.CancelFunc
 	previewRequestM  sync.Mutex
+	watcherRequestID uint64
+	watcherCancel    context.CancelFunc
+	watcherRequestM  sync.Mutex
 	ptrStatus        coreptrsync.Status
 	ptrStatusLoaded  bool
 	ptrStatusBusy    bool
@@ -328,6 +335,49 @@ func (p *prototype) cancelPreviewRequest() {
 		p.previewCancel()
 		p.previewCancel = nil
 	}
+}
+
+func (p *prototype) beginWatcherRequest(timeout time.Duration) (context.Context, context.CancelFunc, uint64) {
+	p.watcherRequestM.Lock()
+	defer p.watcherRequestM.Unlock()
+
+	if p.watcherCancel != nil {
+		p.watcherCancel()
+	}
+
+	p.watcherRequestID++
+	requestID := p.watcherRequestID
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	p.watcherCancel = cancel
+
+	return ctx, cancel, requestID
+}
+
+func (p *prototype) cancelWatcherRequest() {
+	p.watcherRequestM.Lock()
+	defer p.watcherRequestM.Unlock()
+
+	p.watcherRequestID++
+	if p.watcherCancel != nil {
+		p.watcherCancel()
+		p.watcherCancel = nil
+	}
+}
+
+func (p *prototype) finishWatcherRequest(requestID uint64) {
+	p.watcherRequestM.Lock()
+	defer p.watcherRequestM.Unlock()
+
+	if p.watcherRequestID == requestID {
+		p.watcherCancel = nil
+	}
+}
+
+func (p *prototype) isCurrentWatcherRequest(requestID uint64) bool {
+	p.watcherRequestM.Lock()
+	defer p.watcherRequestM.Unlock()
+
+	return p.watcherRequestID == requestID
 }
 
 func (p *prototype) finishPreviewRequest(requestID uint64) {
@@ -1383,6 +1433,10 @@ func (p *prototype) ensureGridWrap() {
 				overlay,
 				recentItem.FileID == p.selectedFileID,
 				nil,
+				func() {
+					p.selectFile(recentItem.FileID)
+					p.openNativeWatcherForFile(recentItem.FileID)
+				},
 			)
 
 			if resource == nil {
@@ -1581,6 +1635,103 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 			p.tagsLabel.SetText(formatTagMetadata(metadata))
 		})
 	}(connection, fileID)
+}
+
+func (p *prototype) openNativeWatcherForFile(fileID int64) {
+	connection := p.currentConnection()
+	if !connection.connected || connection.client == nil {
+		return
+	}
+
+	item, ok := p.lookupRecentItem(fileID)
+	if !ok {
+		return
+	}
+
+	title := fmt.Sprintf("Watcher • file_id %d", item.FileID)
+	if message := nativeWatcherFallbackMessage(item.MIME); message != "" {
+		p.presentWatcherWindow(title, newWatcherMessageContent(item.MIME, message))
+		return
+	}
+
+	p.presentWatcherWindow(title, newWatcherLoadingContent(item.MIME))
+	ctx, cancel, requestID := p.beginWatcherRequest(30 * time.Second)
+
+	go func(connection connectionSnapshot, item daemonclient.RecentItem, ctx context.Context, cancel context.CancelFunc, requestID uint64) {
+		defer cancel()
+		defer p.finishWatcherRequest(requestID)
+
+		payload, err := connection.client.FetchFileContent(ctx, item, watcherByteLimit)
+		if err != nil {
+			if ctx.Err() != nil || !p.isCurrentWatcherRequest(requestID) {
+				return
+			}
+
+			fyne.Do(func() {
+				if !p.isCurrentOperation(connection) || !p.isCurrentWatcherRequest(requestID) {
+					return
+				}
+
+				p.presentWatcherWindow(title, newWatcherMessageContent(item.MIME, "Could not load the original from hydrusd.\n\n"+err.Error()))
+			})
+			return
+		}
+
+		if len(payload) == 0 {
+			fyne.Do(func() {
+				if !p.isCurrentOperation(connection) || !p.isCurrentWatcherRequest(requestID) {
+					return
+				}
+
+				p.presentWatcherWindow(title, newWatcherMessageContent(item.MIME, fmt.Sprintf("Daemon returned an empty original for file_id %d.", item.FileID)))
+			})
+			return
+		}
+
+		if err := validateNativeWatcherPayload(payload); err != nil {
+			fyne.Do(func() {
+				if !p.isCurrentOperation(connection) || !p.isCurrentWatcherRequest(requestID) {
+					return
+				}
+
+				p.presentWatcherWindow(title, newWatcherMessageContent(item.MIME, "Viewer could not prepare the original for display.\n\n"+err.Error()))
+			})
+			return
+		}
+
+		resource := fyne.NewStaticResource(
+			fmt.Sprintf("file-%d-watcher", item.FileID),
+			payload,
+		)
+
+		fyne.Do(func() {
+			if !p.isCurrentOperation(connection) || !p.isCurrentWatcherRequest(requestID) {
+				return
+			}
+
+			p.presentWatcherWindow(title, newWatcherImageContent(item, resource))
+		})
+	}(connection, item, ctx, cancel, requestID)
+}
+
+func (p *prototype) presentWatcherWindow(title string, content fyne.CanvasObject) {
+	if p.watcherWindow == nil {
+		watcherWindow := p.app.NewWindow(title)
+		watcherWindow.Resize(fyne.NewSize(980, 720))
+		watcherWindow.SetPadded(false)
+		watcherWindow.SetOnClosed(func() {
+			p.cancelWatcherRequest()
+			if p.watcherWindow == watcherWindow {
+				p.watcherWindow = nil
+			}
+		})
+		p.watcherWindow = watcherWindow
+	}
+
+	p.watcherWindow.SetTitle(title)
+	p.watcherWindow.SetContent(content)
+	p.watcherWindow.Show()
+	p.watcherWindow.RequestFocus()
 }
 
 func (p *prototype) ensurePreviewResource(item daemonclient.RecentItem) {
@@ -1792,6 +1943,78 @@ func (p *prototype) setSelectedPreview(resource fyne.Resource, message string) {
 	p.previewLabel.SetText(message)
 }
 
+func newWatcherLoadingContent(mime string) fyne.CanvasObject {
+	message := "Loading original from hydrusd..."
+	if strings.TrimSpace(mime) != "" {
+		message = fmt.Sprintf("Loading %s from hydrusd...", mime)
+	}
+
+	return newWatcherMessageContent(mime, message)
+}
+
+func newWatcherImageContent(item daemonclient.RecentItem, resource fyne.Resource) fyne.CanvasObject {
+	imageViewer := canvas.NewImageFromResource(resource)
+	imageViewer.FillMode = canvas.ImageFillOriginal
+	imageViewer.ScaleMode = canvas.ImageScaleSmooth
+
+	headline := widget.NewLabelWithStyle(
+		fmt.Sprintf("file_id %d • %s", item.FileID, item.MIME),
+		fyne.TextAlignLeading,
+		fyne.TextStyle{Bold: true},
+	)
+	headline.Wrapping = fyne.TextTruncate
+
+	footerText := "Original-size image viewer. Resize the window or scroll to inspect large media."
+	if item.Width != nil && item.Height != nil {
+		footerText = fmt.Sprintf("Original-size image viewer • %dx%d • scroll to inspect large media.", *item.Width, *item.Height)
+	}
+	footer := widget.NewLabel(footerText)
+	footer.Wrapping = fyne.TextWrapWord
+
+	background := canvas.NewRectangle(color.NRGBA{R: 18, G: 18, B: 20, A: 255})
+	scroll := container.NewScroll(imageViewer)
+	scroll.SetMinSize(fyne.NewSize(640, 480))
+
+	content := container.NewBorder(
+		container.NewPadded(container.NewVBox(headline, widget.NewSeparator())),
+		container.NewPadded(footer),
+		nil,
+		nil,
+		container.NewPadded(scroll),
+	)
+
+	return container.NewStack(background, content)
+}
+
+func newWatcherMessageContent(mime string, message string) fyne.CanvasObject {
+	headlineText := "Native watcher"
+	if normalized := strings.TrimSpace(mime); normalized != "" {
+		headlineText = fmt.Sprintf("Native watcher • %s", normalized)
+	}
+
+	headline := widget.NewLabelWithStyle(
+		headlineText,
+		fyne.TextAlignLeading,
+		fyne.TextStyle{Bold: true},
+	)
+	headline.Wrapping = fyne.TextTruncate
+
+	body := widget.NewLabel(message)
+	body.Wrapping = fyne.TextWrapWord
+	body.Alignment = fyne.TextAlignCenter
+
+	background := canvas.NewRectangle(color.NRGBA{R: 18, G: 18, B: 20, A: 255})
+	content := container.NewBorder(
+		container.NewPadded(container.NewVBox(headline, widget.NewSeparator())),
+		nil,
+		nil,
+		nil,
+		container.NewCenter(container.NewPadded(body)),
+	)
+
+	return container.NewStack(background, content)
+}
+
 func (p *prototype) setStatus(text string) {
 	p.activityLabel.SetText(text)
 	p.statusBarLabel.SetText(text)
@@ -1804,6 +2027,19 @@ func supportsSelectedPreviewMime(mime string) bool {
 	default:
 		return false
 	}
+}
+
+func nativeWatcherFallbackMessage(mime string) string {
+	normalized := strings.TrimSpace(strings.ToLower(mime))
+	if supportsSelectedPreviewMime(normalized) {
+		return ""
+	}
+
+	if strings.HasPrefix(normalized, "video/") {
+		return "Native video playback is not yet bundled in this prototype.\n\nThis build keeps viewing inside the app, but core Fyne does not provide a built-in in-app video player."
+	}
+
+	return fmt.Sprintf("Viewer not available for %s.", mime)
 }
 
 func validateSelectedPreviewPayload(payload []byte) error {
@@ -1833,6 +2069,39 @@ func validateSelectedPreviewPayload(payload []byte) error {
 			config.Width,
 			config.Height,
 			previewPixelLimit,
+		)
+	}
+
+	return nil
+}
+
+func validateNativeWatcherPayload(payload []byte) error {
+	config, _, err := image.DecodeConfig(bytes.NewReader(payload))
+	if err != nil {
+		return fmt.Errorf("decode image config: %w", err)
+	}
+
+	if config.Width <= 0 || config.Height <= 0 {
+		return fmt.Errorf("decoded image dimensions were invalid")
+	}
+
+	if config.Width > watcherMaxDimension || config.Height > watcherMaxDimension {
+		return fmt.Errorf(
+			"decoded image dimensions %dx%d exceed the watcher limit of %dx%d",
+			config.Width,
+			config.Height,
+			watcherMaxDimension,
+			watcherMaxDimension,
+		)
+	}
+
+	pixels := int64(config.Width) * int64(config.Height)
+	if pixels > watcherPixelLimit {
+		return fmt.Errorf(
+			"decoded image dimensions %dx%d exceed the watcher limit of %d pixels",
+			config.Width,
+			config.Height,
+			watcherPixelLimit,
 		)
 	}
 

@@ -22,6 +22,7 @@ type mediaTile struct {
 	title        *widget.Label
 	subtitle     *widget.Label
 	onTapped     func()
+	onDoubleTapped func()
 }
 
 func newMediaTile() *mediaTile {
@@ -56,10 +57,12 @@ func (t *mediaTile) SetData(
 	overlay string,
 	selected bool,
 	onTapped func(),
+	onDoubleTapped func(),
 ) {
 	t.title.SetText(title)
 	t.subtitle.SetText(subtitle)
 	t.onTapped = onTapped
+	t.onDoubleTapped = onDoubleTapped
 
 	t.preview.Image = nil
 	t.preview.Resource = preview
@@ -80,6 +83,12 @@ func (t *mediaTile) SetData(
 func (t *mediaTile) Tapped(*fyne.PointEvent) {
 	if t.onTapped != nil {
 		t.onTapped()
+	}
+}
+
+func (t *mediaTile) DoubleTapped(*fyne.PointEvent) {
+	if t.onDoubleTapped != nil {
+		t.onDoubleTapped()
 	}
 }
 
