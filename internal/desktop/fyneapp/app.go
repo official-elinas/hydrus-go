@@ -383,6 +383,26 @@ func (p *prototype) installConnection(client *daemonclient.Client) {
 	p.connectionGen++
 }
 
+func (p *prototype) resetConnectionAttemptState() {
+	p.cancelPreviewRequest()
+	p.cancelWatcherRequest()
+	p.cancelPTRStatusRequests()
+
+	p.thumbnailCacheM.Lock()
+	p.thumbnailGen++
+	p.thumbnailLoads = map[int64]struct{}{}
+	p.thumbnailCacheM.Unlock()
+
+	p.tileMetadataMu.Lock()
+	p.tileMetadataGen++
+	p.tileMetadataLoads = map[int64]struct{}{}
+	p.tileMetadataMu.Unlock()
+
+	p.stateMu.Lock()
+	p.ptrStatusLoaded = false
+	p.stateMu.Unlock()
+}
+
 func (p *prototype) clearThumbnailLoad(fileID int64, generation uint64) {
 	p.thumbnailCacheM.Lock()
 	defer p.thumbnailCacheM.Unlock()
@@ -1093,12 +1113,8 @@ func (p *prototype) connectToDaemon(baseURL string, accessKey string) {
 		return
 	}
 
-	p.cancelPreviewRequest()
+	p.resetConnectionAttemptState()
 	attemptID, wasConnected := p.beginConnectAttempt()
-	p.cancelPTRStatusRequests()
-	p.stateMu.Lock()
-	p.ptrStatusLoaded = false
-	p.stateMu.Unlock()
 	p.setPTRVisualState("PTR sync: offline", false)
 	p.ptrStatusLabel.SetText("PTR sync status: offline")
 	p.setStatus("Connecting to hydrusd...")

@@ -289,6 +289,101 @@ func TestNativeWatcherFallbackMessage(t *testing.T) {
 	})
 }
 
+func TestResetConnectionAttemptState(t *testing.T) {
+	previewCtx, previewCancel := context.WithCancel(context.Background())
+	watcherCtx, watcherCancel := context.WithCancel(context.Background())
+
+	p := &prototype{
+		thumbnailCache: map[int64]fyne.Resource{
+			1: nil,
+		},
+		thumbnailLoads: map[int64]struct{}{
+			1: {},
+		},
+		tileMetadataCache: map[int64]daemonclient.FileMetadata{
+			7: {FileID: 7},
+		},
+		tileMetadataLoads: map[int64]struct{}{
+			7: {},
+		},
+		previewRequestID: 4,
+		previewCancel:    previewCancel,
+		watcherRequestID: 9,
+		watcherCancel:    watcherCancel,
+		ptrStatusBusy:    true,
+		ptrStatusLoaded:  true,
+		ptrStatusRequest: 12,
+		thumbnailGen:     2,
+		tileMetadataGen:  3,
+	}
+
+	p.resetConnectionAttemptState()
+
+	if p.previewRequestID != 5 {
+		t.Fatalf("previewRequestID = %d, want 5", p.previewRequestID)
+	}
+
+	if p.previewCancel != nil {
+		t.Fatal("previewCancel = non-nil, want nil")
+	}
+
+	select {
+	case <-previewCtx.Done():
+	default:
+		t.Fatal("preview context was not canceled")
+	}
+
+	if p.watcherRequestID != 10 {
+		t.Fatalf("watcherRequestID = %d, want 10", p.watcherRequestID)
+	}
+
+	if p.watcherCancel != nil {
+		t.Fatal("watcherCancel = non-nil, want nil")
+	}
+
+	select {
+	case <-watcherCtx.Done():
+	default:
+		t.Fatal("watcher context was not canceled")
+	}
+
+	if p.ptrStatusBusy {
+		t.Fatal("ptrStatusBusy = true, want false")
+	}
+
+	if p.ptrStatusLoaded {
+		t.Fatal("ptrStatusLoaded = true, want false")
+	}
+
+	if p.ptrStatusRequest != 13 {
+		t.Fatalf("ptrStatusRequest = %d, want 13", p.ptrStatusRequest)
+	}
+
+	if p.thumbnailGen != 3 {
+		t.Fatalf("thumbnailGen = %d, want 3", p.thumbnailGen)
+	}
+
+	if len(p.thumbnailLoads) != 0 {
+		t.Fatalf("len(thumbnailLoads) = %d, want 0", len(p.thumbnailLoads))
+	}
+
+	if len(p.thumbnailCache) != 1 {
+		t.Fatalf("len(thumbnailCache) = %d, want 1", len(p.thumbnailCache))
+	}
+
+	if p.tileMetadataGen != 4 {
+		t.Fatalf("tileMetadataGen = %d, want 4", p.tileMetadataGen)
+	}
+
+	if len(p.tileMetadataLoads) != 0 {
+		t.Fatalf("len(tileMetadataLoads) = %d, want 0", len(p.tileMetadataLoads))
+	}
+
+	if len(p.tileMetadataCache) != 1 {
+		t.Fatalf("len(tileMetadataCache) = %d, want 1", len(p.tileMetadataCache))
+	}
+}
+
 func TestParseTagEditorInput(t *testing.T) {
 	t.Run("splits on commas and newlines while trimming blanks", func(t *testing.T) {
 		got := parseTagEditorInput(" creator:alice,\nseries:zeta\n\tcharacter:bob  ")
