@@ -118,39 +118,39 @@ type prototype struct {
 	gridHost          *fyne.Container
 	gridWrap          *widget.GridWrap
 
-	recent             []daemonclient.RecentItem
-	recentLimit        int
-	recentNextOffset   int
-	recentHasMore      bool
-	recentLoadBusy     bool
-	galleryFilterQuery string
-	gallerySortMode    string
-	searchSuggestions  []string
-	searchRequestID    uint64
-	selectedFileID     int64
-	connected          bool
-	connectionGen      uint64
-	connectAttemptID   uint64
+	recent                []daemonclient.RecentItem
+	recentLimit           int
+	recentNextOffset      int
+	recentHasMore         bool
+	recentLoadBusy        bool
+	galleryFilterQuery    string
+	gallerySortMode       string
+	searchSuggestions     []string
+	searchRequestID       uint64
+	selectedFileID        int64
+	connected             bool
+	connectionGen         uint64
+	connectAttemptID      uint64
 	selectedPreviewCache  map[string]fyne.Resource
 	selectedPreviewCacheM sync.Mutex
-	thumbnailCache     map[int64]fyne.Resource
-	thumbnailLoads     map[int64]struct{}
-	thumbnailGen       uint64
-	thumbnailCacheM    sync.Mutex
-	tileMetadataCache  map[int64]daemonclient.FileMetadata
-	tileMetadataLoads  map[int64]struct{}
-	tileMetadataGen    uint64
-	tileMetadataMu     sync.Mutex
-	previewRequestID   uint64
-	previewCancel      context.CancelFunc
-	previewRequestM    sync.Mutex
-	watcherRequestID   uint64
-	watcherCancel      context.CancelFunc
-	watcherRequestM    sync.Mutex
-	ptrStatus          coreptrsync.Status
-	ptrStatusLoaded    bool
-	ptrStatusBusy      bool
-	ptrStatusRequest   uint64
+	thumbnailCache        map[int64]fyne.Resource
+	thumbnailLoads        map[int64]struct{}
+	thumbnailGen          uint64
+	thumbnailCacheM       sync.Mutex
+	tileMetadataCache     map[int64]daemonclient.FileMetadata
+	tileMetadataLoads     map[int64]struct{}
+	tileMetadataGen       uint64
+	tileMetadataMu        sync.Mutex
+	previewRequestID      uint64
+	previewCancel         context.CancelFunc
+	previewRequestM       sync.Mutex
+	watcherRequestID      uint64
+	watcherCancel         context.CancelFunc
+	watcherRequestM       sync.Mutex
+	ptrStatus             coreptrsync.Status
+	ptrStatusLoaded       bool
+	ptrStatusBusy         bool
+	ptrStatusRequest      uint64
 
 	queueMu            sync.Mutex
 	importQueue        []importQueueEntry
@@ -174,17 +174,17 @@ func newPrototype() *prototype {
 	window.SetPadded(false)
 
 	p := &prototype{
-		app:                application,
-		window:             window,
-		client:             daemonclient.New(),
-		recentLimit:        recentPageLimit,
-		gallerySortMode:    gallerySortNewest,
-		selectedQueueIndex: -1,
+		app:                  application,
+		window:               window,
+		client:               daemonclient.New(),
+		recentLimit:          recentPageLimit,
+		gallerySortMode:      gallerySortNewest,
+		selectedQueueIndex:   -1,
 		selectedPreviewCache: map[string]fyne.Resource{},
-		thumbnailCache:     map[int64]fyne.Resource{},
-		thumbnailLoads:     map[int64]struct{}{},
-		tileMetadataCache:  map[int64]daemonclient.FileMetadata{},
-		tileMetadataLoads:  map[int64]struct{}{},
+		thumbnailCache:       map[int64]fyne.Resource{},
+		thumbnailLoads:       map[int64]struct{}{},
+		tileMetadataCache:    map[int64]daemonclient.FileMetadata{},
+		tileMetadataLoads:    map[int64]struct{}{},
 	}
 
 	p.connectionLabel = widget.NewLabel("")
