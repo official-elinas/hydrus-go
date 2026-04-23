@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -204,6 +205,70 @@ func (m *Manager) Trigger(ctx context.Context) (coreptrsync.Status, error) {
 	}(started, done)
 
 	return status, nil
+}
+
+// AddPendingMappings stages add-only pending PTR mappings for the daemon-owned
+// public tag repository.
+func (m *Manager) AddPendingMappings(
+	ctx context.Context,
+	request coreptrsync.PendingMappingsRequest,
+) (coreptrsync.PendingMappingsResult, error) {
+	if m == nil {
+		return coreptrsync.PendingMappingsResult{}, coreptrsync.ErrCommitPendingUnavailable
+	}
+
+	if !m.cfg.Enabled {
+		return coreptrsync.PendingMappingsResult{}, coreptrsync.ErrSyncDisabled
+	}
+
+	if m.unavailableReason != "" || m.writeBundle == nil {
+		return coreptrsync.PendingMappingsResult{}, coreptrsync.ErrCommitPendingUnavailable
+	}
+
+	return m.writeBundle.StagePTRPendingMappings(ctx, m.cfg, request)
+}
+
+// CommitPending uploads currently pending PTR add mappings and, on success,
+// applies the local pending->current transition.
+func (m *Manager) CommitPending(
+	ctx context.Context,
+	request coreptrsync.CommitPendingRequest,
+) (coreptrsync.CommitPendingResult, error) {
+	if m == nil {
+		return coreptrsync.CommitPendingResult{}, coreptrsync.ErrCommitPendingUnavailable
+	}
+
+	if !m.cfg.Enabled {
+		return coreptrsync.CommitPendingResult{}, coreptrsync.ErrSyncDisabled
+	}
+
+	if m.unavailableReason != "" || m.readBundle == nil || m.writeBundle == nil {
+		return coreptrsync.CommitPendingResult{}, coreptrsync.ErrCommitPendingUnavailable
+	}
+
+	groups, err := m.readBundle.ListPTRPendingMappingsForCommit(ctx, m.cfg, request.ServiceKey)
+	if err != nil {
+		return coreptrsync.CommitPendingResult{}, err
+	}
+	if len(groups) == 0 {
+		return coreptrsync.CommitPendingResult{ServiceKey: repositoryServiceKeyHex(request.ServiceKey)}, nil
+	}
+
+	client, err := NewClient(m.cfg)
+	if err != nil {
+		return coreptrsync.CommitPendingResult{}, fmt.Errorf("construct PTR client: %w", err)
+	}
+
+	if err := client.CommitPendingMappings(ctx, groups); err != nil {
+		return coreptrsync.CommitPendingResult{}, fmt.Errorf("commit PTR pending mappings: %w", err)
+	}
+
+	result, err := m.writeBundle.CommitPTRPendingMappingsSuccess(ctx, m.cfg, request.ServiceKey)
+	if err != nil {
+		return coreptrsync.CommitPendingResult{}, err
+	}
+
+	return result, nil
 }
 
 // Shutdown stops any in-flight daemon-owned background PTR sync and waits for it
@@ -934,6 +999,15 @@ func repositoryUpdatesArtifactsRoot(bundle *hydrusdb.Bundle) string {
 
 func repositoryUpdatesServiceKeyHex() string {
 	return hex.EncodeToString([]byte("repository updates"))
+}
+
+func repositoryServiceKeyHex(serviceKey string) string {
+	normalized := strings.ToLower(strings.TrimSpace(serviceKey))
+	if normalized == "" {
+		return coreptrsync.DaemonServiceKeyHex()
+	}
+
+	return normalized
 }
 
 func resolvePTRUpdateArtifactPath(bundle *hydrusdb.Bundle, hashHex string) (string, error) {

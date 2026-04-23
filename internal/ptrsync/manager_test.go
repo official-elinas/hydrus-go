@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -992,6 +993,213 @@ func TestManagerAutomaticallyResumesRetryingSyncAfterWakeup(t *testing.T) {
 	if status.DownloadedUpdateCount != 1 {
 		t.Fatalf("status.DownloadedUpdateCount = %d, want 1 after automatic retry wakeup", status.DownloadedUpdateCount)
 	}
+}
+
+func TestManagerPendingMappings(t *testing.T) {
+	t.Run("AddPendingMappings stages daemon-owned PTR mappings", func(t *testing.T) {
+		dir := createPTRManagerTestBundle(t)
+
+		masterDB := openSQLiteForPTRManagerTest(t, filepath.Join(dir, "client.master.db"))
+		mustExecPTRManagerTest(
+			t,
+			masterDB,
+			`INSERT INTO hashes (hash_id, hash) VALUES (?, ?), (?, ?);`,
+			1,
+			mustDecodeHexString(t, strings.Repeat("11", 32)),
+			2,
+			mustDecodeHexString(t, strings.Repeat("22", 32)),
+		)
+		masterDB.Close()
+
+		readBundle, err := hydrusdb.Open(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.Open() error = %v", err)
+		}
+		defer func() {
+			if err := readBundle.Close(); err != nil {
+				t.Fatalf("readBundle.Close() error = %v", err)
+			}
+		}()
+
+		writeBundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := writeBundle.Close(); err != nil {
+				t.Fatalf("writeBundle.Close() error = %v", err)
+			}
+		}()
+
+		cfg := coreptrsync.DefaultConfig()
+		cfg.Enabled = true
+
+		manager, err := NewManager(context.Background(), nil, cfg, readBundle, writeBundle)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
+		}
+
+		result, err := manager.AddPendingMappings(context.Background(), coreptrsync.PendingMappingsRequest{
+			Hashes: []string{strings.Repeat("11", 32), strings.Repeat("22", 32)},
+			Tags:   []string{"creator:alice", "series:zeta"},
+		})
+		if err != nil {
+			t.Fatalf("AddPendingMappings() error = %v", err)
+		}
+
+		if result.ServiceKey != coreptrsync.DaemonServiceKeyHex() {
+			t.Fatalf("result.ServiceKey = %q, want %q", result.ServiceKey, coreptrsync.DaemonServiceKeyHex())
+		}
+
+		if result.AddedMappings != 4 {
+			t.Fatalf("result.AddedMappings = %d, want 4", result.AddedMappings)
+		}
+
+		groups, err := readBundle.ListPTRPendingMappingsForCommit(context.Background(), cfg, "")
+		if err != nil {
+			t.Fatalf("ListPTRPendingMappingsForCommit() error = %v", err)
+		}
+
+		if len(groups) != 2 {
+			t.Fatalf("len(groups) = %d, want 2", len(groups))
+		}
+	})
+
+	t.Run("CommitPending uploads grouped mappings and promotes local pending rows", func(t *testing.T) {
+		dir := createPTRManagerTestBundle(t)
+
+		masterDB := openSQLiteForPTRManagerTest(t, filepath.Join(dir, "client.master.db"))
+		mustExecPTRManagerTest(
+			t,
+			masterDB,
+			`INSERT INTO hashes (hash_id, hash) VALUES (?, ?), (?, ?);`,
+			1,
+			mustDecodeHexString(t, strings.Repeat("11", 32)),
+			2,
+			mustDecodeHexString(t, strings.Repeat("22", 32)),
+		)
+		masterDB.Close()
+
+		readBundle, err := hydrusdb.Open(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.Open() error = %v", err)
+		}
+		defer func() {
+			if err := readBundle.Close(); err != nil {
+				t.Fatalf("readBundle.Close() error = %v", err)
+			}
+		}()
+
+		writeBundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := writeBundle.Close(); err != nil {
+				t.Fatalf("writeBundle.Close() error = %v", err)
+			}
+		}()
+
+		var updateCalls atomic.Int32
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/session_key":
+				http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "manager-session", Path: "/"})
+				w.WriteHeader(http.StatusOK)
+			case "/update":
+				if err := validateSessionCookie(r); err != nil {
+					t.Error(err)
+					http.Error(w, err.Error(), http.StatusUnauthorized)
+					return
+				}
+
+				updateCalls.Add(1)
+
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Fatalf("io.ReadAll(update body) error = %v", err)
+				}
+
+				decoded, err := decodeHydrusNetworkBytes(body)
+				if err != nil {
+					t.Fatalf("decodeHydrusNetworkBytes(update body) error = %v", err)
+				}
+
+				serialisableDict := decoded.([]any)
+				entries := serialisableDict[2].([]any)
+				pair := entries[0].([]any)
+				valueTuple := pair[1].([]any)
+				clientUpdate := valueTuple[1].([]any)
+				actions := clientUpdate[2].([]any)
+				actionTuple := actions[0].([]any)
+				if got, err := anyToInt(actionTuple[0]); err != nil || got != hydrusContentUpdatePend {
+					t.Fatalf("action = %d, want %d", got, hydrusContentUpdatePend)
+				}
+
+				contentsAndReasons := actionTuple[1].([]any)
+				if len(contentsAndReasons) != 1 {
+					t.Fatalf("len(contentsAndReasons) = %d, want 1", len(contentsAndReasons))
+				}
+
+				w.WriteHeader(http.StatusOK)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		manager, err := NewManager(context.Background(), nil, testPTRConfigFromServer(t, server.URL, defaultManagerAccessKey()), readBundle, writeBundle)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
+		}
+
+		if _, err := manager.AddPendingMappings(context.Background(), coreptrsync.PendingMappingsRequest{
+			Hashes: []string{strings.Repeat("11", 32), strings.Repeat("22", 32)},
+			Tags:   []string{"creator:alice"},
+		}); err != nil {
+			t.Fatalf("AddPendingMappings() error = %v", err)
+		}
+
+		result, err := manager.CommitPending(context.Background(), coreptrsync.CommitPendingRequest{})
+		if err != nil {
+			t.Fatalf("CommitPending() error = %v", err)
+		}
+
+		if result.ServiceKey != coreptrsync.DaemonServiceKeyHex() {
+			t.Fatalf("result.ServiceKey = %q, want %q", result.ServiceKey, coreptrsync.DaemonServiceKeyHex())
+		}
+
+		if result.CommittedMappings != 2 {
+			t.Fatalf("result.CommittedMappings = %d, want 2", result.CommittedMappings)
+		}
+
+		if got := updateCalls.Load(); got != 1 {
+			t.Fatalf("updateCalls = %d, want 1", got)
+		}
+
+		serviceID := selectPTRManagerTestInt64(
+			t,
+			filepath.Join(dir, "client.db"),
+			`SELECT service_id FROM services WHERE service_key = ?`,
+			mustDecodeHexString(t, coreptrsync.DaemonServiceKeyHex()),
+		)
+
+		if got := selectPTRManagerTestInt64(
+			t,
+			filepath.Join(dir, "client.mappings.db"),
+			fmt.Sprintf(`SELECT COUNT(*) FROM pending_mappings_%d`, serviceID),
+		); got != 0 {
+			t.Fatalf("pending mapping row count = %d, want 0", got)
+		}
+
+		if got := selectPTRManagerTestInt64(
+			t,
+			filepath.Join(dir, "client.mappings.db"),
+			fmt.Sprintf(`SELECT COUNT(*) FROM current_mappings_%d`, serviceID),
+		); got != 2 {
+			t.Fatalf("current mapping row count = %d, want 2", got)
+		}
+	})
 }
 
 func TestManagerTrigger(t *testing.T) {

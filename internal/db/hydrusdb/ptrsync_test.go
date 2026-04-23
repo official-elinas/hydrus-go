@@ -763,6 +763,106 @@ func TestBundleEnsurePTRSyncFoundation(t *testing.T) {
 	})
 }
 
+func TestBundlePTRPendingMappings(t *testing.T) {
+	t.Run("stages lists and commits pending mappings", func(t *testing.T) {
+		dir, fixture := createTestBundle(t)
+
+		bundle, err := OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		cfg := coreptrsync.DefaultConfig()
+		cfg.Enabled = true
+
+		stageResult, err := bundle.StagePTRPendingMappings(context.Background(), cfg, coreptrsync.PendingMappingsRequest{
+			Hashes: []string{fixture.hash1Hex, fixture.hash2Hex},
+			Tags:   []string{"creator:alice", "series:zeta"},
+		})
+		if err != nil {
+			t.Fatalf("StagePTRPendingMappings() error = %v", err)
+		}
+
+		if stageResult.ServiceKey != coreptrsync.DaemonServiceKeyHex() {
+			t.Fatalf("stageResult.ServiceKey = %q, want %q", stageResult.ServiceKey, coreptrsync.DaemonServiceKeyHex())
+		}
+
+		if stageResult.AddedMappings != 4 {
+			t.Fatalf("stageResult.AddedMappings = %d, want 4", stageResult.AddedMappings)
+		}
+
+		groups, err := bundle.ListPTRPendingMappingsForCommit(context.Background(), cfg, "")
+		if err != nil {
+			t.Fatalf("ListPTRPendingMappingsForCommit() error = %v", err)
+		}
+
+		if len(groups) != 2 {
+			t.Fatalf("len(groups) = %d, want 2", len(groups))
+		}
+
+		if groups[0].Tag != "creator:alice" || strings.Join(groups[0].Hashes, "|") != fixture.hash1Hex+"|"+fixture.hash2Hex {
+			t.Fatalf("groups[0] = %+v, want creator:alice with both hashes", groups[0])
+		}
+
+		if groups[1].Tag != "series:zeta" || strings.Join(groups[1].Hashes, "|") != fixture.hash1Hex+"|"+fixture.hash2Hex {
+			t.Fatalf("groups[1] = %+v, want series:zeta with both hashes", groups[1])
+		}
+
+		commitResult, err := bundle.CommitPTRPendingMappingsSuccess(context.Background(), cfg, "")
+		if err != nil {
+			t.Fatalf("CommitPTRPendingMappingsSuccess() error = %v", err)
+		}
+
+		if commitResult.ServiceKey != coreptrsync.DaemonServiceKeyHex() {
+			t.Fatalf("commitResult.ServiceKey = %q, want %q", commitResult.ServiceKey, coreptrsync.DaemonServiceKeyHex())
+		}
+
+		if commitResult.CommittedMappings != 4 {
+			t.Fatalf("commitResult.CommittedMappings = %d, want 4", commitResult.CommittedMappings)
+		}
+
+		serviceID := selectInt64(
+			t,
+			bundle.conn,
+			`SELECT service_id FROM main.services WHERE service_key = ?`,
+			mustDecodeHex(t, coreptrsync.DaemonServiceKeyHex()),
+		)
+
+		if got := selectInt64(
+			t,
+			bundle.conn,
+			fmt.Sprintf(`SELECT COUNT(*) FROM external_mappings.pending_mappings_%d`, serviceID),
+		); got != 0 {
+			t.Fatalf("pending mapping row count = %d, want 0", got)
+		}
+
+		if got := selectInt64(
+			t,
+			bundle.conn,
+			fmt.Sprintf(`SELECT COUNT(*) FROM external_mappings.current_mappings_%d`, serviceID),
+		); got != 4 {
+			t.Fatalf("current mapping row count = %d, want 4", got)
+		}
+
+		restageResult, err := bundle.StagePTRPendingMappings(context.Background(), cfg, coreptrsync.PendingMappingsRequest{
+			Hashes: []string{fixture.hash1Hex, fixture.hash2Hex},
+			Tags:   []string{"creator:alice", "series:zeta"},
+		})
+		if err != nil {
+			t.Fatalf("restage StagePTRPendingMappings() error = %v", err)
+		}
+
+		if restageResult.AddedMappings != 0 {
+			t.Fatalf("restageResult.AddedMappings = %d, want 0", restageResult.AddedMappings)
+		}
+	})
+}
+
 func TestBundleGetPTRSyncStatus(t *testing.T) {
 	t.Run("returns default unconfigured state before PTR is enabled locally", func(t *testing.T) {
 		dir, _ := createTestBundle(t)

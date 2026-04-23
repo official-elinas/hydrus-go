@@ -82,6 +82,13 @@ type PTRMappingsUpdate struct {
 	Deletes []PTRMappingUpdateRow
 }
 
+// PTRPendingMappingGroup is one outbound pending mappings group in the exact
+// logical shape Hydrus uploads to tag repositories: one tag plus many hashes.
+type PTRPendingMappingGroup struct {
+	Tag    string
+	Hashes []string
+}
+
 type processedRow struct {
 	hashID      int64
 	contentType int64
@@ -116,6 +123,215 @@ func (b *Bundle) EnsurePTRSyncFoundation(
 	}
 
 	return status, nil
+}
+
+// StagePTRPendingMappings records add-only pending mappings for the daemon-owned
+// PTR service using either file IDs or hash hex strings as file identifiers.
+func (b *Bundle) StagePTRPendingMappings(
+	ctx context.Context,
+	cfg coreptrsync.Config,
+	request coreptrsync.PendingMappingsRequest,
+) (coreptrsync.PendingMappingsResult, error) {
+	if !cfg.Enabled {
+		return coreptrsync.PendingMappingsResult{}, coreptrsync.ErrSyncDisabled
+	}
+
+	targetServiceKey, err := normalizePTRTargetServiceKey(request.ServiceKey)
+	if err != nil {
+		return coreptrsync.PendingMappingsResult{}, err
+	}
+
+	tags := dedupeStrings(request.Tags)
+	if len(tags) == 0 {
+		return coreptrsync.PendingMappingsResult{}, errors.New("at least one tag is required")
+	}
+
+	hashes, err := b.resolvePTRPendingRequestHashes(ctx, request)
+	if err != nil {
+		return coreptrsync.PendingMappingsResult{}, err
+	}
+	if len(hashes) == 0 {
+		return coreptrsync.PendingMappingsResult{}, errors.New("at least one file identifier is required")
+	}
+
+	hashIDsByHash, err := b.lookupKnownHashIDs(ctx, hashes)
+	if err != nil {
+		return coreptrsync.PendingMappingsResult{}, err
+	}
+
+	missingHashes := []string{}
+	hashIDs := make([]int64, 0, len(hashes))
+	for _, hash := range hashes {
+		hashID, ok := hashIDsByHash[hash]
+		if !ok {
+			missingHashes = append(missingHashes, hash)
+			continue
+		}
+
+		hashIDs = append(hashIDs, hashID)
+	}
+	if len(missingHashes) > 0 {
+		return coreptrsync.PendingMappingsResult{}, fmt.Errorf("hashes not found: %v", missingHashes)
+	}
+
+	result := coreptrsync.PendingMappingsResult{ServiceKey: targetServiceKey}
+	err = b.WithImmediateTx(ctx, func(tx *ImmediateTx) error {
+		service, serviceID, err := preparePTRSyncFoundationTx(ctx, tx, cfg)
+		if err != nil {
+			return err
+		}
+
+		if service.ServiceKey != targetServiceKey {
+			return fmt.Errorf("PTR service key %q is unavailable", targetServiceKey)
+		}
+
+		addedMappings, err := stagePTRPendingMappingsTx(ctx, tx, serviceID, tags, hashIDs)
+		if err != nil {
+			return err
+		}
+
+		result.AddedMappings = addedMappings
+		return nil
+	})
+	if err != nil {
+		return coreptrsync.PendingMappingsResult{}, err
+	}
+
+	return result, nil
+}
+
+// ListPTRPendingMappingsForCommit returns grouped pending add mappings in the
+// exact logical shape needed for Hydrus client-to-server repository updates.
+func (b *Bundle) ListPTRPendingMappingsForCommit(
+	ctx context.Context,
+	cfg coreptrsync.Config,
+	serviceKey string,
+) ([]PTRPendingMappingGroup, error) {
+	if !cfg.Enabled {
+		return nil, coreptrsync.ErrSyncDisabled
+	}
+
+	targetServiceKey, err := normalizePTRTargetServiceKey(serviceKey)
+	if err != nil {
+		return nil, err
+	}
+
+	service, ok, err := lookupServiceByKeyTx(ctx, b.conn, targetServiceKey)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("PTR service key %q is unavailable", targetServiceKey)
+	}
+
+	serviceID, err := lookupServiceIDByKeyTx(ctx, b.conn, targetServiceKey)
+	if err != nil {
+		return nil, err
+	}
+
+	if service.Type != services.TypeTagRepository {
+		return nil, fmt.Errorf("service %q is not a tag repository", targetServiceKey)
+	}
+
+	query := fmt.Sprintf(
+		`SELECT pm.tag_id, lower(hex(h.hash))
+		FROM external_mappings.pending_mappings_%d pm
+		JOIN external_master.hashes h USING (hash_id)
+		ORDER BY pm.tag_id ASC, pm.hash_id ASC`,
+		serviceID,
+	)
+
+	rows, err := b.conn.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("query PTR pending mappings for commit: %w", err)
+	}
+	defer rows.Close()
+
+	tagIDsInOrder := []int64{}
+	hashesByTagID := map[int64][]string{}
+	seenTagIDs := map[int64]struct{}{}
+	for rows.Next() {
+		var (
+			tagID   int64
+			hashHex string
+		)
+
+		if err := rows.Scan(&tagID, &hashHex); err != nil {
+			return nil, fmt.Errorf("scan PTR pending mapping row: %w", err)
+		}
+
+		if _, ok := seenTagIDs[tagID]; !ok {
+			seenTagIDs[tagID] = struct{}{}
+			tagIDsInOrder = append(tagIDsInOrder, tagID)
+		}
+
+		hashesByTagID[tagID] = append(hashesByTagID[tagID], hashHex)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate PTR pending mapping rows: %w", err)
+	}
+
+	tagsByID, err := b.lookupTagsByID(ctx, tagIDsInOrder)
+	if err != nil {
+		return nil, err
+	}
+
+	groups := make([]PTRPendingMappingGroup, 0, len(tagIDsInOrder))
+	for _, tagID := range tagIDsInOrder {
+		tag, ok := tagsByID[tagID]
+		if !ok {
+			return nil, fmt.Errorf("PTR pending mapping tag_id %d could not be resolved", tagID)
+		}
+
+		groups = append(groups, PTRPendingMappingGroup{
+			Tag:    tag,
+			Hashes: hashesByTagID[tagID],
+		})
+	}
+
+	return groups, nil
+}
+
+// CommitPTRPendingMappingsSuccess applies the local successful-commit state
+// transition for all currently pending add mappings on the daemon-owned PTR.
+func (b *Bundle) CommitPTRPendingMappingsSuccess(
+	ctx context.Context,
+	cfg coreptrsync.Config,
+	serviceKey string,
+) (coreptrsync.CommitPendingResult, error) {
+	if !cfg.Enabled {
+		return coreptrsync.CommitPendingResult{}, coreptrsync.ErrSyncDisabled
+	}
+
+	targetServiceKey, err := normalizePTRTargetServiceKey(serviceKey)
+	if err != nil {
+		return coreptrsync.CommitPendingResult{}, err
+	}
+
+	result := coreptrsync.CommitPendingResult{ServiceKey: targetServiceKey}
+	err = b.WithImmediateTx(ctx, func(tx *ImmediateTx) error {
+		service, serviceID, err := preparePTRSyncFoundationTx(ctx, tx, cfg)
+		if err != nil {
+			return err
+		}
+
+		if service.ServiceKey != targetServiceKey {
+			return fmt.Errorf("PTR service key %q is unavailable", targetServiceKey)
+		}
+
+		committedMappings, err := commitPTRPendingMappingsSuccessTx(ctx, tx, serviceID)
+		if err != nil {
+			return err
+		}
+
+		result.CommittedMappings = committedMappings
+		return nil
+	})
+	if err != nil {
+		return coreptrsync.CommitPendingResult{}, err
+	}
+
+	return result, nil
 }
 
 // RecoverPTRSyncFoundation prepares the daemon-owned PTR foundation and resets
@@ -2736,6 +2952,202 @@ func recomputePTRProcessedCounts(
 	}
 
 	return nil
+}
+
+func stagePTRPendingMappingsTx(
+	ctx context.Context,
+	tx *ImmediateTx,
+	serviceID int64,
+	tags []string,
+	hashIDs []int64,
+) (int64, error) {
+	var addedMappings int64
+	for _, tag := range tags {
+		tagID, err := ensureTagIDTx(ctx, tx, tag)
+		if err != nil {
+			return 0, fmt.Errorf("ensure PTR pending tag id for %q: %w", tag, err)
+		}
+
+		for _, hashID := range hashIDs {
+			if _, err := tx.ExecContext(
+				ctx,
+				fmt.Sprintf("DELETE FROM external_mappings.deleted_mappings_%d WHERE tag_id = ? AND hash_id = ?", serviceID),
+				tagID,
+				hashID,
+			); err != nil {
+				return 0, fmt.Errorf("delete PTR deleted mapping row before pending add: %w", err)
+			}
+
+			if _, err := tx.ExecContext(
+				ctx,
+				fmt.Sprintf("DELETE FROM external_mappings.petitioned_mappings_%d WHERE tag_id = ? AND hash_id = ?", serviceID),
+				tagID,
+				hashID,
+			); err != nil {
+				return 0, fmt.Errorf("delete PTR petitioned mapping row before pending add: %w", err)
+			}
+
+			exists, err := ptrMappingExistsTx(
+				ctx,
+				tx,
+				fmt.Sprintf("external_mappings.current_mappings_%d", serviceID),
+				tagID,
+				hashID,
+			)
+			if err != nil {
+				return 0, err
+			}
+			if exists {
+				continue
+			}
+
+			result, err := tx.ExecContext(
+				ctx,
+				fmt.Sprintf("INSERT OR IGNORE INTO external_mappings.pending_mappings_%d (tag_id, hash_id) VALUES (?, ?)", serviceID),
+				tagID,
+				hashID,
+			)
+			if err != nil {
+				return 0, fmt.Errorf("insert PTR pending mapping row: %w", err)
+			}
+
+			rowsAffected, err := result.RowsAffected()
+			if err != nil {
+				return 0, fmt.Errorf("read PTR pending mapping insert rows affected: %w", err)
+			}
+
+			addedMappings += rowsAffected
+		}
+	}
+
+	return addedMappings, nil
+}
+
+func commitPTRPendingMappingsSuccessTx(
+	ctx context.Context,
+	tx *ImmediateTx,
+	serviceID int64,
+) (int64, error) {
+	pendingTableName := fmt.Sprintf("external_mappings.pending_mappings_%d", serviceID)
+	deletedTableName := fmt.Sprintf("external_mappings.deleted_mappings_%d", serviceID)
+	petitionedTableName := fmt.Sprintf("external_mappings.petitioned_mappings_%d", serviceID)
+	currentTableName := fmt.Sprintf("external_mappings.current_mappings_%d", serviceID)
+
+	var committedMappings int64
+	if err := tx.QueryRowContext(
+		ctx,
+		fmt.Sprintf("SELECT COUNT(*) FROM %s", pendingTableName),
+	).Scan(&committedMappings); err != nil {
+		return 0, fmt.Errorf("count PTR pending mappings before commit: %w", err)
+	}
+
+	if committedMappings == 0 {
+		return 0, nil
+	}
+
+	for _, statement := range []string{
+		fmt.Sprintf(
+			`DELETE FROM %s
+			WHERE EXISTS (
+				SELECT 1 FROM %s pending
+				WHERE pending.tag_id = %s.tag_id AND pending.hash_id = %s.hash_id
+			)`,
+			deletedTableName,
+			pendingTableName,
+			deletedTableName,
+			deletedTableName,
+		),
+		fmt.Sprintf(
+			`DELETE FROM %s
+			WHERE EXISTS (
+				SELECT 1 FROM %s pending
+				WHERE pending.tag_id = %s.tag_id AND pending.hash_id = %s.hash_id
+			)`,
+			petitionedTableName,
+			pendingTableName,
+			petitionedTableName,
+			petitionedTableName,
+		),
+		fmt.Sprintf(
+			`INSERT OR IGNORE INTO %s (tag_id, hash_id)
+			SELECT tag_id, hash_id FROM %s`,
+			currentTableName,
+			pendingTableName,
+		),
+		fmt.Sprintf(`DELETE FROM %s`, pendingTableName),
+	} {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return 0, fmt.Errorf("apply PTR pending commit success transition: %w", err)
+		}
+	}
+
+	return committedMappings, nil
+}
+
+func ptrMappingExistsTx(
+	ctx context.Context,
+	tx *ImmediateTx,
+	tableName string,
+	tagID int64,
+	hashID int64,
+) (bool, error) {
+	row := tx.QueryRowContext(
+		ctx,
+		fmt.Sprintf("SELECT 1 FROM %s WHERE tag_id = ? AND hash_id = ? LIMIT 1", tableName),
+		tagID,
+		hashID,
+	)
+
+	var sentinel int64
+	if err := row.Scan(&sentinel); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+
+		return false, fmt.Errorf("query PTR mapping existence in %s: %w", tableName, err)
+	}
+
+	return true, nil
+}
+
+func (b *Bundle) resolvePTRPendingRequestHashes(
+	ctx context.Context,
+	request coreptrsync.PendingMappingsRequest,
+) ([]string, error) {
+	hashes := dedupeStrings(request.Hashes)
+
+	if len(request.FileIDs) == 0 {
+		return hashes, nil
+	}
+
+	resolvedByFileID, err := b.lookupHashesByFileIDs(ctx, dedupeInt64s(request.FileIDs))
+	if err != nil {
+		return nil, err
+	}
+
+	for _, fileID := range request.FileIDs {
+		hash, ok := resolvedByFileID[fileID]
+		if !ok {
+			return nil, fmt.Errorf("file_id %d could not be resolved to a hash", fileID)
+		}
+
+		hashes = append(hashes, hash)
+	}
+
+	return dedupeStrings(hashes), nil
+}
+
+func normalizePTRTargetServiceKey(serviceKey string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(serviceKey))
+	if normalized == "" {
+		return coreptrsync.DaemonServiceKeyHex(), nil
+	}
+
+	if normalized != coreptrsync.DaemonServiceKeyHex() {
+		return "", fmt.Errorf("unsupported PTR service key %q", serviceKey)
+	}
+
+	return normalized, nil
 }
 
 func recordPreparedLocalImportTx(
