@@ -41,7 +41,7 @@ const (
 	previewMaxDimension = 8192
 	defaultDaemonURL    = "http://127.0.0.1:45869"
 	defaultMetadataText = "Select a file from the grid to inspect the daemon-backed metadata state.\n\nThis prototype is focused on validating daemon-backed import/trash flows and early Hydrus-like layout work, not full UI parity yet."
-	defaultPreviewText  = "Select a supported still image to preview the daemon-served original file."
+	defaultPreviewText  = "Select a supported still image to\npreview the daemon-served original file."
 	defaultTagsText     = "Select a file to inspect tag metadata from hydrusd."
 )
 
@@ -141,27 +141,28 @@ func newPrototype() *prototype {
 	}
 
 	p.connectionLabel = widget.NewLabel("")
-	p.connectionLabel.Wrapping = fyne.TextWrapWord
+	p.connectionLabel.Wrapping = fyne.TextTruncate
 	p.queueSummaryLabel = widget.NewLabel(formatImportQueueSummary(nil, false))
-	p.queueSummaryLabel.Wrapping = fyne.TextWrapWord
+	p.queueSummaryLabel.Wrapping = fyne.TextTruncate
 	p.queueDetailLabel = widget.NewLabel(defaultSelectedQueueText())
-	p.queueDetailLabel.Wrapping = fyne.TextWrapWord
-	p.previewImage = canvas.NewImageFromImage(tilePlaceholderImage)
+	p.queueDetailLabel.Wrapping = fyne.TextTruncate
+	p.previewImage = canvas.NewImageFromImage(nil)
 	p.previewImage.FillMode = canvas.ImageFillContain
+	p.previewImage.Hide()
 	p.previewLabel = widget.NewLabel(defaultPreviewText)
-	p.previewLabel.Wrapping = fyne.TextWrapWord
+	p.previewLabel.Wrapping = fyne.TextTruncate
 	p.previewLabel.Alignment = fyne.TextAlignCenter
 	p.tagsLabel = widget.NewLabel(defaultTagsText)
 	p.tagsLabel.Wrapping = fyne.TextWrapWord
 	p.metadataLabel = widget.NewLabel(defaultMetadataText)
 	p.metadataLabel.Wrapping = fyne.TextWrapWord
 	p.activityLabel = widget.NewLabel("No actions yet.")
-	p.activityLabel.Wrapping = fyne.TextWrapWord
+	p.activityLabel.Wrapping = fyne.TextTruncate
 	p.statusBarLabel = widget.NewLabel("Ready. Connect to hydrusd to start the prototype.")
-	p.statusBarLabel.Wrapping = fyne.TextWrapWord
+	p.statusBarLabel.Wrapping = fyne.TextTruncate
 	p.ptrHeadlineLabel = widget.NewLabelWithStyle("PTR sync: offline", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	p.ptrStatusLabel = widget.NewLabel("PTR sync status: offline")
-	p.ptrStatusLabel.Wrapping = fyne.TextWrapWord
+	p.ptrStatusLabel.Wrapping = fyne.TextTruncate
 	p.ptrProgressBar = widget.NewProgressBarInfinite()
 	p.ptrProgressBar.Hide()
 	p.queueList = widget.NewList(
@@ -361,14 +362,14 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 	previewPanel := container.NewStack(
 		canvas.NewRectangle(color.NRGBA{R: 18, G: 18, B: 20, A: 255}),
 		p.previewImage,
-		container.NewPadded(container.NewCenter(p.previewLabel)),
+		container.NewPadded(p.previewLabel),
 	)
 	previewSection := container.NewBorder(
 		widget.NewLabelWithStyle("Selected preview", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		nil,
 		nil,
 		nil,
-		container.NewPadded(previewPanel),
+		newMinSizeBox(container.NewPadded(previewPanel), fyne.NewSize(360, 240)),
 	)
 
 	tagsScroll := container.NewVScroll(p.tagsLabel)
@@ -394,11 +395,11 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 
 	detailPane := container.NewVSplit(previewSection, tagAndMetadataPane)
 	detailPane.SetOffset(0.42)
+ 	detailPaneHost := newMinSizeBox(detailPane, fyne.NewSize(360, 480))
 
 	queueHelp := widget.NewLabel(
-		"Queue files with Add File, Add Folder, or by dragging files and folders anywhere into the window.",
+		"Queue files with Add File, Add Folder, or by dragging\nfiles and folders anywhere into the window.",
 	)
-	queueHelp.Wrapping = fyne.TextWrapWord
 
 	queueActionButtons := container.NewVBox(
 		container.NewGridWithColumns(2, p.retrySelectedButton, p.removeSelectedButton),
@@ -406,9 +407,11 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		p.clearQueueButton,
 	)
 
+	introLabel := widget.NewLabel("A thin Fyne shell for testing daemon-backed Hydrus\nparity work without direct DB or managed-file access.")
+
 	queueHeader := container.NewPadded(container.NewVBox(
 		widget.NewLabelWithStyle("hydrusd prototype", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
-		widget.NewLabel("A thin Fyne shell for testing daemon-backed Hydrus parity work without direct DB or managed-file access."),
+		introLabel,
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Connection", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		p.connectionLabel,
@@ -436,18 +439,18 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		container.NewPadded(p.queueList),
 	)
 
-	leftPane := container.NewVSplit(queuePane, detailPane)
-	leftPane.SetOffset(0.50)
+	galleryDetailSplit := container.NewHSplit(container.NewPadded(p.gridHost), detailPaneHost)
+	galleryDetailSplit.SetOffset(0.50)
 
-	split := container.NewHSplit(leftPane, container.NewPadded(p.gridHost))
-	split.SetOffset(0.24)
+	mainSplit := container.NewHSplit(queuePane, galleryDetailSplit)
+	mainSplit.SetOffset(0.25)
 
 	return container.NewBorder(
 		container.NewVBox(toolbar, widget.NewSeparator()),
 		container.NewPadded(p.statusBarLabel),
 		nil,
 		nil,
-		split,
+		mainSplit,
 	)
 }
 
@@ -1331,9 +1334,7 @@ func (p *prototype) renderGrid() {
 	p.ensureGridWrap()
 
 	if len(p.recent) == 0 {
-		p.gridHost.Objects = []fyne.CanvasObject{
-			container.NewCenter(widget.NewLabel("No recent local files are loaded. Queue imports with Add File, Add Folder, or drag and drop to exercise hydrusd.")),
-		}
+		p.gridHost.Objects = nil
 		p.gridHost.Refresh()
 		return
 	}
@@ -1779,11 +1780,13 @@ func (p *prototype) clearSelectedPreview(message string) {
 }
 
 func (p *prototype) setSelectedPreview(resource fyne.Resource, message string) {
-	p.previewImage.Image = tilePlaceholderImage
-	p.previewImage.Resource = nil
 	if resource != nil {
 		p.previewImage.Image = nil
 		p.previewImage.Resource = resource
+		p.previewImage.Show()
+	} else {
+		p.previewImage.Resource = nil
+		p.previewImage.Hide()
 	}
 	p.previewImage.Refresh()
 	p.previewLabel.SetText(message)
@@ -2070,7 +2073,7 @@ func (p *prototype) fetchPTRStatus() {
 			p.stateMu.Unlock()
 			p.renderPTRStatus(status.PTR)
 			p.setStatus("PTR status refreshed from hydrusd.")
-			if status.PTR.IsRunning || status.PTR.Phase == coreptrsync.PhaseSyncing {
+			if shouldPollPTRStatus(status.PTR) {
 				p.pollPTRStatusUntilSettled(connection, requestID)
 			}
 		})
@@ -2114,8 +2117,12 @@ func (p *prototype) triggerPTRSync() {
 			p.ptrStatusLoaded = true
 			p.stateMu.Unlock()
 			p.renderPTRStatus(status.PTR)
-			p.setStatus("PTR sync request accepted by hydrusd.")
-			p.pollPTRStatusUntilSettled(connection, requestID)
+			if shouldPollPTRStatus(status.PTR) {
+				p.setStatus("PTR sync request accepted by hydrusd.")
+				p.pollPTRStatusUntilSettled(connection, requestID)
+			} else {
+				p.setStatus(ptrCompletionStatusText(status.PTR))
+			}
 		})
 	}(connection, requestID)
 }
@@ -2125,7 +2132,7 @@ func (p *prototype) pollPTRStatusUntilSettled(connection connectionSnapshot, req
 		ticker := time.NewTicker(ptrPollTick)
 		defer ticker.Stop()
 
-		for attempt := 0; attempt < 60; attempt++ {
+		for {
 			<-ticker.C
 
 			if !p.isCurrentOperation(connection) || !p.isCurrentPTRStatusRequest(requestID) {
@@ -2139,7 +2146,7 @@ func (p *prototype) pollPTRStatusUntilSettled(connection connectionSnapshot, req
 				return
 			}
 
-			stillRunning := status.PTR.IsRunning || status.PTR.Phase == coreptrsync.PhaseSyncing
+			stillPolling := shouldPollPTRStatus(status.PTR)
 			fyne.Do(func() {
 				if !p.isCurrentOperation(connection) || !p.isCurrentPTRStatusRequest(requestID) {
 					return
@@ -2150,14 +2157,16 @@ func (p *prototype) pollPTRStatusUntilSettled(connection connectionSnapshot, req
 				p.ptrStatusLoaded = true
 				p.stateMu.Unlock()
 				p.renderPTRStatus(status.PTR)
-				if stillRunning {
+				if status.PTR.IsRunning || status.PTR.Phase == coreptrsync.PhaseSyncing {
 					p.setStatus("PTR sync is running in hydrusd...")
+				} else if status.PTR.Phase == coreptrsync.PhaseRetrying {
+					p.setStatus(ptrCompletionStatusText(status.PTR))
 				} else {
 					p.setStatus(ptrCompletionStatusText(status.PTR))
 				}
 			})
 
-			if !stillRunning {
+			if !stillPolling {
 				return
 			}
 		}
@@ -2186,6 +2195,8 @@ func ptrHeadlineText(status coreptrsync.Status) string {
 	switch {
 	case status.IsRunning || status.Phase == coreptrsync.PhaseSyncing:
 		return "PTR sync: running"
+	case status.Phase == coreptrsync.PhaseRetrying:
+		return "PTR sync: retrying"
 	case status.LastError != "":
 		return "PTR sync: last run failed"
 	case status.UnavailableReason != "":
@@ -2200,12 +2211,20 @@ func ptrHeadlineText(status coreptrsync.Status) string {
 }
 
 func ptrCompletionStatusText(status coreptrsync.Status) string {
+	if status.Phase == coreptrsync.PhaseRetrying {
+		if countdown := ptrThrottleCountdown(status); countdown != "" {
+			return fmt.Sprintf("PTR server is busy. Retrying in %s.", countdown)
+		}
+
+		return "PTR server is busy."
+	}
+
 	if status.LastError != "" {
 		return "PTR sync finished with an error in hydrusd."
 	}
 
 	return fmt.Sprintf(
-		"PTR sync completed in hydrusd. Definitions %d • content %d • updates %d.",
+		"PTR sync completed in hydrusd. Definitions %d • content %d • update files %d.",
 		status.ProcessedDefinitionCount,
 		status.ProcessedContentCount,
 		status.DownloadedUpdateCount,
@@ -2226,6 +2245,12 @@ func formatPTRStatus(status coreptrsync.Status) string {
 	buf.WriteString(fmt.Sprintf("Phase: %s\n", status.Phase))
 	if status.IsRunning {
 		buf.WriteString("Status: Sync is currently running\n")
+	} else if status.Phase == coreptrsync.PhaseRetrying {
+		if countdown := ptrThrottleCountdown(status); countdown != "" {
+			buf.WriteString(fmt.Sprintf("Status: Remote PTR busy; retrying in %s\n", countdown))
+		} else {
+			buf.WriteString("Status: Remote PTR busy; retrying\n")
+		}
 	} else {
 		buf.WriteString("Status: Idle\n")
 	}
@@ -2241,9 +2266,36 @@ func formatPTRStatus(status coreptrsync.Status) string {
 
 	buf.WriteString(fmt.Sprintf("Processed Definitions: %d\n", status.ProcessedDefinitionCount))
 	buf.WriteString(fmt.Sprintf("Processed Content: %d\n", status.ProcessedContentCount))
-	buf.WriteString(fmt.Sprintf("Downloaded Updates: %d", status.DownloadedUpdateCount))
+	buf.WriteString(fmt.Sprintf("Downloaded Update Files: %d", status.DownloadedUpdateCount))
 
 	return buf.String()
+}
+
+func shouldPollPTRStatus(status coreptrsync.Status) bool {
+	if status.IsRunning || status.Phase == coreptrsync.PhaseSyncing {
+		return true
+	}
+
+	return status.Phase == coreptrsync.PhaseRetrying && status.RetryAtMS > time.Now().UTC().UnixMilli()
+}
+
+func ptrThrottleCountdown(status coreptrsync.Status) string {
+	if status.RetryAtMS <= 0 {
+		return ""
+	}
+
+	remaining := time.Until(time.UnixMilli(status.RetryAtMS))
+	if remaining <= 0 {
+		return "0s"
+	}
+
+	seconds := int64((remaining + time.Second - 1) / time.Second)
+	if seconds >= 60 {
+		minutes := (seconds + 59) / 60
+		return fmt.Sprintf("%dm", minutes)
+	}
+
+	return fmt.Sprintf("%ds", seconds)
 }
 
 func metadataTagStatusLabel(statusKey string) string {

@@ -4,6 +4,7 @@ package fyneapp
 
 import (
 	"testing"
+	"time"
 
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
 	"github.com/official-elinas/hydrus-go/internal/desktop/daemonclient"
@@ -122,7 +123,7 @@ func TestFormatPTRStatus(t *testing.T) {
 			"Metadata Slice: 7\n" +
 			"Processed Definitions: 100\n" +
 			"Processed Content: 200\n" +
-			"Downloaded Updates: 5"
+			"Downloaded Update Files: 5"
 
 		if got != want {
 			t.Fatalf("formatPTRStatus() = %q, want %q", got, want)
@@ -150,10 +151,69 @@ func TestFormatPTRStatus(t *testing.T) {
 			"Last error: connection reset by peer\n" +
 			"Processed Definitions: 0\n" +
 			"Processed Content: 0\n" +
-			"Downloaded Updates: 0"
+			"Downloaded Update Files: 0"
 
 		if got != want {
 			t.Fatalf("formatPTRStatus() = %q, want %q", got, want)
+		}
+	})
+
+	t.Run("renders retry countdown status", func(t *testing.T) {
+		retryAtMS := time.Now().Add(119 * time.Second).UnixMilli()
+		status := coreptrsync.Status{
+			Enabled:               true,
+			ServiceName:           "public tag repository",
+			Phase:                 coreptrsync.PhaseRetrying,
+			RetryAtMS:             retryAtMS,
+			RetryAttempt:          2,
+			DownloadedUpdateCount: 7,
+		}
+
+		got := formatPTRStatus(status)
+		want := "Service: public tag repository\n" +
+			"Phase: retrying\n" +
+			"Status: Remote PTR busy; retrying in 2m\n" +
+			"Metadata Slice: 0\n" +
+			"Processed Definitions: 0\n" +
+			"Processed Content: 0\n" +
+			"Downloaded Update Files: 7"
+
+		if got != want {
+			t.Fatalf("formatPTRStatus() = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestPTRStatusSummaryText(t *testing.T) {
+	t.Run("headline prefers retrying over generic failure wording", func(t *testing.T) {
+		retryAtMS := time.Now().Add(45 * time.Second).UnixMilli()
+		status := coreptrsync.Status{
+			Enabled:     true,
+			Phase:       coreptrsync.PhaseRetrying,
+			RetryAtMS:   retryAtMS,
+			RetryAttempt: 1,
+			LastError:   "old error",
+		}
+
+		got := ptrHeadlineText(status)
+		if got != "PTR sync: retrying" {
+			t.Fatalf("ptrHeadlineText() = %q, want %q", got, "PTR sync: retrying")
+		}
+	})
+
+	t.Run("completion text includes retry countdown", func(t *testing.T) {
+		retryAtMS := time.Now().Add(45 * time.Second).UnixMilli()
+		status := coreptrsync.Status{
+			Enabled:     true,
+			Phase:       coreptrsync.PhaseRetrying,
+			RetryAtMS:   retryAtMS,
+			RetryAttempt: 1,
+		}
+
+		got := ptrCompletionStatusText(status)
+		want := "PTR server is busy. Retrying in 45s."
+		if got != want {
+			t.Fatalf("ptrCompletionStatusText() = %q, want %q", got, want)
 		}
 	})
 }
