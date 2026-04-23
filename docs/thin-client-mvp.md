@@ -101,6 +101,8 @@ Important notes:
   PNG, and GIF still-image imports; other media types may browse without a
   thumbnail until broader generation support lands
 - the current PTR slice is still on-demand only; clients can poll status and trigger a sync, and the daemon now downloads/registers repository update blobs, but automatic scheduling, richer job control, and definition/content application remain later work
+- the current desktop PTR wording should be read literally: downloaded counts are downloaded repository update files/blobs, not applied mappings, because definition/content application still remains later work
+- when the remote PTR is temporarily busy, the daemon now reports retrying state with countdown-friendly status fields instead of silently hiding all retries inside one client request
 
 ## Prototype UI shape
 
@@ -119,6 +121,7 @@ Current minimum window structure:
     - selected-file tag metadata
     - selected-file metadata details
 - `Network > PTR Sync` opens a dedicated popup window for daemon-owned PTR status, refresh, and manual sync actions
+- the current shell has had a first cleanup pass so the main split panes resize more sanely and the empty selected-preview state no longer collapses its text vertically
 - dominant center thumbnail grid
 - bottom status line
 

@@ -27,8 +27,8 @@ This repository currently provides the following early migration slices:
 - an internal prepared-file import checkpoint that composes managed placement with serialized DB writes
 - first thin-client browse/asset endpoints for recent local files, originals, and thumbnails
 - public local-path import and trash endpoints for thin-client-driven library testing
-- daemon-owned anonymous PTR sync foundations, remote snapshot persistence, real `/update` download plus local repository-updates registration, and first status/trigger APIs
-- an initial Fyne-based desktop prototype for `hydrusd`, including selected JPEG/PNG/GIF original preview, recent-page navigation, and PTR status/manual sync through daemon APIs
+- daemon-owned anonymous PTR sync foundations, remote snapshot persistence, real `/update` download plus local repository-updates registration, batched local repository-update finalization, and first status/trigger APIs with remote-busy retry handling
+- an initial Fyne-based desktop prototype for `hydrusd`, including selected JPEG/PNG/GIF original preview, incremental recent loading, a more resizable split-shell layout, and PTR status/manual sync through daemon APIs
 - real `hydrusd --listen host:port` runtime overrides for temporary LAN testing
 - explicit Linux/Windows desktop build targets, including a Windows GUI-subsystem executable for Explorer launches
 - an opt-in native-Go fresh Hydrus client bundle bootstrap for empty or missing DB directories
@@ -257,10 +257,11 @@ Important current limitations:
   - Hydrus-style classification plus extensionless managed storage for downloaded repository update blobs
   - local registration of downloaded update blobs in the daemon-owned `repository updates` file domain
   - daemon-side downloaded-update bookkeeping driven by real local registration state
+  - batched local repository-update registration/finalization to reduce repeated DB transaction overhead during one sync pass
   - daemon-owned single-flight background sync triggering with shutdown-safe lease cleanup
   - `GET /service/ptr/status` for thin-client polling
   - `POST /service/ptr/sync` for manual daemon-owned sync starts
-- PTR sync is currently on-demand only; automatic scheduling/backoff and richer job control are not implemented yet
+- PTR sync is still user-triggered rather than fully scheduled, but busy PTR responses now retry with a short ladder (`2s`, `3s`, `4s`, `5s`, `5s`) before escalating into capped backoff and surfacing an explicit server-issue failure
 - actual PTR definitions/content processing is not implemented yet, so the daemon now downloads and locally registers repository update blobs but still does not apply definitions/content into local mappings/tag state
 - no search/tagging engine yet
 - no downloader/subscription/parsing system yet
@@ -375,6 +376,7 @@ Notes:
 
 - the desktop prototype talks to `hydrusd`; it never touches SQLite or
   `client_files` directly
+- the main shell now uses a more breathable split layout, and the empty selected-preview state no longer collapses into vertical placeholder text
 - current import testing can be driven through a single-file picker, a folder
   picker, or drag-and-drop into the desktop window; queued items are uploaded
   sequentially through the daemon's remote-safe upload endpoint
@@ -455,7 +457,7 @@ This bootstrap currently targets the Go toolchain declared in `go.mod`
 
 ## Immediate next milestones
 
-- iterate on the Fyne prototype's preview caching, reconnect behavior, and metadata ergonomics now that the first connect/browse/add/trash/original-preview loop, paging, and PTR status/manual sync are wired
+- iterate on the Fyne prototype's preview caching, reconnect behavior, metadata ergonomics, and remaining visual polish now that the first connect/browse/add/trash/original-preview loop, incremental loading, and PTR status/manual sync are wired
 - run real Windows-over-LAN smoke tests against a live `hydrusd` + Hydrus library and tighten any failures quickly
 - validate add/trash latency and recent-grid refresh behavior on a real Hydrus library through the prototype
 - process downloaded anonymous PTR definitions/content into local mappings and tag/query state
