@@ -484,6 +484,102 @@ func TestProtectedEndpoints(t *testing.T) {
 		}
 	})
 
+	t.Run("add tags stages pending mappings through PTR store", func(t *testing.T) {
+		var captured coreptrsync.PendingMappingsRequest
+
+		handler := newHandlerWithPTRStore(t, stubPTRStore{
+			addHandle: func(request coreptrsync.PendingMappingsRequest) (coreptrsync.PendingMappingsResult, error) {
+				captured = request
+				return coreptrsync.PendingMappingsResult{
+					ServiceKey:    coreptrsync.DaemonServiceKeyHex(),
+					AddedMappings: 3,
+				}, nil
+			},
+		})
+
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/add_tags/add_tags",
+			strings.NewReader(`{"hash":"`+strings.Repeat("AA", 32)+`","file_ids":[2],"service_keys_to_actions_to_tags":{"`+strings.ToUpper(coreptrsync.DaemonServiceKeyHex())+`":{"2":["creator:alice","series:zeta"]}}}`),
+		)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		if captured.ServiceKey != coreptrsync.DaemonServiceKeyHex() {
+			t.Fatalf("captured.ServiceKey = %q, want %q", captured.ServiceKey, coreptrsync.DaemonServiceKeyHex())
+		}
+
+		if len(captured.Hashes) != 1 || captured.Hashes[0] != strings.Repeat("aa", 32) {
+			t.Fatalf("captured.Hashes = %v, want [%s]", captured.Hashes, strings.Repeat("aa", 32))
+		}
+
+		if len(captured.FileIDs) != 1 || captured.FileIDs[0] != 2 {
+			t.Fatalf("captured.FileIDs = %v, want [2]", captured.FileIDs)
+		}
+
+		if strings.Join(captured.Tags, "|") != "creator:alice|series:zeta" {
+			t.Fatalf("captured.Tags = %v, want creator:alice|series:zeta", captured.Tags)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+		if payload["service_key"] != coreptrsync.DaemonServiceKeyHex() {
+			t.Fatalf("service_key = %v, want %s", payload["service_key"], coreptrsync.DaemonServiceKeyHex())
+		}
+		if payload["added_mappings"] != float64(3) {
+			t.Fatalf("added_mappings = %v, want 3", payload["added_mappings"])
+		}
+	})
+
+	t.Run("commit pending forwards request through PTR store", func(t *testing.T) {
+		var captured coreptrsync.CommitPendingRequest
+
+		handler := newHandlerWithPTRStore(t, stubPTRStore{
+			commitHandle: func(request coreptrsync.CommitPendingRequest) (coreptrsync.CommitPendingResult, error) {
+				captured = request
+				return coreptrsync.CommitPendingResult{
+					ServiceKey:        coreptrsync.DaemonServiceKeyHex(),
+					CommittedMappings: 4,
+				}, nil
+			},
+		})
+
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/manage_services/commit_pending",
+			strings.NewReader(`{"service_key":"`+strings.ToUpper(coreptrsync.DaemonServiceKeyHex())+`"}`),
+		)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		if captured.ServiceKey != coreptrsync.DaemonServiceKeyHex() {
+			t.Fatalf("captured.ServiceKey = %q, want %q", captured.ServiceKey, coreptrsync.DaemonServiceKeyHex())
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+		if payload["service_key"] != coreptrsync.DaemonServiceKeyHex() {
+			t.Fatalf("service_key = %v, want %s", payload["service_key"], coreptrsync.DaemonServiceKeyHex())
+		}
+		if payload["committed_mappings"] != float64(4) {
+			t.Fatalf("committed_mappings = %v, want 4", payload["committed_mappings"])
+		}
+	})
+
 	t.Run("hidden service key returns unavailable", func(t *testing.T) {
 		req := httptest.NewRequest(
 			http.MethodGet,
@@ -2095,7 +2191,12 @@ func newHandlerWithPTRStore(t *testing.T, ptrStore coreptrsync.Store) http.Handl
 	access, err := NewAccessControl(
 		strings.Repeat("b", 64),
 		"test-client",
-		[]Permission{PermissionSearchAndFetchFiles, PermissionImportAndDeleteFiles},
+		[]Permission{
+			PermissionSearchAndFetchFiles,
+			PermissionImportAndDeleteFiles,
+			PermissionEditFileTags,
+			PermissionCommitPending,
+		},
 	)
 	if err != nil {
 		t.Fatalf("NewAccessControl() error = %v", err)
@@ -2120,6 +2221,12 @@ type stubPTRStore struct {
 	err           error
 	triggerStatus coreptrsync.Status
 	triggerErr    error
+	addResult     coreptrsync.PendingMappingsResult
+	addErr        error
+	commitResult  coreptrsync.CommitPendingResult
+	commitErr     error
+	addHandle     func(coreptrsync.PendingMappingsRequest) (coreptrsync.PendingMappingsResult, error)
+	commitHandle  func(coreptrsync.CommitPendingRequest) (coreptrsync.CommitPendingResult, error)
 }
 
 func (s stubPTRStore) Status(context.Context) (coreptrsync.Status, error) {
@@ -2128,6 +2235,28 @@ func (s stubPTRStore) Status(context.Context) (coreptrsync.Status, error) {
 
 func (s stubPTRStore) Trigger(context.Context) (coreptrsync.Status, error) {
 	return s.triggerStatus, s.triggerErr
+}
+
+func (s stubPTRStore) AddPendingMappings(
+	_ context.Context,
+	request coreptrsync.PendingMappingsRequest,
+) (coreptrsync.PendingMappingsResult, error) {
+	if s.addHandle != nil {
+		return s.addHandle(request)
+	}
+
+	return s.addResult, s.addErr
+}
+
+func (s stubPTRStore) CommitPending(
+	_ context.Context,
+	request coreptrsync.CommitPendingRequest,
+) (coreptrsync.CommitPendingResult, error) {
+	if s.commitHandle != nil {
+		return s.commitHandle(request)
+	}
+
+	return s.commitResult, s.commitErr
 }
 
 type fakeMetadataStore struct {

@@ -78,6 +78,8 @@ func NewHandler(
 	mux.Handle("/v1/files/trash", server.post("/v1/files/trash", server.handleTrashFile))
 	mux.Handle("/v1/import/local_file", server.post("/v1/import/local_file", server.handleImportLocalFile))
 	mux.Handle("/v1/import/upload", server.post("/v1/import/upload", server.handleImportUpload))
+	mux.Handle("/add_tags/add_tags", server.post("/add_tags/add_tags", server.handlePostAddTags))
+	mux.Handle("/manage_services/commit_pending", server.post("/manage_services/commit_pending", server.handlePostCommitPending))
 	mux.Handle("/service/ptr/status", server.get("/service/ptr/status", server.handleGetPTRStatus))
 	mux.Handle("/service/ptr/sync", server.post("/service/ptr/sync", server.handlePostPTRSync))
 
