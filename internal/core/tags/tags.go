@@ -8,7 +8,7 @@ import (
 )
 
 var (
-	ErrEmptyTag                 = errors.New("received a zero-length tag")
+	ErrEmptyTag                = errors.New("received a zero-length tag")
 	reLeadingSingleColonNoMore = regexp.MustCompile(`^:[^:]+$`)
 )
 
