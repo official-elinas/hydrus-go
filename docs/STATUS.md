@@ -1,6 +1,6 @@
 # hydrus-go status
 
-Last updated: 2026-04-19
+Last updated: 2026-04-21
 
 ## Completed
 
@@ -72,13 +72,22 @@ Last updated: 2026-04-19
 - expanded the native first-start service-list seed with `downloader tags` and `favourites`, including a Hydrus-style favourites rating dictionary
 - added DB and app-wiring tests using a copied minimal SQLite fixture bundle
 - added tests for config validation, HTTP/auth behavior, and shutdown lifecycle
+- added daemon-owned anonymous PTR status persistence, remote snapshot fetch/decode/persist, and repository metadata durability
+- added `POST /service/ptr/sync` for daemon-owned single-flight background PTR sync triggering
+- added PTR manager/app shutdown handling so active anonymous PTR sync leases are cleared before daemon teardown
+- added real anonymous PTR `/update` download with expected-hash verification, extensionless managed-file placement, and local `repository updates` registration
+- added daemon-owned PTR download bookkeeping so persisted status reflects real locally registered update counts
+- added daemonclient PTR status/trigger support plus a Fyne-side PTR status/manual-sync popup under the desktop Network menu that stays daemon-first
+- added Fyne recent-grid incremental loading on top of the daemon's existing recent offset/limit API
+- added a dedicated parity roadmap document covering the next backend, PTR, performance, and UI priorities
 - documented the daemon-first migration direction and current bootstrap limits
 
 ## In Progress
 
-- iterating on the Fyne prototype's preview, reconnect, and metadata UX after landing the first connect/browse/import/trash/original-preview loop
+- iterating on the Fyne prototype's preview, reconnect, and metadata UX after landing the first connect/browse/import/trash/original-preview loop, recent paging, and PTR status/manual sync
 - preparing real Windows-over-LAN smoke testing against a live `hydrusd` instance, now without requiring a pre-existing Hydrus bundle for first-start setup
-- preparing thin-client-driven performance validation for SQLite and managed `client_files` behavior before PTR work begins
+- preparing thin-client-driven performance validation for SQLite and managed `client_files` behavior alongside the first PTR daemon work
+- converting the latest parity reconnaissance into a concrete implementation order in `docs/PARITY_ROADMAP.md`
 
 ### Active reconnaissance notes
 
@@ -92,6 +101,8 @@ Last updated: 2026-04-19
 ## Next
 
 ### Roadmap checklist
+
+See also: [`docs/PARITY_ROADMAP.md`](./PARITY_ROADMAP.md) for the prioritized parity order and must-have UI list.
 
 - [x] Phase 1: headless bootstrap daemon
 - [x] Phase 2: read-only DB-backed service discovery and basic metadata
@@ -121,6 +132,8 @@ Last updated: 2026-04-19
 - [x] connect a desktop client to the local daemon with the existing auth/bootstrap flow
 - [x] support basic import, browse, add, and trash workflows against daemon APIs
 - [x] preview selected JPEG/PNG/GIF originals through daemon APIs with bounded client-side safety limits
+- [x] add recent-page navigation to the prototype's browse grid
+- [x] surface daemon-owned PTR status and a manual sync trigger in the prototype
 - [ ] validate the daemon/client contract with a simple multi-platform desktop UI before attempting Hydrus UI parity
 - [x] keep the first client closer to `comfyui-image-browser` scope than full Hydrus parity
 
@@ -128,20 +141,28 @@ Last updated: 2026-04-19
 
 - [ ] validate import/browse/trash latency against real libraries through the thin client
 - [ ] measure SQLite read/write behavior under realistic daemon workflows
-- [ ] validate managed `client_files` correctness and throughput before PTR work begins
+- [ ] validate managed `client_files` correctness and throughput as PTR work expands
 - [ ] address bottlenecks discovered during end-to-end client/daemon testing
 
 ### Phase 7: PTR Integration
 
-- [ ] implement PTR repository sync foundations for imported files
-- [ ] define PTR service configuration, auth, and local daemon state requirements
+- [x] define PTR service configuration defaults, shared read-only anonymous auth, and local daemon status/state requirements
+- [x] add daemon-side PTR service/mapping-table/state foundations and a pollable status endpoint
+- [x] add real anonymous PTR session/account/options/tag-filter/metadata fetch and durable snapshot persistence
+- [x] add a daemon-owned background trigger/lifecycle slice for anonymous PTR sync
+- [x] implement anonymous PTR `/update` download and local repository-updates registration
+- [ ] process downloaded PTR definitions/content into local mappings and tag/query state
 - [ ] make imported files eligible for PTR-driven tag/update retrieval
 - [ ] verify end-to-end value from local import through PTR sync and tag acquisition
+- [ ] add PTR pending/upload state foundations for eventual sync-out parity
+- [ ] implement PTR sync-out/upload for locally pending mappings and petitions
 
 ### Phase 8: Read/Query Expansion After Import + PTR
 
 - [ ] continue `GET /get_files/file_metadata` toward broader parity for detailed URLs, exact thumbnail sizing, and remaining edge-case payload semantics
 - [ ] begin DB-backed search and tagging read paths on top of imported and PTR-synced data
+- [ ] add daemon-side search/query endpoints that can drive a real Hydrus-like search page
+- [ ] add daemon-side tag mutation and pending-state APIs as a prerequisite for PTR sync-out and UI parity
 - [ ] refine service/media-result behavior for common client workflows
 
 ## Later / Out of Scope for Now
@@ -336,3 +357,22 @@ Last updated: 2026-04-19
 - tightened duplicate handling so conflicting auxiliary metadata is rejected instead of silently widening `pixel_hash_map` state
 - intentionally left animated-media and blurhash import-time enrichment for later parity work
 - verified with targeted DB/import/app tests plus a full `go test ./...` pass
+
+### 2026-04-20 — Milestone 22: daemon-owned PTR trigger and lifecycle slice
+
+- recovered and normalized daemon-owned PTR runtime state safely at manager startup without stealing active leases during normal ensure paths
+- added durable PTR sync runtime persistence with guarded `run_token` ownership, remote snapshot storage, and repository metadata append/replace behavior
+- added real anonymous PTR client/wire handling for `/session_key`, `/account`, `/options`, `/tag_filter`, and `/metadata`
+- added a daemon-owned single-flight background trigger path so `POST /service/ptr/sync` starts one real PTR sync pass and repeated triggers do not start a second run
+- added shutdown-safe PTR manager/app lifecycle handling so daemon teardown cancels in-flight work and clears active leases before bundle close
+- kept actual PTR `/update` download/content processing out of scope for this slice; status/triggering now exist, but repository definitions/content are still not applied locally
+- verified with targeted `internal/ptrsync`, `internal/api/httpapi`, and `internal/app` package tests plus app-level trigger/shutdown manual QA
+
+### 2026-04-20 — Milestone 23: daemon-owned PTR update download slice
+
+- added real anonymous PTR `GET /update?update_hash=...` fetch support with expected SHA-256 body verification
+- classified downloaded update payloads as Hydrus definitions/content update mimes and stored them with Hydrus-style extensionless managed filenames
+- registered downloaded update blobs in the local `repository updates` file domain and cleared pending unregistered-update rows after successful local import
+- updated PTR status persistence so `downloaded_update_count` reflects real daemon-owned local registration state rather than declared remote metadata only
+- intentionally left definitions/content processing and tag-application behavior for the next PTR slice
+- verified with targeted `./internal/ptrsync ./internal/db/hydrusdb ./internal/importing ./internal/storage/clientfiles` package tests plus live daemon + mock PTR server manual QA

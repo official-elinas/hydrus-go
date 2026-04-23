@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
 )
 
 const userAgent = "hydrus-desktop-prototype/0.1"
@@ -277,12 +279,30 @@ func (c *Client) UploadFile(ctx context.Context, path string) (ImportResult, err
 // TrashFile moves one file into the hydrusd trash domain.
 func (c *Client) TrashFile(ctx context.Context, fileID int64) (TrashResult, error) {
 	var response TrashResult
-	body := map[string]int64{"file_id": fileID}
-	if err := c.doJSON(ctx, http.MethodPost, "/v1/files/trash", body, true, &response); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/files/trash", map[string]int64{"file_id": fileID}, true, &response); err != nil {
 		return TrashResult{}, err
 	}
 
 	return response, nil
+}
+
+// PTRStatusResponse wraps the daemon PTR status API payload.
+type PTRStatusResponse struct {
+	PTR coreptrsync.Status `json:"ptr"`
+}
+
+// GetPTRStatus retrieves the daemon-side PTR sync status.
+func (c *Client) GetPTRStatus(ctx context.Context) (PTRStatusResponse, error) {
+	var out PTRStatusResponse
+	err := c.doJSON(ctx, http.MethodGet, "/service/ptr/status", nil, true, &out)
+	return out, err
+}
+
+// TriggerPTRSync triggers a manual sync pass for the daemon-side PTR.
+func (c *Client) TriggerPTRSync(ctx context.Context) (PTRStatusResponse, error) {
+	var out PTRStatusResponse
+	err := c.doJSON(ctx, http.MethodPost, "/service/ptr/sync", nil, true, &out)
+	return out, err
 }
 
 // FetchGridImage returns the bytes for a grid-preview image.

@@ -4,7 +4,7 @@
 
 Build a simple multi-platform desktop prototype that validates `hydrusd`
 recent-browse, selected-file preview, queued remote-safe import, and trash
-workflows against a real Hydrus library before PTR work begins.
+workflows against a real Hydrus library alongside ongoing PTR backend work.
 
 This is **not** a full Hydrus desktop parity effort yet.
 
@@ -15,7 +15,7 @@ workstation UI in `image-tests/hydrus.png`.
 ## Chosen stack
 
 - **Fyne in Go**
-- `hydrusd` remains the owner of SQLite, `client_files`, imports, trash, and later PTR
+- `hydrusd` remains the owner of SQLite, `client_files`, imports, trash, and PTR sync
 
 Why this stack:
 
@@ -30,6 +30,7 @@ The first prototype iteration is intentionally narrow:
 
 - connect to the local or remote daemon
 - browse recent local files in a dense thumbnail grid
+  - load additional recent results as the user scrolls, backed by the daemon's existing offset/limit API
 - queue imports from:
   - a single-file picker
   - a folder picker
@@ -44,6 +45,7 @@ The first prototype iteration is intentionally narrow:
   - keep preview bounded for thin-client responsiveness (currently 16 MiB payload,
     8192px maximum dimension, 16,000,000 decoded pixels)
 - show selected-file metadata in a left-side details pane, including daemon-served tag groups for the selected file
+- show daemon-owned PTR sync status and a manual sync action in a dedicated popup launched from the top-level `Network` menu, mirroring a small part of Hydrus's review-services visibility without moving PTR network logic into the client
 - trash one selected file through the daemon's trash endpoint
 - refresh the grid and metadata state after each mutation
 
@@ -79,6 +81,10 @@ The thin-client-specific daemon endpoints for this prototype are:
   - this is the preferred path for the desktop client because it remains safe when `hydrusd` runs on another host or over LAN
 - `POST /v1/files/trash`
   - moves one file into the local trash domain through the public thin-client contract
+- `GET /service/ptr/status`
+  - returns daemon-owned anonymous PTR sync state for polling
+- `POST /service/ptr/sync`
+  - starts one daemon-owned anonymous PTR sync pass and returns the immediate status payload
 
 Important notes:
 
@@ -94,12 +100,14 @@ Important notes:
 - immediate thumbnail availability should currently only be expected for JPEG,
   PNG, and GIF still-image imports; other media types may browse without a
   thumbnail until broader generation support lands
+- the current PTR slice is still on-demand only; clients can poll status and trigger a sync, and the daemon now downloads/registers repository update blobs, but automatic scheduling, richer job control, and definition/content application remain later work
 
 ## Prototype UI shape
 
 Current minimum window structure:
 
 - compact top action bar: connect, refresh, add file, add folder, trash selected
+- top menu bar with File / Pages / Database / Network / Services / Help entries
 - left Fyne-managed split pane:
   - upper controls/import pane:
     - daemon connection state
@@ -108,7 +116,9 @@ Current minimum window structure:
     - last action/result text
   - lower details pane:
     - selected-file preview for supported JPEG/PNG/GIF image types
-    - selected-file metadata
+    - selected-file tag metadata
+    - selected-file metadata details
+- `Network > PTR Sync` opens a dedicated popup window for daemon-owned PTR status, refresh, and manual sync actions
 - dominant center thumbnail grid
 - bottom status line
 
@@ -128,4 +138,4 @@ The prototype exists to validate:
 - managed `client_files` correctness under daemon ownership
 - public import round trips from UI -> daemon -> DB -> browse
 - public trash round trips from UI -> daemon -> DB -> browse
-- performance before PTR synchronization work begins
+- daemon-owned PTR status/trigger behavior before downloaded definitions/content are processed into local tag/query state

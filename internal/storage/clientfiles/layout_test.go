@@ -187,9 +187,24 @@ func TestLayoutResolvePaths(t *testing.T) {
 	t.Run("rejects invalid extension input", func(t *testing.T) {
 		invalidExtensions := []string{"", ".", "png/../x", "png\\..\\x"}
 		for _, ext := range invalidExtensions {
+			if ext == "" {
+				continue
+			}
 			if _, err := layout.ResolveFilePath(hash, ext); err == nil {
 				t.Fatalf("ResolveFilePath(%q) error = nil, want error", ext)
 			}
+		}
+	})
+
+	t.Run("resolves extensionless managed file paths", func(t *testing.T) {
+		path, err := layout.ResolveFilePath(hash, "")
+		if err != nil {
+			t.Fatalf("ResolveFilePath() error = %v", err)
+		}
+
+		expected := filepath.Join("/library/client_files", "fab", hash)
+		if path != expected {
+			t.Fatalf("path = %q, want %q", path, expected)
 		}
 	})
 

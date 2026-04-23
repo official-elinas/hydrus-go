@@ -176,10 +176,21 @@ These endpoints are intentionally thin-client-oriented rather than strict Hydrus
 Client API parity. They exist to validate local add/trash/browse workflows
 before the project expands into richer public write APIs and PTR sync.
 
+The daemon now also owns the first real anonymous PTR runtime slice:
+
+- `internal/ptrsync` provisions daemon-owned PTR sync state against the Hydrus bundle
+- remote anonymous PTR snapshot fetches run inside the daemon, not in the client
+- daemon-owned PTR sync now also downloads repository `/update` blobs, verifies them against the requested hash, and registers them in the local `repository updates` file domain
+- `GET /service/ptr/status` exposes daemon-visible PTR sync status for polling
+- `POST /service/ptr/sync` starts one daemon-owned background sync pass and returns the immediate persisted status
+- repeated trigger requests are deduplicated in-process and also guarded by durable DB lease ownership
+- daemon shutdown cancels in-flight PTR work and waits for lease cleanup before closing bundle resources
+
 The planned desktop direction is now:
 
 - a thin Fyne prototype surfaced through `cmd/hydrus-desktop` and documented in `desktop/fyne/`
-- daemon remains the owner of SQLite, `client_files`, imports, and later PTR sync
+- daemon remains the owner of SQLite, `client_files`, imports, and PTR sync
+- daemon also owns PTR service configuration and sync status reporting; the thin client should poll `hydrusd` rather than touching repository network or SQLite state directly
 - the first client milestone stays closer to a simple image-browser shell than to full Hydrus workstation parity
 - the prototype is specifically meant to exercise `hydrusd` browse/add/trash behavior, selected-file metadata, and original-file serving, not to be a general-purpose Hydrus replacement yet
 
@@ -195,6 +206,7 @@ The runtime storage/DB model for this phase is:
 - one separate writable bundle used for public import and trash mutations when writable access is available
 - browse/asset handlers talk to the read bundle so they only observe committed state
 - metadata reads also use the read bundle by default, but `create_new_file_ids=true` requests are routed through the writable bundle when available so missing master hash IDs can be allocated without widening general read traffic
+- PTR remote snapshot persistence and trigger-owned lease transitions use the writable bundle, while PTR status polling reads through the read bundle
 
 The deeper Hydrus client-core behaviors are still pending:
 
@@ -204,3 +216,5 @@ The deeper Hydrus client-core behaviors are still pending:
 - file serving and broader managed file-store lifecycle behavior
 - search/tagging engine behavior
 - richer stateful background processing
+- broader PTR job control beyond the current manual trigger + status slice
+- downloaded PTR definition/content application into local mappings, tags, and query-visible state

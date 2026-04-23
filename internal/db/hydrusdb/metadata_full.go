@@ -696,7 +696,14 @@ func (b *Bundle) lookupDeletedFileServiceMemberships(
 func (b *Bundle) lookupAllServiceDefinitions(
 	ctx context.Context,
 ) ([]serviceDefinition, error) {
-	rows, err := b.conn.QueryContext(
+	return lookupAllServiceDefinitionsQuerier(ctx, b.conn)
+}
+
+func lookupAllServiceDefinitionsQuerier(
+	ctx context.Context,
+	q queryRowContextQuerier,
+) ([]serviceDefinition, error) {
+	rows, err := q.QueryContext(
 		ctx,
 		`SELECT service_id, lower(hex(service_key)), service_type, name
 		FROM main.services

@@ -3,6 +3,7 @@
 package importing
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -122,6 +123,89 @@ func (i *Importer) ImportPreparedFile(
 		prepared.HashHex,
 		mimeInfo.Ext,
 	)
+	if err != nil {
+		return Result{}, err
+	}
+
+	dbResult, err := i.bundle.RecordPreparedLocalImport(
+		ctx,
+		hydrusdb.PreparedLocalImport{
+			HashHex:             prepared.HashHex,
+			Size:                prepared.Size,
+			Mime:                prepared.Mime,
+			Width:               prepared.Width,
+			Height:              prepared.Height,
+			PixelHashHex:        prepared.PixelHashHex,
+			HasTransparency:     prepared.HasTransparency,
+			Duration:            prepared.Duration,
+			NumFrames:           prepared.NumFrames,
+			HasAudio:            prepared.HasAudio,
+			NumWords:            prepared.NumWords,
+			ImportedAtMS:        prepared.ImportedAtMS,
+			FileModifiedAtMS:    prepared.FileModifiedAtMS,
+			LocalFileServiceKey: prepared.LocalFileServiceKey,
+		},
+	)
+	if err != nil {
+		if !placement.AlreadyPresent {
+			if cleanupErr := i.cleanupFailedPlacement(
+				context.WithoutCancel(ctx),
+				prepared.HashHex,
+				placement.Path,
+			); cleanupErr != nil {
+				return Result{}, errors.Join(err, cleanupErr)
+			}
+		}
+
+		return Result{}, err
+	}
+
+	return Result{
+		FileID:                    dbResult.FileID,
+		ManagedPath:               placement.Path,
+		ManagedFileAlreadyPresent: placement.AlreadyPresent,
+		AlreadyImported:           dbResult.AlreadyImported,
+	}, nil
+}
+
+// ImportPreparedBytes stores caller-supplied bytes into managed storage and
+// records them through the same minimal DB import path used by prepared files.
+func (i *Importer) ImportPreparedBytes(
+	ctx context.Context,
+	prepared PreparedFile,
+	body []byte,
+) (Result, error) {
+	if i == nil {
+		return Result{}, fmt.Errorf("importer is nil")
+	}
+
+	if len(body) == 0 {
+		return Result{}, fmt.Errorf("prepared body is required")
+	}
+
+	layout, err := i.managedLayout(ctx)
+	if err != nil {
+		return Result{}, err
+	}
+
+	mimeInfo := mimes.Lookup(prepared.Mime)
+	tempFile, err := os.CreateTemp("", ".hydrus-go-ptr-update-*")
+	if err != nil {
+		return Result{}, fmt.Errorf("create prepared temp file: %w", err)
+	}
+	tempPath := tempFile.Name()
+	defer os.Remove(tempPath)
+
+	if _, err := bytes.NewReader(body).WriteTo(tempFile); err != nil {
+		_ = tempFile.Close()
+		return Result{}, fmt.Errorf("write prepared temp file: %w", err)
+	}
+
+	if err := tempFile.Close(); err != nil {
+		return Result{}, fmt.Errorf("close prepared temp file: %w", err)
+	}
+
+	placement, err := layout.PlaceFileFromPath(tempPath, prepared.HashHex, mimeInfo.Ext)
 	if err != nil {
 		return Result{}, err
 	}

@@ -61,6 +61,7 @@ type preparedLocalImportPlan struct {
 	currentMemberships []preparedCurrentMembershipPlan
 	hasPixelHashMap    bool
 	hasTransparency    bool
+	createInbox        bool
 }
 
 type preparedCurrentMembershipPlan struct {
@@ -156,12 +157,14 @@ func (b *Bundle) RecordPreparedLocalImport(
 			return err
 		}
 
-		if _, err := tx.ExecContext(
-			ctx,
-			`INSERT INTO main.file_inbox (hash_id) VALUES (?)`,
-			hashID,
-		); err != nil {
-			return fmt.Errorf("insert file_inbox row: %w", err)
+		if plan.createInbox {
+			if _, err := tx.ExecContext(
+				ctx,
+				`INSERT INTO main.file_inbox (hash_id) VALUES (?)`,
+				hashID,
+			); err != nil {
+				return fmt.Errorf("insert file_inbox row: %w", err)
+			}
 		}
 
 		if normalized.fileModifiedAtMS.Valid {
@@ -424,6 +427,25 @@ func (b *Bundle) resolvePreparedLocalImportPlan(
 		return preparedLocalImportPlan{}, err
 	}
 
+	plan := preparedLocalImportPlan{}
+	_, plan.hasPixelHashMap = tableNames["pixel_hash_map"]
+	_, plan.hasTransparency = tableNames["has_transparency"]
+	plan.createInbox = localFileService.serviceType == services.TypeLocalFileDomain
+
+	if localFileService.serviceType == services.TypeLocalFileUpdateDomain {
+		if err := appendPreparedCurrentMembership(
+			&plan,
+			tableNames,
+			localFileService,
+			true,
+			true,
+		); err != nil {
+			return preparedLocalImportPlan{}, err
+		}
+
+		return plan, nil
+	}
+
 	hydrusLocalStorage, ok, err := findUniqueServiceByType(
 		definitions,
 		services.TypeHydrusLocalFileStorage,
@@ -436,10 +458,6 @@ func (b *Bundle) resolvePreparedLocalImportPlan(
 			"required hydrus local file storage service is missing",
 		)
 	}
-
-	plan := preparedLocalImportPlan{}
-	_, plan.hasPixelHashMap = tableNames["pixel_hash_map"]
-	_, plan.hasTransparency = tableNames["has_transparency"]
 
 	if err := appendPreparedCurrentMembership(
 		&plan,
@@ -508,9 +526,10 @@ func resolveTargetLocalFileService(
 				continue
 			}
 
-			if definition.serviceType != services.TypeLocalFileDomain {
+			if definition.serviceType != services.TypeLocalFileDomain &&
+				definition.serviceType != services.TypeLocalFileUpdateDomain {
 				return serviceDefinition{}, fmt.Errorf(
-					"service %q is not a local file domain",
+					"service %q is not a local file or local update domain",
 					localFileServiceKey,
 				)
 			}

@@ -292,7 +292,7 @@ read-only Hydrus bundle and route mutations through a separate writable bundle.
 The daemon now opens two bundle connections when `HYDRUS_GO_DB_DIR` is set:
 one query-only read bundle for service discovery, metadata, browse, and asset
 streaming; and one writable bundle for public import and trash mutations. This
-becomes the basis for thin-client workflow testing before PTR work begins.
+becomes the basis for thin-client workflow testing alongside ongoing PTR work.
 
 ---
 
@@ -359,3 +359,23 @@ The desktop client now previews selected JPEG/PNG/GIF originals through
 `/v1/files/content`, but it rejects oversized payloads and very large decoded
 images to keep the thin client responsive while broader preview/export behavior
 remains later work.
+
+---
+
+## 2026-04-20 — anonymous PTR sync remains daemon-owned and API-triggered
+
+**Decision**
+
+Keep anonymous PTR sync inside `hydrusd` as a daemon-owned background job with
+HTTP trigger/status surfaces, rather than letting clients touch PTR network or
+SQLite state directly.
+
+**Why**
+
+- preserves the daemon-first boundary for SQLite, managed files, and repository sync state
+- keeps PTR lease ownership, failure recording, and shutdown cleanup in one place
+- matches the thin-client direction where UI clients poll daemon-owned state instead of opening their own PTR sessions
+
+**Consequence**
+
+The current PTR slice exposes `GET /service/ptr/status` and `POST /service/ptr/sync`, and the daemon now also owns anonymous PTR `/update` download plus local `repository updates` registration. Downloaded definitions/content are still not applied into local mappings or tag/query state; that remains later backend work.

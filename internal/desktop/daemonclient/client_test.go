@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
 )
 
 func TestNormalizeBaseURL(t *testing.T) {
@@ -789,4 +791,72 @@ func decodeMultipartBody(t *testing.T, r *http.Request) (map[string]string, stri
 	}
 
 	return fields, filename, payload
+}
+
+func TestPTRStatus(t *testing.T) {
+	client := newClientWithRoundTripper(
+		t,
+		"http://daemon.test",
+		strings.Repeat("f", 64),
+		roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			assertMethodAndPath(t, r, http.MethodGet, "/service/ptr/status")
+			assertHeader(t, r, "Hydrus-Client-API-Session-Key", "session-ptr")
+
+			status := PTRStatusResponse{
+				PTR: coreptrsync.Status{
+					Enabled: true,
+					Phase:   "idle",
+				},
+			}
+			return jsonResponse(t, r, http.StatusOK, status), nil
+		}),
+	)
+	client.sessionKey = "session-ptr"
+
+	ctx := context.Background()
+	res, err := client.GetPTRStatus(ctx)
+	if err != nil {
+		t.Fatalf("GetPTRStatus() error = %v", err)
+	}
+
+	if !res.PTR.Enabled {
+		t.Errorf("Expected enabled = true")
+	}
+	if res.PTR.Phase != "idle" {
+		t.Errorf("Expected phase = idle, got %q", res.PTR.Phase)
+	}
+}
+
+func TestPTRSync(t *testing.T) {
+	client := newClientWithRoundTripper(
+		t,
+		"http://daemon.test",
+		strings.Repeat("f", 64),
+		roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			assertMethodAndPath(t, r, http.MethodPost, "/service/ptr/sync")
+			assertHeader(t, r, "Hydrus-Client-API-Session-Key", "session-ptr")
+
+			status := PTRStatusResponse{
+				PTR: coreptrsync.Status{
+					Enabled: true,
+					Phase:   "syncing",
+				},
+			}
+			return jsonResponse(t, r, http.StatusOK, status), nil
+		}),
+	)
+	client.sessionKey = "session-ptr"
+
+	ctx := context.Background()
+	res, err := client.TriggerPTRSync(ctx)
+	if err != nil {
+		t.Fatalf("TriggerPTRSync() error = %v", err)
+	}
+
+	if !res.PTR.Enabled {
+		t.Errorf("Expected enabled = true")
+	}
+	if res.PTR.Phase != "syncing" {
+		t.Errorf("Expected phase = syncing, got %q", res.PTR.Phase)
+	}
 }
