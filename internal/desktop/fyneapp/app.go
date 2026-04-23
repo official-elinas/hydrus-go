@@ -131,6 +131,8 @@ type prototype struct {
 	connected          bool
 	connectionGen      uint64
 	connectAttemptID   uint64
+	selectedPreviewCache  map[string]fyne.Resource
+	selectedPreviewCacheM sync.Mutex
 	thumbnailCache     map[int64]fyne.Resource
 	thumbnailLoads     map[int64]struct{}
 	thumbnailGen       uint64
@@ -178,6 +180,7 @@ func newPrototype() *prototype {
 		recentLimit:        recentPageLimit,
 		gallerySortMode:    gallerySortNewest,
 		selectedQueueIndex: -1,
+		selectedPreviewCache: map[string]fyne.Resource{},
 		thumbnailCache:     map[int64]fyne.Resource{},
 		thumbnailLoads:     map[int64]struct{}{},
 		tileMetadataCache:  map[int64]daemonclient.FileMetadata{},
@@ -1988,6 +1991,12 @@ func (p *prototype) loadSelectedPreview(fileID int64) {
 		return
 	}
 
+	if resource, ok := p.lookupSelectedPreview(item); ok {
+		p.cancelPreviewRequest()
+		p.setSelectedPreview(resource, "")
+		return
+	}
+
 	ctx, cancel, requestID := p.beginPreviewRequest(20 * time.Second)
 	p.clearSelectedPreview("Loading selected-file preview from hydrusd...")
 
@@ -2037,6 +2046,7 @@ func (p *prototype) loadSelectedPreview(fileID int64) {
 			fmt.Sprintf("file-%d-original", item.FileID),
 			payload,
 		)
+		p.storeSelectedPreview(item, resource)
 
 		fyne.Do(func() {
 			if !p.isCurrentOperation(connection) || !p.isCurrentPreviewRequest(requestID) || p.selectedFileID != item.FileID {
@@ -2626,6 +2636,43 @@ func (p *prototype) setSelectedPreview(resource fyne.Resource, message string) {
 	}
 	p.previewImage.Refresh()
 	p.previewLabel.SetText(message)
+}
+
+func (p *prototype) lookupSelectedPreview(item daemonclient.RecentItem) (fyne.Resource, bool) {
+	cacheKey := selectedPreviewCacheKey(item)
+	if cacheKey == "" {
+		return nil, false
+	}
+
+	p.selectedPreviewCacheM.Lock()
+	defer p.selectedPreviewCacheM.Unlock()
+
+	resource, ok := p.selectedPreviewCache[cacheKey]
+	return resource, ok && resource != nil
+}
+
+func (p *prototype) storeSelectedPreview(item daemonclient.RecentItem, resource fyne.Resource) {
+	cacheKey := selectedPreviewCacheKey(item)
+	if cacheKey == "" || resource == nil {
+		return
+	}
+
+	p.selectedPreviewCacheM.Lock()
+	defer p.selectedPreviewCacheM.Unlock()
+
+	p.selectedPreviewCache[cacheKey] = resource
+}
+
+func selectedPreviewCacheKey(item daemonclient.RecentItem) string {
+	if normalizedHash := strings.TrimSpace(strings.ToLower(item.Hash)); normalizedHash != "" {
+		return normalizedHash
+	}
+
+	if item.FileID <= 0 {
+		return ""
+	}
+
+	return fmt.Sprintf("file-id:%d", item.FileID)
 }
 
 func newWatcherLoadingContent(mime string) fyne.CanvasObject {

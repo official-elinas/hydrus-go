@@ -411,6 +411,49 @@ func TestResetConnectionAttemptState(t *testing.T) {
 	}
 }
 
+func TestSelectedPreviewCacheHelpers(t *testing.T) {
+	t.Run("prefers normalized hash as cache key", func(t *testing.T) {
+		key := selectedPreviewCacheKey(daemonclient.RecentItem{FileID: 7, Hash: "  ABC123  "})
+		if key != "abc123" {
+			t.Fatalf("selectedPreviewCacheKey() = %q, want %q", key, "abc123")
+		}
+	})
+
+	t.Run("falls back to file id when hash is unavailable", func(t *testing.T) {
+		key := selectedPreviewCacheKey(daemonclient.RecentItem{FileID: 42})
+		if key != "file-id:42" {
+			t.Fatalf("selectedPreviewCacheKey() = %q, want %q", key, "file-id:42")
+		}
+	})
+
+	t.Run("stores and loads cached selected previews", func(t *testing.T) {
+		resource := fyne.NewStaticResource("preview.png", []byte("png-bytes"))
+		p := &prototype{selectedPreviewCache: map[string]fyne.Resource{}}
+		item := daemonclient.RecentItem{FileID: 9, Hash: "def456"}
+
+		p.storeSelectedPreview(item, resource)
+
+		got, ok := p.lookupSelectedPreview(item)
+		if !ok {
+			t.Fatal("lookupSelectedPreview() = not found, want cached preview")
+		}
+
+		if got != resource {
+			t.Fatalf("lookupSelectedPreview() returned unexpected resource %v", got)
+		}
+	})
+
+	t.Run("ignores empty cache keys and nil resources", func(t *testing.T) {
+		p := &prototype{selectedPreviewCache: map[string]fyne.Resource{}}
+
+		p.storeSelectedPreview(daemonclient.RecentItem{}, nil)
+
+		if len(p.selectedPreviewCache) != 0 {
+			t.Fatalf("len(selectedPreviewCache) = %d, want 0", len(p.selectedPreviewCache))
+		}
+	})
+}
+
 func TestParseTagEditorInput(t *testing.T) {
 	t.Run("splits on commas and newlines while trimming blanks", func(t *testing.T) {
 		got := parseTagEditorInput(" creator:alice,\nseries:zeta\n\tcharacter:bob  ")
