@@ -454,6 +454,46 @@ func TestSelectedPreviewCacheHelpers(t *testing.T) {
 	})
 }
 
+func TestRightTagRenderingHelpers(t *testing.T) {
+	metadata := daemonclient.FileMetadata{
+		Tags: map[string]daemonclient.FileMetadataTagService{
+			"local": {
+				Name:       "my tags",
+				TypePretty: "local tag domain",
+				DisplayTags: map[string][]string{
+					"0": {"creator:alice", "series:zeta"},
+				},
+			},
+		},
+	}
+
+	t.Run("sets plain fallback tag text as rich-text segments", func(t *testing.T) {
+		p := &prototype{tagsRichText: widget.NewRichText()}
+		p.setRightTagsText(defaultTagsText)
+
+		got := flattenTextSegments(t, p.tagsRichText.Segments)
+		if got != defaultTagsText {
+			t.Fatalf("flattened segments = %q, want %q", got, defaultTagsText)
+		}
+	})
+
+	t.Run("reuses colored metadata segments in the right pane", func(t *testing.T) {
+		p := &prototype{tagsRichText: widget.NewRichText()}
+		p.setRightTagsMetadata(metadata)
+
+		got := flattenTextSegments(t, p.tagsRichText.Segments)
+		want := "my tags (local tag domain)\ncurrent: creator:alice, series:zeta\n"
+		if got != want {
+			t.Fatalf("flattened segments = %q, want %q", got, want)
+		}
+
+		creatorSegment := findTextSegment(t, p.tagsRichText.Segments, "creator:alice")
+		if creatorSegment.Style.ColorName != hydrusTagColorCreator {
+			t.Fatalf("creator segment color = %q, want %q", creatorSegment.Style.ColorName, hydrusTagColorCreator)
+		}
+	})
+}
+
 func TestParseTagEditorInput(t *testing.T) {
 	t.Run("splits on commas and newlines while trimming blanks", func(t *testing.T) {
 		got := parseTagEditorInput(" creator:alice,\nseries:zeta\n\tcharacter:bob  ")

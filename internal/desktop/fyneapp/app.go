@@ -108,7 +108,7 @@ type prototype struct {
 	previewImage      *canvas.Image
 	previewLabel      *widget.Label
 	metadataLabel     *widget.Label
-	tagsLabel         *widget.Label
+	tagsRichText      *widget.RichText
 	activityLabel     *widget.Label
 	statusBarLabel    *widget.Label
 	ptrStatusLabel    *widget.Label
@@ -204,8 +204,9 @@ func newPrototype() *prototype {
 	p.previewLabel = widget.NewLabel(defaultPreviewText)
 	p.previewLabel.Wrapping = fyne.TextTruncate
 	p.previewLabel.Alignment = fyne.TextAlignCenter
-	p.tagsLabel = widget.NewLabel(defaultTagsText)
-	p.tagsLabel.Wrapping = fyne.TextWrapWord
+	p.tagsRichText = widget.NewRichText()
+	p.tagsRichText.Wrapping = fyne.TextWrapWord
+	p.setRightTagsText(defaultTagsText)
 	p.metadataLabel = widget.NewLabel(defaultMetadataText)
 	p.metadataLabel.Wrapping = fyne.TextWrapWord
 	p.activityLabel = widget.NewLabel("No actions yet.")
@@ -530,7 +531,7 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		newMinSizeBox(container.NewPadded(previewPanel), fyne.NewSize(360, 240)),
 	)
 
-	tagsScroll := container.NewVScroll(p.tagsLabel)
+	tagsScroll := container.NewVScroll(p.tagsRichText)
 	tagSection := container.NewBorder(
 		widget.NewLabelWithStyle("Selection tags", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		container.NewPadded(p.editTagsButton),
@@ -1818,7 +1819,7 @@ func (p *prototype) applyRecentItems(items []daemonclient.RecentItem, preferredF
 
 	if p.selectedFileID > 0 {
 		p.metadataLabel.SetText("Loading selected-file metadata from hydrusd...")
-		p.tagsLabel.SetText("Loading tag metadata from hydrusd...")
+		p.setRightTagsText("Loading tag metadata from hydrusd...")
 		p.setLeftTagsText("Loading selected-file tags from hydrusd...")
 		p.loadSelectedPreview(p.selectedFileID)
 		p.loadSelectedMetadata(p.selectedFileID)
@@ -1826,7 +1827,7 @@ func (p *prototype) applyRecentItems(items []daemonclient.RecentItem, preferredF
 	}
 
 	p.metadataLabel.SetText(defaultMetadataText)
-	p.tagsLabel.SetText(defaultTagsText)
+	p.setRightTagsText(defaultTagsText)
 	p.setLeftTagsText(defaultTagsText)
 	p.cancelPreviewRequest()
 	p.clearSelectedPreview(defaultPreviewText)
@@ -1966,7 +1967,7 @@ func (p *prototype) selectFile(fileID int64) {
 	p.renderGrid()
 	p.updateActionState()
 	p.metadataLabel.SetText("Loading selected-file metadata from hydrusd...")
-	p.tagsLabel.SetText("Loading tag metadata from hydrusd...")
+	p.setRightTagsText("Loading tag metadata from hydrusd...")
 	p.setLeftTagsText("Loading selected-file tags from hydrusd...")
 	p.loadSelectedPreview(fileID)
 	p.loadSelectedMetadata(fileID)
@@ -2080,7 +2081,7 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 				}
 
 				p.metadataLabel.SetText("Could not load metadata from hydrusd.\n\n" + err.Error())
-				p.tagsLabel.SetText("Could not load tag metadata from hydrusd.")
+				p.setRightTagsText("Could not load tag metadata from hydrusd.")
 				p.setLeftTagsText("Could not load selected-file tags from hydrusd.")
 			})
 			return
@@ -2100,7 +2101,7 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 			p.tileMetadataMu.Unlock()
 
 			p.metadataLabel.SetText(formatMetadataDetails(metadata))
-			p.tagsLabel.SetText(formatTagMetadata(metadata))
+			p.setRightTagsMetadata(metadata)
 			p.setLeftTagsMetadata(metadata)
 			p.renderGrid()
 			p.refreshSearchSuggestions()
@@ -2311,9 +2312,19 @@ func (p *prototype) setLeftTagsText(text string) {
 	p.leftTagsRichText.Refresh()
 }
 
+func (p *prototype) setRightTagsText(text string) {
+	p.tagsRichText.Segments = richTextSegmentsFromText(text)
+	p.tagsRichText.Refresh()
+}
+
 func (p *prototype) setLeftTagsMetadata(metadata daemonclient.FileMetadata) {
 	p.leftTagsRichText.Segments = formatTagMetadataSegments(metadata)
 	p.leftTagsRichText.Refresh()
+}
+
+func (p *prototype) setRightTagsMetadata(metadata daemonclient.FileMetadata) {
+	p.tagsRichText.Segments = formatTagMetadataSegments(metadata)
+	p.tagsRichText.Refresh()
 }
 
 func (p *prototype) collectLoadedSearchSuggestions() []string {
