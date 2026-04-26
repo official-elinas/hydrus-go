@@ -169,7 +169,7 @@ func newPrototype() *prototype {
 	application := app.NewWithID("github.com.official-elinas.hydrus-go.desktop")
 	application.Settings().SetTheme(forcedDarkTheme{})
 
-	window := application.NewWindow("hydrusd thin prototype")
+	window := application.NewWindow("hydrus-go curation cockpit")
 	window.Resize(fyne.NewSize(1440, 860))
 	window.SetPadded(false)
 
@@ -517,6 +517,19 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		widget.NewToolbarAction(theme.FolderOpenIcon(), p.showImportFolderDialog),
 		widget.NewToolbarAction(theme.DeleteIcon(), p.confirmTrashSelected),
 	)
+	headerTitle := widget.NewLabelWithStyle("hydrus-go curation cockpit", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
+	headerSubtitle := widget.NewLabel("Daemon-backed browse, import, tagging, and PTR validation")
+	headerSubtitle.Wrapping = fyne.TextTruncate
+	header := container.NewStack(
+		canvas.NewRectangle(color.NRGBA{R: 14, G: 16, B: 22, A: 255}),
+		container.NewPadded(container.NewBorder(
+			nil,
+			nil,
+			nil,
+			toolbar,
+			container.NewVBox(headerTitle, headerSubtitle, p.connectionLabel),
+		)),
+	)
 
 	previewPanel := container.NewStack(
 		canvas.NewRectangle(color.NRGBA{R: 18, G: 18, B: 20, A: 255}),
@@ -566,10 +579,10 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		p.clearQueueButton,
 	)
 
-	introLabel := widget.NewLabel("A thin Fyne shell for testing daemon-backed Hydrus\nparity work without direct DB or managed-file access.")
+	introLabel := widget.NewLabel("A daemon-first cockpit for testing Hydrus parity\nwithout direct DB or managed-file access.")
 
 	queueHeader := container.NewPadded(container.NewVBox(
-		widget.NewLabelWithStyle("hydrusd prototype", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
+		widget.NewLabelWithStyle("Curation queue", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		introLabel,
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Connection", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
@@ -625,12 +638,17 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 	mainSplit := container.NewHSplit(queuePane, galleryDetailSplit)
 	mainSplit.SetOffset(0.25)
 
+	mainSurface := container.NewStack(
+		canvas.NewRectangle(color.NRGBA{R: 9, G: 10, B: 14, A: 255}),
+		container.NewPadded(mainSplit),
+	)
+
 	return container.NewBorder(
-		container.NewVBox(toolbar, widget.NewSeparator()),
+		header,
 		container.NewPadded(p.statusBarLabel),
 		nil,
 		nil,
-		mainSplit,
+		mainSurface,
 	)
 }
 
