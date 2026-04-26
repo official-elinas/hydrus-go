@@ -47,6 +47,7 @@ const (
 	watcherMaxDimension = 16384
 	tagSuggestionLimit  = 20
 	defaultDaemonURL    = "http://127.0.0.1:45869"
+	desktopWindowTitle  = "hydrus-go curation cockpit"
 	defaultMetadataText = "Select a file from the grid to inspect the daemon-backed metadata state.\n\nThis prototype is focused on validating daemon-backed import/trash flows and early Hydrus-like layout work, not full UI parity yet."
 	defaultPreviewText  = "Select a supported still image to\npreview the daemon-served original file."
 	defaultTagsText     = "Select a file to inspect tag metadata from hydrusd."
@@ -169,7 +170,7 @@ func newPrototype() *prototype {
 	application := app.NewWithID("github.com.official-elinas.hydrus-go.desktop")
 	application.Settings().SetTheme(forcedDarkTheme{})
 
-	window := application.NewWindow("hydrus-go curation cockpit")
+	window := application.NewWindow(desktopWindowTitle)
 	window.Resize(fyne.NewSize(1440, 860))
 	window.SetPadded(false)
 

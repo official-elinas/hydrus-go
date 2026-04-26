@@ -104,6 +104,12 @@ func TestFormatMetadata(t *testing.T) {
 	})
 }
 
+func TestPrototypeWindowTitle(t *testing.T) {
+	if desktopWindowTitle != "hydrus-go curation cockpit" {
+		t.Fatalf("desktopWindowTitle = %q, want curation cockpit title", desktopWindowTitle)
+	}
+}
+
 func TestFormatPTRStatus(t *testing.T) {
 	t.Run("renders basic idle status", func(t *testing.T) {
 		status := coreptrsync.Status{
