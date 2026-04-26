@@ -370,7 +370,7 @@ func (m *Manager) Status(ctx context.Context) (coreptrsync.Status, error) {
 			status.IsRunning,
 			"metadata_slice",
 			status.MetadataSlice,
-			"downloaded_updates",
+			"stored_update_files_total",
 			status.DownloadedUpdateCount,
 			"processed_definitions",
 			status.ProcessedDefinitionCount,
@@ -506,7 +506,7 @@ func (m *Manager) runStartedSync(ctx context.Context, started startedSync) (stat
 						started.lease.RunToken,
 						"metadata_slice",
 						status.MetadataSlice,
-						"downloaded_updates",
+						"stored_update_files_total",
 						status.DownloadedUpdateCount,
 						"processed_definitions",
 						status.ProcessedDefinitionCount,
@@ -542,7 +542,7 @@ func (m *Manager) runStartedSync(ctx context.Context, started startedSync) (stat
 					started.lease.RunToken,
 					"metadata_slice",
 					cancelledStatus.MetadataSlice,
-					"downloaded_updates",
+					"stored_update_files_total",
 					cancelledStatus.DownloadedUpdateCount,
 				)
 			}
@@ -581,7 +581,7 @@ func (m *Manager) runStartedSync(ctx context.Context, started startedSync) (stat
 				failureReason,
 				"metadata_slice",
 				failedStatus.MetadataSlice,
-				"downloaded_updates",
+				"stored_update_files_total",
 				failedStatus.DownloadedUpdateCount,
 			)
 		}
@@ -619,7 +619,7 @@ func (m *Manager) runStartedSync(ctx context.Context, started startedSync) (stat
 			started.lease.RunToken,
 			"metadata_slice",
 			status.MetadataSlice,
-			"downloaded_updates",
+			"stored_update_files_total",
 			status.DownloadedUpdateCount,
 		)
 	}
@@ -641,7 +641,7 @@ func (m *Manager) runStartedSync(ctx context.Context, started startedSync) (stat
 			)
 		}
 
-		completedDownloads := 0
+		currentRunDownloads := 0
 		batch := make([]downloadedPTRUpdateBatchItem, 0, minInt(ptrSyncDownloadedUpdateBatchSize, len(pendingHashes)))
 		flushBatch := func() error {
 			if len(batch) == 0 {
@@ -667,20 +667,20 @@ func (m *Manager) runStartedSync(ctx context.Context, started startedSync) (stat
 			}
 
 			status = updatedStatus
-			completedDownloads += len(batch)
+			currentRunDownloads += len(batch)
 			if m.logger != nil {
 				latestHash := batch[len(batch)-1].hashHex
 				m.logger.Info(
 					"PTR update download progress",
 					"run_token",
 					started.lease.RunToken,
-					"completed",
-					completedDownloads,
-					"total",
+					"current_run_downloaded",
+					currentRunDownloads,
+					"current_run_pending_total",
 					len(pendingHashes),
 					"latest_hash",
 					latestHash,
-					"downloaded_updates",
+					"stored_update_files_total",
 					status.DownloadedUpdateCount,
 				)
 			}

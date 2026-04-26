@@ -48,7 +48,7 @@ func (s *Server) handleGetPTRStatus(w http.ResponseWriter, r *http.Request) {
 		status.IsRunning,
 		"metadata_slice",
 		status.MetadataSlice,
-		"downloaded_updates",
+		"stored_update_files_total",
 		status.DownloadedUpdateCount,
 		"processed_definitions",
 		status.ProcessedDefinitionCount,
