@@ -105,8 +105,20 @@ func TestFormatMetadata(t *testing.T) {
 }
 
 func TestPrototypeWindowTitle(t *testing.T) {
-	if desktopWindowTitle != "hydrus-go curation cockpit" {
+	if desktopWindowTitle != "hydrus-go curation cockpit — UI ENHANCE BUILD 2026-04-26" {
 		t.Fatalf("desktopWindowTitle = %q, want curation cockpit title", desktopWindowTitle)
+	}
+}
+
+func TestDesktopBuildMarkerText(t *testing.T) {
+	if !strings.Contains(desktopHeaderSubtitle, desktopBuildMarker) {
+		t.Fatalf("desktopHeaderSubtitle = %q, want build marker %q", desktopHeaderSubtitle, desktopBuildMarker)
+	}
+	if !strings.Contains(defaultStatusText, desktopBuildMarker) {
+		t.Fatalf("defaultStatusText = %q, want build marker %q", defaultStatusText, desktopBuildMarker)
+	}
+	if !strings.Contains(desktopIntroText, "older build") {
+		t.Fatalf("desktopIntroText = %q, want older-build warning", desktopIntroText)
 	}
 }
 
@@ -132,10 +144,11 @@ func TestFormatPTRStatus(t *testing.T) {
 			"Account: shared-read-only\n" +
 			"Phase: idle\n" +
 			"Status: Idle\n" +
-			"Metadata Slice: 7\n" +
-			"Processed Definitions: 100\n" +
-			"Processed Content: 200\n" +
-			"Downloaded Update Files: 5"
+			"Remote Metadata Slice: 7\n" +
+			"Applied Definition Updates: 100\n" +
+			"Applied Content Updates: 200\n" +
+			"Stored Repository Update Files: 5\n" +
+			"Storage: <db_dir>/repository_updates/<hash-prefix>/<hash>; registered in the repository updates local file domain"
 
 		if got != want {
 			t.Fatalf("formatPTRStatus() = %q, want %q", got, want)
@@ -159,11 +172,12 @@ func TestFormatPTRStatus(t *testing.T) {
 		want := "Service: public tag repository\n" +
 			"Phase: syncing\n" +
 			"Status: Sync is currently running\n" +
-			"Metadata Slice: 12\n" +
+			"Remote Metadata Slice: 12\n" +
 			"Last error: connection reset by peer\n" +
-			"Processed Definitions: 0\n" +
-			"Processed Content: 0\n" +
-			"Downloaded Update Files: 0"
+			"Applied Definition Updates: 0\n" +
+			"Applied Content Updates: 0\n" +
+			"Stored Repository Update Files: 0\n" +
+			"Storage: <db_dir>/repository_updates/<hash-prefix>/<hash>; registered in the repository updates local file domain"
 
 		if got != want {
 			t.Fatalf("formatPTRStatus() = %q, want %q", got, want)
@@ -185,10 +199,11 @@ func TestFormatPTRStatus(t *testing.T) {
 		want := "Service: public tag repository\n" +
 			"Phase: retrying\n" +
 			"Status: Remote PTR busy; retrying in 2m\n" +
-			"Metadata Slice: 0\n" +
-			"Processed Definitions: 0\n" +
-			"Processed Content: 0\n" +
-			"Downloaded Update Files: 7"
+			"Remote Metadata Slice: 0\n" +
+			"Applied Definition Updates: 0\n" +
+			"Applied Content Updates: 0\n" +
+			"Stored Repository Update Files: 7\n" +
+			"Storage: <db_dir>/repository_updates/<hash-prefix>/<hash>; registered in the repository updates local file domain"
 
 		if got != want {
 			t.Fatalf("formatPTRStatus() = %q, want %q", got, want)
@@ -211,10 +226,11 @@ func TestFormatPTRStatus(t *testing.T) {
 		want := "Service: public tag repository\n" +
 			"Phase: idle\n" +
 			"Status: Complete\n" +
-			"Metadata Slice: 7\n" +
-			"Processed Definitions: 2\n" +
-			"Processed Content: 3\n" +
-			"Downloaded Update Files: 5"
+			"Remote Metadata Slice: 7\n" +
+			"Applied Definition Updates: 2\n" +
+			"Applied Content Updates: 3\n" +
+			"Stored Repository Update Files: 5\n" +
+			"Storage: <db_dir>/repository_updates/<hash-prefix>/<hash>; registered in the repository updates local file domain"
 
 		if got != want {
 			t.Fatalf("formatPTRStatus() = %q, want %q", got, want)

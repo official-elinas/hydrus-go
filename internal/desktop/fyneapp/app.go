@@ -46,8 +46,13 @@ const (
 	watcherPixelLimit   = 64_000_000
 	watcherMaxDimension = 16384
 	tagSuggestionLimit  = 20
-	defaultDaemonURL    = "http://127.0.0.1:45869"
-	desktopWindowTitle  = "hydrus-go curation cockpit"
+	defaultDaemonURL       = "http://127.0.0.1:45869"
+	desktopBuildMarker    = "UI ENHANCE BUILD 2026-04-26"
+	desktopWindowTitle    = "hydrus-go curation cockpit — " + desktopBuildMarker
+	desktopHeaderTitle    = "HYDRUS-GO CURATION COCKPIT"
+	desktopHeaderSubtitle = desktopBuildMarker + " • daemon-backed browse/import/PTR"
+	desktopIntroText      = "If this green-accent header is not visible, this is an older build.\nDaemon-first cockpit for testing Hydrus parity without direct DB access."
+	defaultStatusText     = desktopBuildMarker + " • Ready. Connect to hydrusd to start validation."
 	defaultMetadataText = "Select a file from the grid to inspect the daemon-backed metadata state.\n\nThis prototype is focused on validating daemon-backed import/trash flows and early Hydrus-like layout work, not full UI parity yet."
 	defaultPreviewText  = "Select a supported still image to\npreview the daemon-served original file."
 	defaultTagsText     = "Select a file to inspect tag metadata from hydrusd."
@@ -212,7 +217,7 @@ func newPrototype() *prototype {
 	p.metadataLabel.Wrapping = fyne.TextWrapWord
 	p.activityLabel = widget.NewLabel("No actions yet.")
 	p.activityLabel.Wrapping = fyne.TextTruncate
-	p.statusBarLabel = widget.NewLabel("Ready. Connect to hydrusd to start the prototype.")
+	p.statusBarLabel = widget.NewLabel(defaultStatusText)
 	p.statusBarLabel.Wrapping = fyne.TextTruncate
 	p.ptrHeadlineLabel = widget.NewLabelWithStyle("PTR sync: offline", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	p.ptrStatusLabel = widget.NewLabel("PTR sync status: offline")
@@ -518,17 +523,38 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		widget.NewToolbarAction(theme.FolderOpenIcon(), p.showImportFolderDialog),
 		widget.NewToolbarAction(theme.DeleteIcon(), p.confirmTrashSelected),
 	)
-	headerTitle := widget.NewLabelWithStyle("hydrus-go curation cockpit", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	headerSubtitle := widget.NewLabel("Daemon-backed browse, import, tagging, and PTR validation")
+	headerMarker := canvas.NewText("NEW WINDOWS TEST BUILD", color.NRGBA{R: 88, G: 255, B: 170, A: 255})
+	headerMarker.TextSize = 14
+	headerMarker.TextStyle = fyne.TextStyle{Bold: true}
+	headerTitle := canvas.NewText(desktopHeaderTitle, color.NRGBA{R: 230, G: 245, B: 255, A: 255})
+	headerTitle.TextSize = 24
+	headerTitle.TextStyle = fyne.TextStyle{Bold: true}
+	headerSubtitle := widget.NewLabel(desktopHeaderSubtitle)
 	headerSubtitle.Wrapping = fyne.TextTruncate
+	headerAccent := canvas.NewRectangle(color.NRGBA{R: 56, G: 214, B: 145, A: 255})
+	headerAccent.SetMinSize(fyne.NewSize(8, 1))
 	header := container.NewStack(
-		canvas.NewRectangle(color.NRGBA{R: 14, G: 16, B: 22, A: 255}),
-		container.NewPadded(container.NewBorder(
+		canvas.NewRectangle(color.NRGBA{R: 7, G: 10, B: 18, A: 255}),
+		container.NewBorder(
 			nil,
 			nil,
+			headerAccent,
 			nil,
-			toolbar,
-			container.NewVBox(headerTitle, headerSubtitle, p.connectionLabel),
+			container.NewPadded(container.NewBorder(
+				nil,
+				nil,
+				nil,
+				toolbar,
+				container.NewVBox(headerMarker, headerTitle, headerSubtitle, p.connectionLabel),
+			)),
+		),
+	)
+	buildBanner := container.NewStack(
+		canvas.NewRectangle(color.NRGBA{R: 18, G: 45, B: 40, A: 255}),
+		container.NewPadded(widget.NewLabelWithStyle(
+			desktopBuildMarker+" — rebuilt artifact marker for Windows smoke testing",
+			fyne.TextAlignCenter,
+			fyne.TextStyle{Bold: true},
 		)),
 	)
 
@@ -580,7 +606,8 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		p.clearQueueButton,
 	)
 
-	introLabel := widget.NewLabel("A daemon-first cockpit for testing Hydrus parity\nwithout direct DB or managed-file access.")
+	introLabel := widget.NewLabel(desktopIntroText)
+	introLabel.Wrapping = fyne.TextWrapWord
 
 	queueHeader := container.NewPadded(container.NewVBox(
 		widget.NewLabelWithStyle("Curation queue", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
@@ -645,7 +672,7 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 	)
 
 	return container.NewBorder(
-		header,
+		container.NewVBox(header, buildBanner),
 		container.NewPadded(p.statusBarLabel),
 		nil,
 		nil,
@@ -3459,7 +3486,7 @@ func ptrCompletionStatusText(status coreptrsync.Status) string {
 	}
 
 	return fmt.Sprintf(
-		"PTR sync completed in hydrusd. Definitions %d • content %d • update files %d.",
+		"PTR sync completed in hydrusd. Applied definitions %d • applied content %d • stored update files %d.",
 		status.ProcessedDefinitionCount,
 		status.ProcessedContentCount,
 		status.DownloadedUpdateCount,
@@ -3491,7 +3518,7 @@ func formatPTRStatus(status coreptrsync.Status) string {
 	} else {
 		buf.WriteString("Status: Idle\n")
 	}
-	buf.WriteString(fmt.Sprintf("Metadata Slice: %d\n", status.MetadataSlice))
+	buf.WriteString(fmt.Sprintf("Remote Metadata Slice: %d\n", status.MetadataSlice))
 
 	if status.LastError != "" {
 		buf.WriteString(fmt.Sprintf("Last error: %s\n", status.LastError))
@@ -3501,9 +3528,10 @@ func formatPTRStatus(status coreptrsync.Status) string {
 		buf.WriteString("PTR sync is disabled in daemon.\n")
 	}
 
-	buf.WriteString(fmt.Sprintf("Processed Definitions: %d\n", status.ProcessedDefinitionCount))
-	buf.WriteString(fmt.Sprintf("Processed Content: %d\n", status.ProcessedContentCount))
-	buf.WriteString(fmt.Sprintf("Downloaded Update Files: %d", status.DownloadedUpdateCount))
+	buf.WriteString(fmt.Sprintf("Applied Definition Updates: %d\n", status.ProcessedDefinitionCount))
+	buf.WriteString(fmt.Sprintf("Applied Content Updates: %d\n", status.ProcessedContentCount))
+	buf.WriteString(fmt.Sprintf("Stored Repository Update Files: %d\n", status.DownloadedUpdateCount))
+	buf.WriteString("Storage: <db_dir>/repository_updates/<hash-prefix>/<hash>; registered in the repository updates local file domain")
 
 	return buf.String()
 }
