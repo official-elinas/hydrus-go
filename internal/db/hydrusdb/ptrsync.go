@@ -292,6 +292,37 @@ func (b *Bundle) ListPTRPendingMappingsForCommit(
 	return groups, nil
 }
 
+// CountPTRPendingMappings returns the number of locally staged pending add
+// mappings for the given PTR service key.
+func (b *Bundle) CountPTRPendingMappings(
+	ctx context.Context,
+	serviceKey string,
+) (coreptrsync.PendingInfo, error) {
+	targetServiceKey, err := normalizePTRTargetServiceKey(serviceKey)
+	if err != nil {
+		return coreptrsync.PendingInfo{}, err
+	}
+
+	serviceID, err := lookupServiceIDByKeyTx(ctx, b.conn, targetServiceKey)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return coreptrsync.PendingInfo{}, fmt.Errorf("%w: %s", coreptrsync.ErrPTRServiceNotFound, targetServiceKey)
+		}
+		return coreptrsync.PendingInfo{}, err
+	}
+
+	var count int64
+	row := b.conn.QueryRowContext(
+		ctx,
+		fmt.Sprintf(`SELECT COUNT(*) FROM external_mappings.pending_mappings_%d`, serviceID),
+	)
+	if err := row.Scan(&count); err != nil {
+		return coreptrsync.PendingInfo{}, fmt.Errorf("count PTR pending mappings: %w", err)
+	}
+
+	return coreptrsync.PendingInfo{ServiceKey: targetServiceKey, PendingCount: count}, nil
+}
+
 // CommitPTRPendingMappingsSuccess applies the local successful-commit state
 // transition for all currently pending add mappings on the daemon-owned PTR.
 func (b *Bundle) CommitPTRPendingMappingsSuccess(
@@ -491,7 +522,7 @@ func (b *Bundle) CompletePTRSyncSuccess(
 	cfg coreptrsync.Config,
 	runToken string,
 ) (coreptrsync.Status, error) {
-	return b.finishPTRSyncIdle(ctx, cfg, runToken, "")
+	return b.finishPTRSyncIdle(ctx, cfg, runToken, "", true)
 }
 
 // CancelPTRSync clears an active PTR sync lease without recording a failure.
@@ -502,7 +533,7 @@ func (b *Bundle) CancelPTRSync(
 	cfg coreptrsync.Config,
 	runToken string,
 ) (coreptrsync.Status, error) {
-	return b.finishPTRSyncIdle(ctx, cfg, runToken, "")
+	return b.finishPTRSyncIdle(ctx, cfg, runToken, "", false)
 }
 
 func (b *Bundle) finishPTRSyncIdle(
@@ -510,6 +541,7 @@ func (b *Bundle) finishPTRSyncIdle(
 	cfg coreptrsync.Config,
 	runToken string,
 	lastError string,
+	updateMappingCount bool,
 ) (coreptrsync.Status, error) {
 	if !cfg.Enabled {
 		return coreptrsync.Status{}, coreptrsync.ErrSyncDisabled
@@ -528,7 +560,16 @@ func (b *Bundle) finishPTRSyncIdle(
 			return err
 		}
 
-		if err := setPTRSyncIdle(ctx, tx, serviceID, runToken, nextUpdateIndex, lastError); err != nil {
+		var lastSyncMappingCount *int64
+		if updateMappingCount {
+			mappingCount, err := queryPTRCurrentMappingCount(ctx, tx, serviceID)
+			if err != nil {
+				return err
+			}
+			lastSyncMappingCount = &mappingCount
+		}
+
+		if err := setPTRSyncIdle(ctx, tx, serviceID, runToken, nextUpdateIndex, lastError, lastSyncMappingCount); err != nil {
 			return err
 		}
 
@@ -1337,6 +1378,7 @@ func ensurePTRSyncStateTable(ctx context.Context, tx *ImmediateTx) error {
 			downloaded_update_count INTEGER NOT NULL,
 			processed_definition_count INTEGER NOT NULL,
 			processed_content_count INTEGER NOT NULL,
+			last_sync_mapping_count INTEGER NOT NULL DEFAULT -1,
 			retry_at_ms INTEGER NOT NULL DEFAULT 0,
 			retry_attempt INTEGER NOT NULL DEFAULT 0,
 			last_error TEXT,
@@ -1365,6 +1407,13 @@ func ensurePTRSyncStateTable(ctx context.Context, tx *ImmediateTx) error {
 		`ALTER TABLE main.ptr_sync_state ADD COLUMN retry_attempt INTEGER NOT NULL DEFAULT 0`,
 	); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name: retry_attempt") {
 		return fmt.Errorf("ensure ptr_sync_state.retry_attempt column: %w", err)
+	}
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`ALTER TABLE main.ptr_sync_state ADD COLUMN last_sync_mapping_count INTEGER NOT NULL DEFAULT -1`,
+	); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name: last_sync_mapping_count") {
+		return fmt.Errorf("ensure ptr_sync_state.last_sync_mapping_count column: %w", err)
 	}
 
 	return nil
@@ -1404,7 +1453,7 @@ func upsertPTRSyncState(
 ) error {
 	row := tx.QueryRowContext(
 		ctx,
-		`SELECT service_id, account_mode, phase, is_running, run_token, retry_at_ms, retry_attempt, last_error
+		`SELECT service_id, account_mode, phase, is_running, run_token, retry_at_ms, retry_attempt, last_sync_mapping_count, last_error
 		FROM main.ptr_sync_state
 		WHERE singleton = ?`,
 		ptrSyncStateSingleton,
@@ -1418,6 +1467,7 @@ func upsertPTRSyncState(
 		existingRunToken     sql.NullString
 		existingRetryAtMS    int64
 		existingRetryAttempt int64
+		existingLastSyncMappingCount int64
 		existingLastError    sql.NullString
 	)
 
@@ -1429,6 +1479,7 @@ func upsertPTRSyncState(
 		&existingRunToken,
 		&existingRetryAtMS,
 		&existingRetryAttempt,
+		&existingLastSyncMappingCount,
 		&existingLastError,
 	)
 	if err != nil {
@@ -1449,9 +1500,10 @@ func upsertPTRSyncState(
 					processed_content_count,
 					retry_at_ms,
 					retry_attempt,
+					last_sync_mapping_count,
 					last_error,
 					updated_at_ms
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				ptrSyncStateSingleton,
 				serviceID,
 				coreptrsync.AccountModeSharedReadOnly,
@@ -1464,6 +1516,7 @@ func upsertPTRSyncState(
 				0,
 				0,
 				0,
+				-1,
 				nil,
 				nowMS,
 			); insertErr != nil {
@@ -1479,6 +1532,8 @@ func upsertPTRSyncState(
 	if !normalizeRuntimeState {
 		return nil
 	}
+
+	_ = existingLastSyncMappingCount
 
 	if existingServiceID == serviceID &&
 		existingAccountMode == coreptrsync.AccountModeSharedReadOnly &&
@@ -1549,6 +1604,7 @@ func lookupPTRSyncStatus(
 			downloaded_update_count,
 			processed_definition_count,
 			processed_content_count,
+			last_sync_mapping_count,
 			retry_at_ms,
 			retry_attempt,
 			last_error,
@@ -1566,6 +1622,7 @@ func lookupPTRSyncStatus(
 		downloadedUpdateCount    int64
 		processedDefinitionCount int64
 		processedContentCount    int64
+		lastSyncMappingCount     int64
 		retryAtMS                int64
 		retryAttempt             int64
 		lastError                sql.NullString
@@ -1580,6 +1637,7 @@ func lookupPTRSyncStatus(
 		&downloadedUpdateCount,
 		&processedDefinitionCount,
 		&processedContentCount,
+		&lastSyncMappingCount,
 		&retryAtMS,
 		&retryAttempt,
 		&lastError,
@@ -1632,6 +1690,10 @@ func lookupPTRSyncStatus(
 		RetryAtMS:                retryAtMS,
 		RetryAttempt:             retryAttempt,
 		UpdatedAtMS:              updatedAtMS,
+	}
+	if lastSyncMappingCount >= 0 {
+		value := lastSyncMappingCount
+		status.LastSyncMappingCount = &value
 	}
 	if lastError.Valid {
 		status.LastError = lastError.String
@@ -1941,6 +2003,7 @@ func setPTRSyncIdle(
 	runToken string,
 	nextUpdateIndex int64,
 	lastError string,
+	lastSyncMappingCount *int64,
 ) error {
 	nowMS := time.Now().UTC().UnixMilli()
 	var lastErrorValue any
@@ -1948,9 +2011,7 @@ func setPTRSyncIdle(
 		lastErrorValue = trimmed
 	}
 
-	result, err := tx.ExecContext(
-		ctx,
-		`UPDATE main.ptr_sync_state
+	query := `UPDATE main.ptr_sync_state
 		SET service_id = ?,
 			account_mode = ?,
 			phase = ?,
@@ -1960,8 +2021,8 @@ func setPTRSyncIdle(
 			retry_at_ms = ?,
 			retry_attempt = ?,
 			last_error = ?,
-			updated_at_ms = ?
-		WHERE singleton = ? AND is_running = 1 AND run_token = ?`,
+			updated_at_ms = ?`
+	args := []any{
 		serviceID,
 		coreptrsync.AccountModeSharedReadOnly,
 		coreptrsync.PhaseIdle,
@@ -1972,9 +2033,17 @@ func setPTRSyncIdle(
 		0,
 		lastErrorValue,
 		nowMS,
-		ptrSyncStateSingleton,
-		runToken,
-	)
+	}
+	if lastSyncMappingCount != nil {
+		query += `,
+			last_sync_mapping_count = ?`
+		args = append(args, *lastSyncMappingCount)
+	}
+	query += `
+		WHERE singleton = ? AND is_running = 1 AND run_token = ?`
+	args = append(args, ptrSyncStateSingleton, runToken)
+
+	result, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return fmt.Errorf("set ptr_sync_state idle: %w", err)
 	}
@@ -1989,6 +2058,24 @@ func setPTRSyncIdle(
 	}
 
 	return nil
+}
+
+func queryPTRCurrentMappingCount(
+	ctx context.Context,
+	q queryRowContextQuerier,
+	serviceID int64,
+) (int64, error) {
+	row := q.QueryRowContext(
+		ctx,
+		fmt.Sprintf(`SELECT COUNT(*) FROM external_mappings.current_mappings_%d`, serviceID),
+	)
+
+	var count int64
+	if err := row.Scan(&count); err != nil {
+		return 0, fmt.Errorf("query PTR current mapping count: %w", err)
+	}
+
+	return count, nil
 }
 
 func setPTRSyncFailed(

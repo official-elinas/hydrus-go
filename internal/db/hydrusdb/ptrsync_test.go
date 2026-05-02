@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/official-elinas/hydrus-go/internal/core/librarybrowse"
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
 	"github.com/official-elinas/hydrus-go/internal/core/services"
 )
@@ -1771,6 +1772,133 @@ func TestBundlePTRApplyPipeline(t *testing.T) {
 	})
 }
 
+func TestBundlePTRAppliedMappingsRemainSearchableAfterRestart(t *testing.T) {
+	dir, fixture := createTestBundle(t)
+
+	bundle, err := OpenWritable(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("OpenWritable() error = %v", err)
+	}
+
+	cfg := coreptrsync.DefaultConfig()
+	cfg.Enabled = true
+
+	definitionsHash := strings.Repeat("cc", 32)
+	mappingsHash := strings.Repeat("dd", 32)
+
+	lease, err := bundle.BeginPTRSync(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("BeginPTRSync() error = %v", err)
+	}
+
+	remoteState := testPTRRemoteState(
+		t,
+		1700000300,
+		testPTRMetadataUpdate(t, 0, 10, 20, definitionsHash),
+		testPTRMetadataUpdate(t, 1, 21, 30, mappingsHash),
+	)
+	if _, err := bundle.PersistPTRSyncMetadata(context.Background(), cfg, lease.RunToken, remoteState, true); err != nil {
+		t.Fatalf("PersistPTRSyncMetadata() error = %v", err)
+	}
+
+	batch := []PTRDownloadedUpdateBatchItem{
+		{
+			HashHex: definitionsHash,
+			PreparedImport: PreparedLocalImport{
+				HashHex:             definitionsHash,
+				Size:                13,
+				Mime:                28,
+				ImportedAtMS:        3333,
+				LocalFileServiceKey: hex.EncodeToString([]byte("repository updates")),
+			},
+		},
+		{
+			HashHex: mappingsHash,
+			PreparedImport: PreparedLocalImport{
+				HashHex:             mappingsHash,
+				Size:                14,
+				Mime:                29,
+				ImportedAtMS:        4444,
+				LocalFileServiceKey: hex.EncodeToString([]byte("repository updates")),
+			},
+		},
+	}
+	if _, err := bundle.FinalizePTRDownloadedUpdatesBatch(context.Background(), cfg, lease.RunToken, batch); err != nil {
+		t.Fatalf("FinalizePTRDownloadedUpdatesBatch() error = %v", err)
+	}
+
+	definitions := PTRDefinitionsUpdate{
+		ServiceHashIDsToHashes: map[int64]string{101: fixture.hash1Hex},
+		ServiceTagIDsToTags:    map[int64]string{201: "ptr:applied"},
+	}
+	if err := bundle.ApplyPTRDefinitions(context.Background(), cfg, lease.RunToken, definitionsHash, definitions); err != nil {
+		t.Fatalf("ApplyPTRDefinitions() error = %v", err)
+	}
+
+	mappings := PTRMappingsUpdate{
+		Adds: []PTRMappingUpdateRow{{ServiceTagID: 201, ServiceHashIDs: []int64{101}}},
+	}
+	if err := bundle.ApplyPTRMappings(context.Background(), cfg, lease.RunToken, mappingsHash, mappings); err != nil {
+		t.Fatalf("ApplyPTRMappings() error = %v", err)
+	}
+
+		status, err := bundle.CompletePTRSyncSuccess(context.Background(), cfg, lease.RunToken)
+		if err != nil {
+			t.Fatalf("CompletePTRSyncSuccess() error = %v", err)
+		}
+		if !status.IsComplete {
+			t.Fatal("status.IsComplete = false, want true")
+		}
+		if status.LastSyncMappingCount == nil || *status.LastSyncMappingCount != 1 {
+			t.Fatalf("status.LastSyncMappingCount = %v, want 1", status.LastSyncMappingCount)
+		}
+
+	if err := bundle.Close(); err != nil {
+		t.Fatalf("Close() error = %v", err)
+	}
+
+	readBundle, err := Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("Open() after PTR apply error = %v", err)
+	}
+	defer func() {
+		if err := readBundle.Close(); err != nil {
+			t.Fatalf("readBundle.Close() error = %v", err)
+		}
+	}()
+
+		reopenedStatus, err := readBundle.GetPTRSyncStatus(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("GetPTRSyncStatus() after reopen error = %v", err)
+		}
+		if !reopenedStatus.IsComplete {
+			t.Fatal("reopenedStatus.IsComplete = false, want true")
+		}
+		if reopenedStatus.LastSyncMappingCount == nil || *reopenedStatus.LastSyncMappingCount != 1 {
+			t.Fatalf("reopenedStatus.LastSyncMappingCount = %v, want 1", reopenedStatus.LastSyncMappingCount)
+		}
+
+	page, err := readBundle.SearchByTags(context.Background(), librarybrowse.SearchRequest{
+		Request: librarybrowse.Request{Offset: 0, Limit: 10},
+		Tags:    []string{"ptr:applied"},
+	})
+	if err != nil {
+		t.Fatalf("SearchByTags(ptr:applied) after reopen error = %v", err)
+	}
+
+	if len(page.Items) != 1 {
+		t.Fatalf("len(page.Items) = %d, want 1", len(page.Items))
+	}
+
+	if page.Items[0].FileID != 1 {
+		t.Fatalf("page.Items[0].FileID = %d, want 1", page.Items[0].FileID)
+	}
+
+	if page.HasMore {
+		t.Fatal("page.HasMore = true, want false")
+	}
+}
+
 func testPTRRemoteState(
 	t *testing.T,
 	nextUpdateDue int64,
@@ -1820,4 +1948,93 @@ func testPTRMetadataUpdate(
 		Begin:        begin,
 		End:          end,
 	}
+}
+
+func TestBundleCountPTRPendingMappings(t *testing.T) {
+	t.Run("returns zero for provisioned service with no pending rows", func(t *testing.T) {
+		dir, _ := createTestBundle(t)
+
+		bundle, err := OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		cfg := coreptrsync.DefaultConfig()
+		cfg.Enabled = true
+
+		if _, err := bundle.EnsurePTRSyncFoundation(context.Background(), cfg); err != nil {
+			t.Fatalf("EnsurePTRSyncFoundation() error = %v", err)
+		}
+
+		info, err := bundle.CountPTRPendingMappings(context.Background(), "")
+		if err != nil {
+			t.Fatalf("CountPTRPendingMappings() error = %v", err)
+		}
+
+		if info.ServiceKey != coreptrsync.DaemonServiceKeyHex() {
+			t.Fatalf("info.ServiceKey = %q, want %q", info.ServiceKey, coreptrsync.DaemonServiceKeyHex())
+		}
+
+		if info.PendingCount != 0 {
+			t.Fatalf("info.PendingCount = %d, want 0", info.PendingCount)
+		}
+	})
+
+	t.Run("returns correct count after staging pending mappings", func(t *testing.T) {
+		dir, fixture := createTestBundle(t)
+
+		bundle, err := OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		cfg := coreptrsync.DefaultConfig()
+		cfg.Enabled = true
+
+		stageResult, err := bundle.StagePTRPendingMappings(context.Background(), cfg, coreptrsync.PendingMappingsRequest{
+			Hashes: []string{fixture.hash1Hex, fixture.hash2Hex},
+			Tags:   []string{"creator:alice", "series:zeta"},
+		})
+		if err != nil {
+			t.Fatalf("StagePTRPendingMappings() error = %v", err)
+		}
+
+		info, err := bundle.CountPTRPendingMappings(context.Background(), "")
+		if err != nil {
+			t.Fatalf("CountPTRPendingMappings() error = %v", err)
+		}
+
+		if info.PendingCount != stageResult.AddedMappings {
+			t.Fatalf("info.PendingCount = %d, want %d", info.PendingCount, stageResult.AddedMappings)
+		}
+	})
+
+	t.Run("returns ErrPTRServiceNotFound for unprovisioned service key", func(t *testing.T) {
+		dir, _ := createTestBundle(t)
+
+		bundle, err := OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		_, err = bundle.CountPTRPendingMappings(context.Background(), "")
+		if !errors.Is(err, coreptrsync.ErrPTRServiceNotFound) {
+			t.Fatalf("CountPTRPendingMappings() error = %v, want ErrPTRServiceNotFound", err)
+		}
+	})
 }

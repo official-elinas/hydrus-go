@@ -36,6 +36,9 @@ var (
 	// ErrCommitPendingUnavailable reports that PTR pending-content commit cannot run
 	// because required local or remote prerequisites are unavailable.
 	ErrCommitPendingUnavailable = errors.New("ptr commit pending is unavailable")
+	// ErrPTRServiceNotFound reports that the requested PTR service key does not
+	// exist in the local service catalog.
+	ErrPTRServiceNotFound = errors.New("ptr service not found")
 )
 
 // Config describes daemon-side PTR sync settings.
@@ -86,6 +89,7 @@ type Status struct {
 	DownloadedUpdateCount    int64  `json:"downloaded_update_count"`
 	ProcessedDefinitionCount int64  `json:"processed_definition_count"`
 	ProcessedContentCount    int64  `json:"processed_content_count"`
+	LastSyncMappingCount     *int64 `json:"last_sync_mapping_count,omitempty"`
 	RetryAtMS                int64  `json:"retry_at_ms,omitempty"`
 	RetryAttempt             int64  `json:"retry_attempt,omitempty"`
 	LastError                string `json:"last_error,omitempty"`
@@ -172,6 +176,19 @@ type CommitPendingResult struct {
 	CommittedMappings int64  `json:"committed_mappings"`
 }
 
+// PendingCountRequest identifies the service whose locally pending mapping
+// count should be returned.
+type PendingCountRequest struct {
+	ServiceKey string
+}
+
+// PendingInfo reports the locally staged pending mapping count for one PTR
+// service.
+type PendingInfo struct {
+	ServiceKey    string `json:"service_key"`
+	PendingCount  int64  `json:"pending_count"`
+}
+
 // Store exposes daemon-owned PTR status and trigger operations for HTTP/UI
 // callers.
 type Store interface {
@@ -179,4 +196,5 @@ type Store interface {
 	Trigger(context.Context) (Status, error)
 	AddPendingMappings(context.Context, PendingMappingsRequest) (PendingMappingsResult, error)
 	CommitPending(context.Context, CommitPendingRequest) (CommitPendingResult, error)
+	PendingMappingCount(context.Context, PendingCountRequest) (PendingInfo, error)
 }
