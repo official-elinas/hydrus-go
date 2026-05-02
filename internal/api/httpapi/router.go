@@ -74,6 +74,7 @@ func NewHandler(
 		server.get("/get_files/file_metadata", server.handleGetFileMetadata),
 	)
 	mux.Handle("/v1/library/recent", server.get("/v1/library/recent", server.handleListRecentFiles))
+	mux.Handle("/v1/library/search", server.get("/v1/library/search", server.handleSearchFiles))
 	mux.Handle("/v1/files/content", server.get("/v1/files/content", server.handleGetFileContent))
 	mux.Handle("/v1/files/thumbnail", server.get("/v1/files/thumbnail", server.handleGetFileThumbnail))
 	mux.Handle("/v1/files/trash", server.post("/v1/files/trash", server.handleTrashFile))
@@ -82,6 +83,7 @@ func NewHandler(
 	mux.Handle("/add_tags/add_tags", server.post("/add_tags/add_tags", server.handlePostAddTags))
 	mux.Handle("/manage_database/integrity_check", server.post("/manage_database/integrity_check", server.handlePostDatabaseIntegrityCheck))
 	mux.Handle("/manage_services/commit_pending", server.post("/manage_services/commit_pending", server.handlePostCommitPending))
+	mux.Handle("/manage_services/pending_counts", server.get("/manage_services/pending_counts", server.handleGetPendingCounts))
 	mux.Handle("/service/ptr/status", server.get("/service/ptr/status", server.handleGetPTRStatus))
 	mux.Handle("/service/ptr/sync", server.post("/service/ptr/sync", server.handlePostPTRSync))
 

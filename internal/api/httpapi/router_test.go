@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -304,6 +305,7 @@ func TestProtectedEndpoints(t *testing.T) {
 				DownloadedUpdateCount:    11,
 				ProcessedDefinitionCount: 5,
 				ProcessedContentCount:    6,
+				LastSyncMappingCount:     func() *int64 { v := int64(99); return &v }(),
 				UpdatedAtMS:              1700000000123,
 			},
 		}
@@ -342,6 +344,10 @@ func TestProtectedEndpoints(t *testing.T) {
 		if ptr["is_complete"] != true {
 			t.Fatalf("is_complete = %v, want true", ptr["is_complete"])
 		}
+
+		if got, ok := ptr["last_sync_mapping_count"].(float64); !ok || int64(got) != 99 {
+			t.Fatalf("last_sync_mapping_count = %v, want 99", ptr["last_sync_mapping_count"])
+		}
 	})
 
 	t.Run("ptr status returns not implemented without a store", func(t *testing.T) {
@@ -369,16 +375,18 @@ func TestProtectedEndpoints(t *testing.T) {
 		}
 	})
 
-	t.Run("ptr trigger returns immediate daemon-owned status", func(t *testing.T) {
-		ptrStore := stubPTRStore{
-			triggerStatus: coreptrsync.Status{
-				Enabled:     true,
-				Configured:  true,
-				ServiceName: "public tag repository",
-				Phase:       coreptrsync.PhaseSyncing,
-				IsRunning:   true,
-			},
-		}
+		t.Run("ptr trigger returns immediate daemon-owned status", func(t *testing.T) {
+			mappingCount := int64(7)
+			ptrStore := stubPTRStore{
+				triggerStatus: coreptrsync.Status{
+					Enabled:              true,
+					Configured:           true,
+					ServiceName:          "public tag repository",
+					Phase:                coreptrsync.PhaseSyncing,
+					IsRunning:            true,
+					LastSyncMappingCount: &mappingCount,
+				},
+			}
 
 		handler := newHandlerWithPTRStore(t, ptrStore)
 		req := httptest.NewRequest(http.MethodPost, "/service/ptr/sync", nil)
@@ -403,10 +411,14 @@ func TestProtectedEndpoints(t *testing.T) {
 			t.Fatalf("phase = %v, want %s", ptr["phase"], coreptrsync.PhaseSyncing)
 		}
 
-		if ptr["is_running"] != true {
-			t.Fatalf("is_running = %v, want true", ptr["is_running"])
-		}
-	})
+			if ptr["is_running"] != true {
+				t.Fatalf("is_running = %v, want true", ptr["is_running"])
+			}
+
+			if got, ok := ptr["last_sync_mapping_count"].(float64); !ok || int64(got) != 7 {
+				t.Fatalf("last_sync_mapping_count = %v, want 7", ptr["last_sync_mapping_count"])
+			}
+		})
 
 	t.Run("ptr trigger returns status payload when disabled", func(t *testing.T) {
 		ptrStore := stubPTRStore{
@@ -1340,6 +1352,133 @@ func TestThinClientEndpoints(t *testing.T) {
 			"/v1/files/trash",
 			strings.NewReader(`{"file_id":`),
 		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+		}
+	})
+}
+
+func TestSearchFilesEndpoint(t *testing.T) {
+	t.Run("returns not implemented without browse store", func(t *testing.T) {
+		handler := newTestHandler(t)
+		req := httptest.NewRequest(http.MethodGet, "/v1/library/search?tags=character%3Asamus", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("a", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotImplemented)
+		}
+	})
+
+	t.Run("returns empty page when no tags match", func(t *testing.T) {
+		store := &fakeMetadataStore{
+			searchByTagsHandle: func(req librarybrowse.SearchRequest) (librarybrowse.Page, error) {
+				return librarybrowse.Page{Items: []librarybrowse.Item{}, HasMore: false}, nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, services.DefaultProvider(), store, false)
+		req := httptest.NewRequest(http.MethodGet, "/v1/library/search?tags=character%3Asamus&offset=0&limit=10", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		items, ok := payload["items"].([]any)
+		if !ok || len(items) != 0 {
+			t.Fatalf("items = %v, want empty slice", payload["items"])
+		}
+
+		if payload["has_more"] != false {
+			t.Fatalf("has_more = %v, want false", payload["has_more"])
+		}
+	})
+
+	t.Run("passes tags and pagination to store and returns items", func(t *testing.T) {
+		store := &fakeMetadataStore{
+			searchByTagsHandle: func(req librarybrowse.SearchRequest) (librarybrowse.Page, error) {
+				if len(req.Tags) != 2 {
+					return librarybrowse.Page{}, fmt.Errorf("expected 2 tags, got %d", len(req.Tags))
+				}
+
+				if req.Offset != 0 || req.Limit != 5 {
+					return librarybrowse.Page{}, fmt.Errorf("unexpected offset/limit %d/%d", req.Offset, req.Limit)
+				}
+
+				w := int64(100)
+				h := int64(200)
+				return librarybrowse.Page{
+					Items: []librarybrowse.Item{
+						{
+							FileID:       42,
+							Hash:         strings.Repeat("c", 64),
+							MIME:         "image/jpeg",
+							Width:        &w,
+							Height:       &h,
+							HasThumbnail: true,
+						},
+					},
+					HasMore: false,
+				}, nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, services.DefaultProvider(), store, false)
+		req := httptest.NewRequest(
+			http.MethodGet,
+			"/v1/library/search?tags=character%3Asamus&tags=series%3Ametroid&offset=0&limit=5",
+			nil,
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		items, ok := payload["items"].([]any)
+		if !ok || len(items) != 1 {
+			t.Fatalf("items = %v, want 1 item", payload["items"])
+		}
+
+		item := items[0].(map[string]any)
+		if item["file_id"] != float64(42) {
+			t.Fatalf("file_id = %v, want 42", item["file_id"])
+		}
+
+		if item["content_url"] != "/v1/files/content?file_id=42" {
+			t.Fatalf("content_url = %v, want /v1/files/content?file_id=42", item["content_url"])
+		}
+
+		tags, ok := payload["tags"].([]any)
+		if !ok || len(tags) != 2 {
+			t.Fatalf("tags = %v, want 2 entries", payload["tags"])
+		}
+	})
+
+	t.Run("rejects invalid limit", func(t *testing.T) {
+		store := &fakeMetadataStore{}
+		handler := newHandlerWithDeps(t, services.DefaultProvider(), store, false)
+		req := httptest.NewRequest(http.MethodGet, "/v1/library/search?tags=foo&limit=0", nil)
 		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
 		rr := httptest.NewRecorder()
 
@@ -2422,6 +2561,13 @@ func (s stubPTRStore) CommitPending(
 	return s.commitResult, s.commitErr
 }
 
+func (s stubPTRStore) PendingMappingCount(
+	_ context.Context,
+	_ coreptrsync.PendingCountRequest,
+) (coreptrsync.PendingInfo, error) {
+	return coreptrsync.PendingInfo{}, nil
+}
+
 type fakeMetadataStore struct {
 	rows                   []filemetadata.Row
 	err                    error
@@ -2430,6 +2576,7 @@ type fakeMetadataStore struct {
 	suggestTagsHandle      func(string, int) ([]string, error)
 	integrityHandle        func() (filemetadata.IntegrityCheckResult, error)
 	listRecentHandle       func(librarybrowse.Request) (librarybrowse.Page, error)
+	searchByTagsHandle     func(librarybrowse.SearchRequest) (librarybrowse.Page, error)
 	resolveContentHandle   func(int64) (fileassets.Descriptor, error)
 	resolveThumbnailHandle func(int64) (fileassets.Descriptor, error)
 	importLocalHandle      func(fileimport.Request) (fileimport.Result, error)
@@ -2478,6 +2625,17 @@ func (s *fakeMetadataStore) ListRecent(
 ) (librarybrowse.Page, error) {
 	if s.listRecentHandle != nil {
 		return s.listRecentHandle(request)
+	}
+
+	return librarybrowse.Page{}, nil
+}
+
+func (s *fakeMetadataStore) SearchByTags(
+	_ context.Context,
+	request librarybrowse.SearchRequest,
+) (librarybrowse.Page, error) {
+	if s.searchByTagsHandle != nil {
+		return s.searchByTagsHandle(request)
 	}
 
 	return librarybrowse.Page{}, nil
