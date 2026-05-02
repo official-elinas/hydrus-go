@@ -564,6 +564,11 @@ func TestManagerSyncOnce(t *testing.T) {
 			t.Fatal("status.IsComplete = false, want true")
 		}
 
+		artifactPath, err := resolvePTRUpdateArtifactPath(writeBundle, updateHash)
+		if err != nil {
+			t.Fatalf("resolvePTRUpdateArtifactPath() error = %v", err)
+		}
+
 		managedLayout, err := writeBundle.ManagedLayout(context.Background())
 		if err != nil {
 			t.Fatalf("ManagedLayout() error = %v", err)
@@ -574,13 +579,8 @@ func TestManagerSyncOnce(t *testing.T) {
 			t.Fatalf("ResolveFilePath() error = %v", err)
 		}
 
-		if _, err := os.Stat(managedPath); !os.IsNotExist(err) {
-			t.Fatalf("managedPath stat err = %v, want not exists", err)
-		}
-
-		artifactPath, err := resolvePTRUpdateArtifactPath(writeBundle, updateHash)
-		if err != nil {
-			t.Fatalf("resolvePTRUpdateArtifactPath() error = %v", err)
+		if artifactPath != managedPath {
+			t.Fatalf("artifactPath = %q, want managedPath %q", artifactPath, managedPath)
 		}
 
 		artifactBytes, err := os.ReadFile(artifactPath)
@@ -1557,6 +1557,11 @@ func openSQLiteForPTRManagerTest(t *testing.T, path string) *sql.DB {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatalf("sql.Open(%q) error = %v", path, err)
+	}
+
+	if _, err := db.Exec(`PRAGMA synchronous = OFF;`); err != nil {
+		_ = db.Close()
+		t.Fatalf("Exec(PRAGMA synchronous = OFF) error = %v", err)
 	}
 
 	return db

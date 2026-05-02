@@ -271,6 +271,27 @@ func (m *Manager) CommitPending(
 	return result, nil
 }
 
+// PendingMappingCount returns the locally staged pending mapping count for the
+// requested PTR service.
+func (m *Manager) PendingMappingCount(
+	ctx context.Context,
+	request coreptrsync.PendingCountRequest,
+) (coreptrsync.PendingInfo, error) {
+	if m == nil {
+		return coreptrsync.PendingInfo{}, coreptrsync.ErrCommitPendingUnavailable
+	}
+
+	if !m.cfg.Enabled {
+		return coreptrsync.PendingInfo{}, coreptrsync.ErrSyncDisabled
+	}
+
+	if m.unavailableReason != "" || m.readBundle == nil {
+		return coreptrsync.PendingInfo{}, coreptrsync.ErrCommitPendingUnavailable
+	}
+
+	return m.readBundle.CountPTRPendingMappings(ctx, request.ServiceKey)
+}
+
 // Shutdown stops any in-flight daemon-owned background PTR sync and waits for it
 // to release its lease before returning.
 func (m *Manager) Shutdown(ctx context.Context) error {
@@ -989,14 +1010,6 @@ func maxInt64(left int64, right int64) int64 {
 	return right
 }
 
-func repositoryUpdatesArtifactsRoot(bundle *hydrusdb.Bundle) string {
-	if bundle == nil {
-		return ""
-	}
-
-	return filepath.Join(filepath.Dir(bundle.MainDBPath()), "repository_updates")
-}
-
 func repositoryUpdatesServiceKeyHex() string {
 	return hex.EncodeToString([]byte("repository updates"))
 }
@@ -1020,11 +1033,17 @@ func resolvePTRUpdateArtifactPath(bundle *hydrusdb.Bundle, hashHex string) (stri
 		return "", err
 	}
 
-	return filepath.Join(
-		repositoryUpdatesArtifactsRoot(bundle),
-		normalizedHash[:2],
-		normalizedHash,
-	), nil
+	layout, err := bundle.ManagedLayout(context.Background())
+	if err != nil {
+		return "", fmt.Errorf("load managed layout for PTR update artifact: %w", err)
+	}
+
+	artifactPath, err := layout.ResolveFilePath(normalizedHash, "")
+	if err != nil {
+		return "", fmt.Errorf("resolve managed PTR update artifact path: %w", err)
+	}
+
+	return artifactPath, nil
 }
 
 func storePTRUpdateArtifact(
