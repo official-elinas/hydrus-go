@@ -812,14 +812,17 @@ func (m *Manager) applyDownloadedPTRUpdates(ctx context.Context, runToken string
 			continue
 		}
 
-		artifactPath, err := resolvePTRUpdateArtifactPath(m.writeBundle, item.HashHex)
+		updateHash, err := hex.DecodeString(item.HashHex)
 		if err != nil {
-			return err
+			return fmt.Errorf("decode PTR update hash %s: %w", item.HashHex, err)
 		}
 
-		body, err := os.ReadFile(artifactPath)
+		body, _, ok, err := loadStoredPTRUpdateArtifact(m.writeBundle, updateHash)
 		if err != nil {
-			return fmt.Errorf("read PTR update artifact %s: %w", item.HashHex, err)
+			return fmt.Errorf("load PTR update artifact %s: %w", item.HashHex, err)
+		}
+		if !ok {
+			return fmt.Errorf("PTR update artifact %s is not available in managed storage", item.HashHex)
 		}
 
 		switch item.ContentType {
@@ -1046,6 +1049,24 @@ func resolvePTRUpdateArtifactPath(bundle *hydrusdb.Bundle, hashHex string) (stri
 	return artifactPath, nil
 }
 
+func resolveLegacyPTRUpdateArtifactPath(bundle *hydrusdb.Bundle, hashHex string) (string, error) {
+	if bundle == nil {
+		return "", fmt.Errorf("hydrus bundle is required")
+	}
+
+	normalizedHash, err := clientfiles.NormalizeSHA256Hex(hashHex)
+	if err != nil {
+		return "", err
+	}
+
+	return filepath.Join(
+		filepath.Dir(bundle.MainDBPath()),
+		"repository_updates",
+		normalizedHash[:2],
+		normalizedHash,
+	), nil
+}
+
 func storePTRUpdateArtifact(
 	bundle *hydrusdb.Bundle,
 	hashHex string,
@@ -1119,7 +1140,40 @@ func loadStoredPTRUpdateArtifact(bundle *hydrusdb.Bundle, updateHash []byte) ([]
 		return nil, 0, false, err
 	}
 
-	body, err := os.ReadFile(artifactPath)
+	body, mime, ok, err := readPTRUpdateArtifactFile(artifactPath, updateHash)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if ok {
+		return body, mime, true, nil
+	}
+
+	legacyPath, err := resolveLegacyPTRUpdateArtifactPath(bundle, hashHex)
+	if err != nil {
+		return nil, 0, false, err
+	}
+
+	body, mime, ok, err = readPTRUpdateArtifactFile(legacyPath, updateHash)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	if !ok {
+		return nil, 0, false, nil
+	}
+
+	if _, _, err := storePTRUpdateArtifact(bundle, hashHex, body); err != nil {
+		return nil, 0, false, fmt.Errorf("migrate legacy PTR update artifact: %w", err)
+	}
+
+	if err := os.Remove(legacyPath); err != nil && !os.IsNotExist(err) {
+		return nil, 0, false, fmt.Errorf("remove legacy PTR update artifact: %w", err)
+	}
+
+	return body, mime, true, nil
+}
+
+func readPTRUpdateArtifactFile(path string, updateHash []byte) ([]byte, int, bool, error) {
+	body, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, 0, false, nil

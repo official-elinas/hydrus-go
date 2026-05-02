@@ -690,6 +690,107 @@ func TestManagerSyncOnce(t *testing.T) {
 		}
 	})
 
+	t.Run("migrates a legacy repository_updates artifact into managed storage without re-downloading it", func(t *testing.T) {
+		dir := createPTRManagerTestBundle(t)
+
+		readBundle, err := hydrusdb.Open(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.Open() error = %v", err)
+		}
+		defer func() {
+			if err := readBundle.Close(); err != nil {
+				t.Fatalf("readBundle.Close() error = %v", err)
+			}
+		}()
+
+		writeBundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := writeBundle.Close(); err != nil {
+				t.Fatalf("writeBundle.Close() error = %v", err)
+			}
+		}()
+
+		updateBody := hydrusNetworkBytes(t, []any{hydrusSerialisableTypeContentUpdate, 1, []any{}})
+		updateHash := sha256Hex(updateBody)
+
+		legacyPath, err := resolveLegacyPTRUpdateArtifactPath(writeBundle, updateHash)
+		if err != nil {
+			t.Fatalf("resolveLegacyPTRUpdateArtifactPath() error = %v", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+			t.Fatalf("MkdirAll(legacy path) error = %v", err)
+		}
+		if err := os.WriteFile(legacyPath, updateBody, 0o644); err != nil {
+			t.Fatalf("WriteFile(legacyPath) error = %v", err)
+		}
+
+		var updateCalls atomic.Int32
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/session_key":
+				http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "manager-session", Path: "/"})
+				w.WriteHeader(http.StatusOK)
+			case "/account":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "account", metaValue: metaJSON([]any{strings.Repeat("aa", 32), unsupportedSerialisable(102), int64(1699990000), nil, serialisableDictionaryString(t, hydrusDictEntry{key: "banned_info", metaValue: metaJSON(nil)}, hydrusDictEntry{key: "bandwidth_tracker", metaValue: metaHydrus(unsupportedSerialisable(39))}, hydrusDictEntry{key: "message", metaValue: metaJSON("shared read-only")}, hydrusDictEntry{key: "message_created", metaValue: metaJSON(int64(1699990100))})})}))
+			case "/options":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "service_options", metaValue: metaHydrus(serialisableDictionary(hydrusDictEntry{key: "update_period", metaValue: metaJSON(int64(3600))}, hydrusDictEntry{key: "nullification_period", metaValue: metaJSON(int64(86400))}))}))
+			case "/tag_filter":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "tag_filter", metaValue: metaHydrus(serialisableTagFilter(map[string]int{":": 1}))}))
+			case "/metadata":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "metadata_slice", metaValue: metaHydrus(serialisableMetadata(1700000200, metadataRow{updateIndex: 0, updateHashes: []string{updateHash}, begin: 10, end: 20}))}))
+			case "/update":
+				updateCalls.Add(1)
+				t.Fatalf("/update should not be called when the legacy PTR artifact is already stored locally")
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		manager, err := NewManager(context.Background(), nil, testPTRConfigFromServer(t, server.URL, defaultManagerAccessKey()), readBundle, writeBundle)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
+		}
+
+		status, err := manager.SyncOnce(context.Background())
+		if err != nil {
+			t.Fatalf("SyncOnce() error = %v", err)
+		}
+
+		if got := updateCalls.Load(); got != 0 {
+			t.Fatalf("update call count = %d, want 0", got)
+		}
+
+		managedLayout, err := writeBundle.ManagedLayout(context.Background())
+		if err != nil {
+			t.Fatalf("ManagedLayout() error = %v", err)
+		}
+
+		managedPath, err := managedLayout.ResolveFilePath(updateHash, "")
+		if err != nil {
+			t.Fatalf("ResolveFilePath() error = %v", err)
+		}
+
+		managedBytes, err := os.ReadFile(managedPath)
+		if err != nil {
+			t.Fatalf("ReadFile(managedPath) error = %v", err)
+		}
+		if string(managedBytes) != string(updateBody) {
+			t.Fatal("managed update bytes mismatch after legacy migration")
+		}
+
+		if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+			t.Fatalf("legacyPath stat err = %v, want not exists", err)
+		}
+
+		if status.DownloadedUpdateCount != 1 {
+			t.Fatalf("status.DownloadedUpdateCount = %d, want 1", status.DownloadedUpdateCount)
+		}
+	})
+
 	t.Run("registers multiple pending updates in one successful run", func(t *testing.T) {
 		dir := createPTRManagerTestBundle(t)
 
