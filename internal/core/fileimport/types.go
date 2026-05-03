@@ -23,12 +23,21 @@ type UploadRequest struct {
 	Filename            string
 	LocalFileServiceKey string
 	FileModifiedAtMS    *int64
+	KnownURLs           []string
+}
+
+// URLRequest describes one daemon-owned direct URL import request.
+type URLRequest struct {
+	URL                 string `json:"url"`
+	ReferralURL         string `json:"referral_url,omitempty"`
+	LocalFileServiceKey string `json:"local_file_service_key,omitempty"`
 }
 
 // Store imports files into the daemon-managed library.
 type Store interface {
 	ImportLocalPath(context.Context, Request) (Result, error)
 	ImportUpload(context.Context, UploadRequest) (Result, error)
+	ImportURL(context.Context, URLRequest) (Result, error)
 }
 
 // RequestError reports an invalid import request.

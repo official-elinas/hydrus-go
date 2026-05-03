@@ -292,6 +292,175 @@ func TestManagerSyncOnce(t *testing.T) {
 		}
 	})
 
+	t.Run("trigger does not overwrite retry wakeup with next-update scheduling", func(t *testing.T) {
+		dir := createPTRManagerTestBundle(t)
+
+		readBundle, err := hydrusdb.Open(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.Open() error = %v", err)
+		}
+		defer func() {
+			if err := readBundle.Close(); err != nil {
+				t.Fatalf("readBundle.Close() error = %v", err)
+			}
+		}()
+
+		writeBundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := writeBundle.Close(); err != nil {
+				t.Fatalf("writeBundle.Close() error = %v", err)
+			}
+		}()
+
+		definitionsBody := hydrusNetworkBytes(t, []any{
+			hydrusSerialisableTypeDefinitionsUpdate,
+			1,
+			[]any{[]any{hydrusDefinitionsTypeTags, []any{[]any{int64(201), "creator:alice"}}}},
+		})
+		busyBody := hydrusNetworkBytes(t, []any{hydrusSerialisableTypeContentUpdate, 1, []any{}})
+		definitionsHash := sha256Hex(definitionsBody)
+		busyHash := sha256Hex(busyBody)
+		nextUpdateDue := time.Now().Add(1 * time.Hour).Unix()
+
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/session_key":
+				http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "manager-session", Path: "/"})
+				w.WriteHeader(http.StatusOK)
+			case "/account":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "account", metaValue: metaJSON([]any{strings.Repeat("aa", 32), unsupportedSerialisable(102), int64(1699990000), nil, serialisableDictionaryString(t, hydrusDictEntry{key: "banned_info", metaValue: metaJSON(nil)}, hydrusDictEntry{key: "bandwidth_tracker", metaValue: metaHydrus(unsupportedSerialisable(39))}, hydrusDictEntry{key: "message", metaValue: metaJSON("shared read-only")}, hydrusDictEntry{key: "message_created", metaValue: metaJSON(int64(1699990100))})})}))
+			case "/options":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "service_options", metaValue: metaHydrus(serialisableDictionary(hydrusDictEntry{key: "update_period", metaValue: metaJSON(int64(3600))}, hydrusDictEntry{key: "nullification_period", metaValue: metaJSON(int64(86400))}))}))
+			case "/tag_filter":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "tag_filter", metaValue: metaHydrus(serialisableTagFilter(map[string]int{":": 1}))}))
+			case "/metadata":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "metadata_slice", metaValue: metaHydrus(serialisableMetadata(nextUpdateDue, metadataRow{updateIndex: 0, updateHashes: []string{definitionsHash}, begin: 10, end: 20}, metadataRow{updateIndex: 1, updateHashes: []string{busyHash}, begin: 21, end: 30}))}))
+			case "/update":
+				switch r.URL.Query().Get("update_hash") {
+				case definitionsHash:
+					_, _ = w.Write(definitionsBody)
+				case busyHash:
+					time.Sleep(50 * time.Millisecond)
+					w.Header().Set("Retry-After", "120")
+					http.Error(
+						w,
+						`{"error":"This server is busy, please try again later.","exception_type":"ServerBusyException","status_code":503}`,
+						http.StatusServiceUnavailable,
+					)
+				default:
+					t.Fatalf("unexpected update_hash %q", r.URL.Query().Get("update_hash"))
+				}
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		manager, err := NewManager(context.Background(), nil, testPTRConfigFromServer(t, server.URL, defaultManagerAccessKey()), readBundle, writeBundle)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
+		}
+
+		triggered, err := manager.Trigger(context.Background())
+		if err != nil {
+			t.Fatalf("Trigger() error = %v", err)
+		}
+		if triggered.Phase != coreptrsync.PhaseSyncing {
+			t.Fatalf("triggered.Phase = %q, want %q", triggered.Phase, coreptrsync.PhaseSyncing)
+		}
+
+		retrying := waitForPTRStatus(t, manager, coreptrsync.PhaseRetrying, false)
+		if retrying.ProcessedDefinitionCount != 1 {
+			t.Fatalf("retrying.ProcessedDefinitionCount = %d, want 1", retrying.ProcessedDefinitionCount)
+		}
+
+		manager.wakeupMu.Lock()
+		defer manager.wakeupMu.Unlock()
+		if manager.wakeupID != 1 {
+			t.Fatalf("manager.wakeupID = %d, want 1 retry wakeup without next-update overwrite", manager.wakeupID)
+		}
+	})
+
+	t.Run("persists transient update transport failures as retrying", func(t *testing.T) {
+		dir := createPTRManagerTestBundle(t)
+		updateBody := hydrusNetworkBytes(t, []any{hydrusSerialisableTypeDefinitionsUpdate, 1, []any{}})
+		updateHash := sha256Hex(updateBody)
+
+		readBundle, err := hydrusdb.Open(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.Open() error = %v", err)
+		}
+		defer func() {
+			if err := readBundle.Close(); err != nil {
+				t.Fatalf("readBundle.Close() error = %v", err)
+			}
+		}()
+
+		writeBundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := writeBundle.Close(); err != nil {
+				t.Fatalf("writeBundle.Close() error = %v", err)
+			}
+		}()
+
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/session_key":
+				http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "manager-session", Path: "/"})
+				w.WriteHeader(http.StatusOK)
+			case "/account":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "account", metaValue: metaJSON([]any{strings.Repeat("aa", 32), unsupportedSerialisable(102), int64(1699990000), nil, serialisableDictionaryString(t, hydrusDictEntry{key: "banned_info", metaValue: metaJSON(nil)}, hydrusDictEntry{key: "bandwidth_tracker", metaValue: metaHydrus(unsupportedSerialisable(39))}, hydrusDictEntry{key: "message", metaValue: metaJSON("shared read-only")}, hydrusDictEntry{key: "message_created", metaValue: metaJSON(int64(1699990100))})})}))
+			case "/options":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "service_options", metaValue: metaHydrus(serialisableDictionary(hydrusDictEntry{key: "update_period", metaValue: metaJSON(int64(3600))}, hydrusDictEntry{key: "nullification_period", metaValue: metaJSON(int64(86400))}))}))
+			case "/tag_filter":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "tag_filter", metaValue: metaHydrus(serialisableTagFilter(map[string]int{":": 1}))}))
+			case "/metadata":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "metadata_slice", metaValue: metaHydrus(serialisableMetadata(1700000200, metadataRow{updateIndex: 0, updateHashes: []string{updateHash}, begin: 10, end: 20}))}))
+			case "/update":
+				hj, ok := w.(http.Hijacker)
+				if !ok {
+					t.Fatal("response writer does not support hijacking")
+				}
+				conn, _, err := hj.Hijack()
+				if err != nil {
+					t.Fatalf("Hijack() error = %v", err)
+				}
+				_ = conn.Close()
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		manager, err := NewManager(context.Background(), nil, testPTRConfigFromServer(t, server.URL, defaultManagerAccessKey()), readBundle, writeBundle)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
+		}
+
+		status, err := manager.SyncOnce(context.Background())
+		if err != nil {
+			t.Fatalf("SyncOnce() error = %v, want nil for retrying state", err)
+		}
+		if status.Phase != coreptrsync.PhaseRetrying {
+			t.Fatalf("status.Phase = %q, want %q", status.Phase, coreptrsync.PhaseRetrying)
+		}
+		if status.LastError != "" {
+			t.Fatalf("status.LastError = %q, want empty for deferred retry", status.LastError)
+		}
+		if status.RetryAttempt != 1 {
+			t.Fatalf("status.RetryAttempt = %d, want 1", status.RetryAttempt)
+		}
+		if status.RetryAtMS <= time.Now().UTC().UnixMilli() {
+			t.Fatalf("status.RetryAtMS = %d, want future retry timestamp", status.RetryAtMS)
+		}
+	})
+
 	t.Run("returns a server issue after too many busy retries", func(t *testing.T) {
 		dir := createPTRManagerTestBundle(t)
 
@@ -560,36 +729,48 @@ func TestManagerSyncOnce(t *testing.T) {
 			t.Fatalf("status.DownloadedUpdateCount = %d, want 1", status.DownloadedUpdateCount)
 		}
 
+		if status.DownloadedUpdateBytes != int64(len(updateBody)) {
+			t.Fatalf("status.DownloadedUpdateBytes = %d, want %d", status.DownloadedUpdateBytes, len(updateBody))
+		}
+
+		if status.CurrentRunDownloadedBytes != int64(len(updateBody)) {
+			t.Fatalf("status.CurrentRunDownloadedBytes = %d, want %d", status.CurrentRunDownloadedBytes, len(updateBody))
+		}
+
+		if status.CurrentRunDownloadMS <= 0 {
+			t.Fatalf("status.CurrentRunDownloadMS = %d, want > 0", status.CurrentRunDownloadMS)
+		}
+
+		if status.CurrentRunBytesPerSecond <= 0 {
+			t.Fatalf("status.CurrentRunBytesPerSecond = %d, want > 0", status.CurrentRunBytesPerSecond)
+		}
+
 		if !status.IsComplete {
 			t.Fatal("status.IsComplete = false, want true")
-		}
-
-		managedLayout, err := writeBundle.ManagedLayout(context.Background())
-		if err != nil {
-			t.Fatalf("ManagedLayout() error = %v", err)
-		}
-
-		managedPath, err := managedLayout.ResolveFilePath(updateHash, "")
-		if err != nil {
-			t.Fatalf("ResolveFilePath() error = %v", err)
-		}
-
-		if _, err := os.Stat(managedPath); !os.IsNotExist(err) {
-			t.Fatalf("managedPath stat err = %v, want not exists", err)
 		}
 
 		artifactPath, err := resolvePTRUpdateArtifactPath(writeBundle, updateHash)
 		if err != nil {
 			t.Fatalf("resolvePTRUpdateArtifactPath() error = %v", err)
 		}
-
-		artifactBytes, err := os.ReadFile(artifactPath)
-		if err != nil {
-			t.Fatalf("ReadFile(artifactPath) error = %v", err)
+		if _, err := os.Stat(artifactPath); !os.IsNotExist(err) {
+			t.Fatalf("artifactPath stat err = %v, want not exists", err)
 		}
 
-		if string(artifactBytes) != string(updateBody) {
-			t.Fatal("PTR update artifact bytes mismatch")
+		serviceID := selectPTRManagerTestInt64(
+			t,
+			filepath.Join(dir, "client.db"),
+			`SELECT service_id FROM services WHERE service_key = ?`,
+			[]byte(coreptrsync.DaemonServiceKeyBytes()),
+		)
+		repositoryProcessedTableName := fmt.Sprintf("repository_updates_processed_%d", serviceID)
+		if got := selectPTRManagerTestInt64(
+			t,
+			filepath.Join(dir, "client.db"),
+			fmt.Sprintf(`SELECT length(body) FROM %s WHERE content_type = ?`, repositoryProcessedTableName),
+			hydrusdb.PTRContentTypeMappings,
+		); got != int64(len(updateBody)) {
+			t.Fatalf("stored sqlite body length = %d, want %d", got, len(updateBody))
 		}
 
 		serviceKey := hex.EncodeToString([]byte("repository updates"))
@@ -690,6 +871,247 @@ func TestManagerSyncOnce(t *testing.T) {
 		}
 	})
 
+	t.Run("reuses a stored sqlite pending update artifact without re-downloading it", func(t *testing.T) {
+		dir := createPTRManagerTestBundle(t)
+
+		readBundle, err := hydrusdb.Open(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.Open() error = %v", err)
+		}
+		defer func() {
+			if err := readBundle.Close(); err != nil {
+				t.Fatalf("readBundle.Close() error = %v", err)
+			}
+		}()
+
+		writeBundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := writeBundle.Close(); err != nil {
+				t.Fatalf("writeBundle.Close() error = %v", err)
+			}
+		}()
+
+		updateBody := hydrusNetworkBytes(t, []any{hydrusSerialisableTypeContentUpdate, 1, []any{}})
+		updateHash := sha256Hex(updateBody)
+
+		cfg := coreptrsync.DefaultConfig()
+		cfg.Enabled = true
+
+		lease, err := writeBundle.BeginPTRSync(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("BeginPTRSync() error = %v", err)
+		}
+		updateHashBytes, err := hex.DecodeString(updateHash)
+		if err != nil {
+			t.Fatalf("hex.DecodeString(updateHash) error = %v", err)
+		}
+		remoteState := coreptrsync.RemoteState{
+			Account: coreptrsync.AccountSnapshot{
+				AccountKey:     mustDecodeHexString(t, strings.Repeat("aa", 32)),
+				Created:        1699990000,
+				Message:        "shared read-only",
+				MessageCreated: 1699990100,
+			},
+			ServiceOptions: coreptrsync.ServiceOptions{
+				UpdatePeriod:        3600,
+				NullificationPeriod: 86400,
+			},
+			TagFilter: coreptrsync.TagFilterSnapshot{Rules: map[string]int{":": 1, "creator:": 0}},
+			Metadata: coreptrsync.MetadataSlice{
+				Updates: []coreptrsync.MetadataUpdate{{
+					UpdateIndex:  0,
+					UpdateHashes: [][]byte{updateHashBytes},
+					Begin:        10,
+					End:          20,
+				}},
+				NextUpdateDue: 1700000200,
+			},
+		}
+		if _, err := writeBundle.PersistPTRSyncMetadata(context.Background(), cfg, lease.RunToken, remoteState, true); err != nil {
+			t.Fatalf("PersistPTRSyncMetadata() error = %v", err)
+		}
+		if _, err := writeBundle.FinalizePTRDownloadedUpdatesBatch(context.Background(), cfg, lease.RunToken, []hydrusdb.PTRDownloadedUpdateBatchItem{{
+			HashHex: updateHash,
+			Body:    updateBody,
+			PreparedImport: hydrusdb.PreparedLocalImport{
+				HashHex:             updateHash,
+				Size:                int64(len(updateBody)),
+				Mime:                29,
+				ImportedAtMS:        1111,
+				LocalFileServiceKey: repositoryUpdatesServiceKeyHex(),
+			},
+		}}); err != nil {
+			t.Fatalf("FinalizePTRDownloadedUpdatesBatch() error = %v", err)
+		}
+		if _, err := writeBundle.CompletePTRSyncSuccess(context.Background(), cfg, lease.RunToken); err != nil {
+			t.Fatalf("CompletePTRSyncSuccess() error = %v", err)
+		}
+
+		mainDB := openSQLiteForPTRManagerTest(t, filepath.Join(dir, "client.db"))
+		mustExecPTRManagerTest(
+			t,
+			mainDB,
+			`UPDATE main.ptr_sync_state SET metadata_slice = 0, phase = ?, is_running = 0, run_token = NULL WHERE singleton = ?`,
+			coreptrsync.PhaseIdle,
+			1,
+		)
+		if err := mainDB.Close(); err != nil {
+			t.Fatalf("mainDB.Close() error = %v", err)
+		}
+
+		var updateCalls atomic.Int32
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/session_key":
+				http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "manager-session", Path: "/"})
+				w.WriteHeader(http.StatusOK)
+			case "/account":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "account", metaValue: metaJSON([]any{strings.Repeat("aa", 32), unsupportedSerialisable(102), int64(1699990000), nil, serialisableDictionaryString(t, hydrusDictEntry{key: "banned_info", metaValue: metaJSON(nil)}, hydrusDictEntry{key: "bandwidth_tracker", metaValue: metaHydrus(unsupportedSerialisable(39))}, hydrusDictEntry{key: "message", metaValue: metaJSON("shared read-only")}, hydrusDictEntry{key: "message_created", metaValue: metaJSON(int64(1699990100))})})}))
+			case "/options":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "service_options", metaValue: metaHydrus(serialisableDictionary(hydrusDictEntry{key: "update_period", metaValue: metaJSON(int64(3600))}, hydrusDictEntry{key: "nullification_period", metaValue: metaJSON(int64(86400))}))}))
+			case "/tag_filter":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "tag_filter", metaValue: metaHydrus(serialisableTagFilter(map[string]int{":": 1}))}))
+			case "/metadata":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "metadata_slice", metaValue: metaHydrus(serialisableMetadata(1700000200, metadataRow{updateIndex: 0, updateHashes: []string{updateHash}, begin: 10, end: 20}))}))
+			case "/update":
+				updateCalls.Add(1)
+				t.Fatalf("/update should not be called when the PTR artifact body is already stored in sqlite")
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		manager, err := NewManager(context.Background(), nil, testPTRConfigFromServer(t, server.URL, defaultManagerAccessKey()), readBundle, writeBundle)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
+		}
+
+		status, err := manager.SyncOnce(context.Background())
+		if err != nil {
+			t.Fatalf("SyncOnce() error = %v", err)
+		}
+		if got := updateCalls.Load(); got != 0 {
+			t.Fatalf("update call count = %d, want 0", got)
+		}
+		if status.Phase != coreptrsync.PhaseIdle {
+			t.Fatalf("status.Phase = %q, want %q", status.Phase, coreptrsync.PhaseIdle)
+		}
+		if !status.IsComplete {
+			t.Fatal("status.IsComplete = false, want true")
+		}
+	})
+
+	t.Run("reuses a legacy repository_updates artifact without re-downloading it and persists it to sqlite", func(t *testing.T) {
+		dir := createPTRManagerTestBundle(t)
+
+		readBundle, err := hydrusdb.Open(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.Open() error = %v", err)
+		}
+		defer func() {
+			if err := readBundle.Close(); err != nil {
+				t.Fatalf("readBundle.Close() error = %v", err)
+			}
+		}()
+
+		writeBundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := writeBundle.Close(); err != nil {
+				t.Fatalf("writeBundle.Close() error = %v", err)
+			}
+		}()
+
+		updateBody := hydrusNetworkBytes(t, []any{hydrusSerialisableTypeContentUpdate, 1, []any{}})
+		updateHash := sha256Hex(updateBody)
+
+		legacyPath, err := resolveLegacyPTRUpdateArtifactPath(writeBundle, updateHash)
+		if err != nil {
+			t.Fatalf("resolveLegacyPTRUpdateArtifactPath() error = %v", err)
+		}
+		if err := os.MkdirAll(filepath.Dir(legacyPath), 0o755); err != nil {
+			t.Fatalf("MkdirAll(legacy path) error = %v", err)
+		}
+		if err := os.WriteFile(legacyPath, updateBody, 0o644); err != nil {
+			t.Fatalf("WriteFile(legacyPath) error = %v", err)
+		}
+
+		var updateCalls atomic.Int32
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/session_key":
+				http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "manager-session", Path: "/"})
+				w.WriteHeader(http.StatusOK)
+			case "/account":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "account", metaValue: metaJSON([]any{strings.Repeat("aa", 32), unsupportedSerialisable(102), int64(1699990000), nil, serialisableDictionaryString(t, hydrusDictEntry{key: "banned_info", metaValue: metaJSON(nil)}, hydrusDictEntry{key: "bandwidth_tracker", metaValue: metaHydrus(unsupportedSerialisable(39))}, hydrusDictEntry{key: "message", metaValue: metaJSON("shared read-only")}, hydrusDictEntry{key: "message_created", metaValue: metaJSON(int64(1699990100))})})}))
+			case "/options":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "service_options", metaValue: metaHydrus(serialisableDictionary(hydrusDictEntry{key: "update_period", metaValue: metaJSON(int64(3600))}, hydrusDictEntry{key: "nullification_period", metaValue: metaJSON(int64(86400))}))}))
+			case "/tag_filter":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "tag_filter", metaValue: metaHydrus(serialisableTagFilter(map[string]int{":": 1}))}))
+			case "/metadata":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "metadata_slice", metaValue: metaHydrus(serialisableMetadata(1700000200, metadataRow{updateIndex: 0, updateHashes: []string{updateHash}, begin: 10, end: 20}))}))
+			case "/update":
+				updateCalls.Add(1)
+				t.Fatalf("/update should not be called when the legacy PTR artifact is already stored locally")
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		manager, err := NewManager(context.Background(), nil, testPTRConfigFromServer(t, server.URL, defaultManagerAccessKey()), readBundle, writeBundle)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
+		}
+
+		status, err := manager.SyncOnce(context.Background())
+		if err != nil {
+			t.Fatalf("SyncOnce() error = %v", err)
+		}
+
+		if got := updateCalls.Load(); got != 0 {
+			t.Fatalf("update call count = %d, want 0", got)
+		}
+
+		managedPath, err := resolvePTRUpdateArtifactPath(writeBundle, updateHash)
+		if err != nil {
+			t.Fatalf("resolvePTRUpdateArtifactPath() error = %v", err)
+		}
+		if _, err := os.Stat(managedPath); !os.IsNotExist(err) {
+			t.Fatalf("managedPath stat err = %v, want not exists", err)
+		}
+
+		if _, err := os.Stat(legacyPath); err != nil {
+			t.Fatalf("legacyPath stat err = %v, want still present for legacy fallback", err)
+		}
+
+		serviceID := selectPTRManagerTestInt64(
+			t,
+			filepath.Join(dir, "client.db"),
+			`SELECT service_id FROM services WHERE service_key = ?`,
+			[]byte(coreptrsync.DaemonServiceKeyBytes()),
+		)
+		repositoryProcessedTableName := fmt.Sprintf("repository_updates_processed_%d", serviceID)
+		if got := selectPTRManagerTestInt64(
+			t,
+			filepath.Join(dir, "client.db"),
+			fmt.Sprintf(`SELECT length(body) FROM %s WHERE content_type = ?`, repositoryProcessedTableName),
+			hydrusdb.PTRContentTypeMappings,
+		); got != int64(len(updateBody)) {
+			t.Fatalf("stored sqlite body length = %d, want %d", got, len(updateBody))
+		}
+
+		if status.DownloadedUpdateCount != 1 {
+			t.Fatalf("status.DownloadedUpdateCount = %d, want 1", status.DownloadedUpdateCount)
+		}
+	})
+
 	t.Run("registers multiple pending updates in one successful run", func(t *testing.T) {
 		dir := createPTRManagerTestBundle(t)
 
@@ -773,6 +1195,99 @@ func TestManagerSyncOnce(t *testing.T) {
 
 		if persisted.DownloadedUpdateCount != int64(len(updateHashes)) {
 			t.Fatalf("persisted.DownloadedUpdateCount = %d, want %d", persisted.DownloadedUpdateCount, len(updateHashes))
+		}
+	})
+
+	t.Run("downloads multiple pending updates in parallel", func(t *testing.T) {
+		dir := createPTRManagerTestBundle(t)
+
+		readBundle, err := hydrusdb.Open(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.Open() error = %v", err)
+		}
+		defer func() {
+			if err := readBundle.Close(); err != nil {
+				t.Fatalf("readBundle.Close() error = %v", err)
+			}
+		}()
+
+		writeBundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := writeBundle.Close(); err != nil {
+				t.Fatalf("writeBundle.Close() error = %v", err)
+			}
+		}()
+
+		updateBodies := [][]byte{
+			hydrusNetworkBytes(t, []any{hydrusSerialisableTypeDefinitionsUpdate, 1, []any{}}),
+			hydrusNetworkBytes(t, []any{hydrusSerialisableTypeDefinitionsUpdate, 2, []any{}}),
+			hydrusNetworkBytes(t, []any{hydrusSerialisableTypeDefinitionsUpdate, 3, []any{}}),
+			hydrusNetworkBytes(t, []any{hydrusSerialisableTypeDefinitionsUpdate, 4, []any{}}),
+		}
+		updateHashes := make([]string, 0, len(updateBodies))
+		updateBodiesByHash := make(map[string][]byte, len(updateBodies))
+		for _, body := range updateBodies {
+			hash := sha256Hex(body)
+			updateHashes = append(updateHashes, hash)
+			updateBodiesByHash[hash] = body
+		}
+
+		var activeUpdates atomic.Int32
+		var maxConcurrentUpdates atomic.Int32
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/session_key":
+				http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "manager-session", Path: "/"})
+				w.WriteHeader(http.StatusOK)
+			case "/account":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "account", metaValue: metaJSON([]any{strings.Repeat("aa", 32), unsupportedSerialisable(102), int64(1699990000), nil, serialisableDictionaryString(t, hydrusDictEntry{key: "banned_info", metaValue: metaJSON(nil)}, hydrusDictEntry{key: "bandwidth_tracker", metaValue: metaHydrus(unsupportedSerialisable(39))}, hydrusDictEntry{key: "message", metaValue: metaJSON("shared read-only")}, hydrusDictEntry{key: "message_created", metaValue: metaJSON(int64(1699990100))})})}))
+			case "/options":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "service_options", metaValue: metaHydrus(serialisableDictionary(hydrusDictEntry{key: "update_period", metaValue: metaJSON(int64(3600))}, hydrusDictEntry{key: "nullification_period", metaValue: metaJSON(int64(86400))}))}))
+			case "/tag_filter":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "tag_filter", metaValue: metaHydrus(serialisableTagFilter(map[string]int{":": 1}))}))
+			case "/metadata":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "metadata_slice", metaValue: metaHydrus(serialisableMetadata(1700000200, metadataRow{updateIndex: 0, updateHashes: updateHashes, begin: 10, end: 20}))}))
+			case "/update":
+				current := activeUpdates.Add(1)
+				for {
+					maxSeen := maxConcurrentUpdates.Load()
+					if current <= maxSeen || maxConcurrentUpdates.CompareAndSwap(maxSeen, current) {
+						break
+					}
+				}
+				time.Sleep(150 * time.Millisecond)
+				activeUpdates.Add(-1)
+				hash := r.URL.Query().Get("update_hash")
+				body, ok := updateBodiesByHash[hash]
+				if !ok {
+					t.Fatalf("unexpected update_hash %q", hash)
+				}
+				_, _ = w.Write(body)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		manager, err := NewManager(context.Background(), nil, testPTRConfigFromServer(t, server.URL, defaultManagerAccessKey()), readBundle, writeBundle)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
+		}
+
+		status, err := manager.SyncOnce(context.Background())
+		if err != nil {
+			t.Fatalf("SyncOnce() error = %v", err)
+		}
+
+		if status.DownloadedUpdateCount != int64(len(updateHashes)) {
+			t.Fatalf("status.DownloadedUpdateCount = %d, want %d", status.DownloadedUpdateCount, len(updateHashes))
+		}
+
+		if maxConcurrentUpdates.Load() <= 1 {
+			t.Fatalf("maxConcurrentUpdates = %d, want > 1", maxConcurrentUpdates.Load())
 		}
 	})
 
@@ -903,6 +1418,108 @@ func TestManagerSyncOnce(t *testing.T) {
 			oldTagID,
 		); count != 1 {
 			t.Fatalf("deleted PTR mapping row count = %d, want 1", count)
+		}
+	})
+
+	t.Run("applies a finalized downloaded batch before a later busy update exits retrying", func(t *testing.T) {
+		dir := createPTRManagerTestBundle(t)
+
+		readBundle, err := hydrusdb.Open(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.Open() error = %v", err)
+		}
+		defer func() {
+			if err := readBundle.Close(); err != nil {
+				t.Fatalf("readBundle.Close() error = %v", err)
+			}
+		}()
+
+		writeBundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := writeBundle.Close(); err != nil {
+				t.Fatalf("writeBundle.Close() error = %v", err)
+			}
+		}()
+
+		definitionsBody := hydrusNetworkBytes(t, []any{
+			hydrusSerialisableTypeDefinitionsUpdate,
+			1,
+			[]any{
+				[]any{hydrusDefinitionsTypeTags, []any{[]any{int64(201), "creator:alice"}}},
+			},
+		})
+		busyBody := hydrusNetworkBytes(t, []any{hydrusSerialisableTypeContentUpdate, 1, []any{}})
+		definitionsHash := sha256Hex(definitionsBody)
+		busyHash := sha256Hex(busyBody)
+
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/session_key":
+				http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "manager-session", Path: "/"})
+				w.WriteHeader(http.StatusOK)
+			case "/account":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "account", metaValue: metaJSON([]any{strings.Repeat("aa", 32), unsupportedSerialisable(102), int64(1699990000), nil, serialisableDictionaryString(t, hydrusDictEntry{key: "banned_info", metaValue: metaJSON(nil)}, hydrusDictEntry{key: "bandwidth_tracker", metaValue: metaHydrus(unsupportedSerialisable(39))}, hydrusDictEntry{key: "message", metaValue: metaJSON("shared read-only")}, hydrusDictEntry{key: "message_created", metaValue: metaJSON(int64(1699990100))})})}))
+			case "/options":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "service_options", metaValue: metaHydrus(serialisableDictionary(hydrusDictEntry{key: "update_period", metaValue: metaJSON(int64(3600))}, hydrusDictEntry{key: "nullification_period", metaValue: metaJSON(int64(86400))}))}))
+			case "/tag_filter":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "tag_filter", metaValue: metaHydrus(serialisableTagFilter(map[string]int{":": 1}))}))
+			case "/metadata":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "metadata_slice", metaValue: metaHydrus(serialisableMetadata(1700000200, metadataRow{updateIndex: 0, updateHashes: []string{definitionsHash}, begin: 10, end: 20}, metadataRow{updateIndex: 1, updateHashes: []string{busyHash}, begin: 21, end: 30}))}))
+			case "/update":
+				switch r.URL.Query().Get("update_hash") {
+				case definitionsHash:
+					_, _ = w.Write(definitionsBody)
+				case busyHash:
+					time.Sleep(50 * time.Millisecond)
+					w.Header().Set("Retry-After", "120")
+					http.Error(
+						w,
+						`{"error":"This server is busy, please try again later.","exception_type":"ServerBusyException","status_code":503}`,
+						http.StatusServiceUnavailable,
+					)
+				default:
+					t.Fatalf("unexpected update_hash %q", r.URL.Query().Get("update_hash"))
+				}
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		manager, err := NewManager(context.Background(), nil, testPTRConfigFromServer(t, server.URL, defaultManagerAccessKey()), readBundle, writeBundle)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
+		}
+
+		status, err := manager.SyncOnce(context.Background())
+		if err != nil {
+			t.Fatalf("SyncOnce() error = %v, want nil for retrying state", err)
+		}
+
+		if status.Phase != coreptrsync.PhaseRetrying {
+			t.Fatalf("status.Phase = %q, want %q", status.Phase, coreptrsync.PhaseRetrying)
+		}
+		if status.ProcessedDefinitionCount != 1 {
+			t.Fatalf("status.ProcessedDefinitionCount = %d, want 1", status.ProcessedDefinitionCount)
+		}
+
+		serviceID := selectPTRManagerTestInt64(
+			t,
+			filepath.Join(dir, "client.db"),
+			`SELECT service_id FROM services WHERE service_key = ?`,
+			[]byte(coreptrsync.DaemonServiceKeyBytes()),
+		)
+		tagIDMapTableName := fmt.Sprintf("repository_tag_id_map_%d", serviceID)
+		if got := selectPTRManagerTestInt64(
+			t,
+			filepath.Join(dir, "client.master.db"),
+			fmt.Sprintf(`SELECT tag_id FROM %s WHERE service_tag_id = ?`, tagIDMapTableName),
+			201,
+		); got <= 0 {
+			t.Fatalf("service_tag_id 201 mapped tag_id = %d, want > 0", got)
 		}
 	})
 }
@@ -1202,6 +1819,166 @@ func TestManagerPendingMappings(t *testing.T) {
 	})
 }
 
+func TestManagerManualTriggerPersistsOptInMarker(t *testing.T) {
+	dir := createPTRManagerTestBundle(t)
+	updateBody := hydrusNetworkBytes(t, []any{hydrusSerialisableTypeDefinitionsUpdate, 1, []any{}})
+	updateHash := sha256Hex(updateBody)
+
+	readBundle, err := hydrusdb.Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("hydrusdb.Open() error = %v", err)
+	}
+	defer func() {
+		if err := readBundle.Close(); err != nil {
+			t.Fatalf("readBundle.Close() error = %v", err)
+		}
+	}()
+
+	writeBundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("hydrusdb.OpenWritable() error = %v", err)
+	}
+	defer func() {
+		if err := writeBundle.Close(); err != nil {
+			t.Fatalf("writeBundle.Close() error = %v", err)
+		}
+	}()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/session_key":
+			http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "manager-session", Path: "/"})
+			w.WriteHeader(http.StatusOK)
+		case "/account":
+			_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "account", metaValue: metaJSON([]any{strings.Repeat("aa", 32), unsupportedSerialisable(102), int64(1699990000), nil, serialisableDictionaryString(t, hydrusDictEntry{key: "banned_info", metaValue: metaJSON(nil)}, hydrusDictEntry{key: "bandwidth_tracker", metaValue: metaHydrus(unsupportedSerialisable(39))}, hydrusDictEntry{key: "message", metaValue: metaJSON("shared read-only")}, hydrusDictEntry{key: "message_created", metaValue: metaJSON(int64(1699990100))})})}))
+		case "/options":
+			_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "service_options", metaValue: metaHydrus(serialisableDictionary(hydrusDictEntry{key: "update_period", metaValue: metaJSON(int64(3600))}, hydrusDictEntry{key: "nullification_period", metaValue: metaJSON(int64(86400))}))}))
+		case "/tag_filter":
+			_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "tag_filter", metaValue: metaHydrus(serialisableTagFilter(map[string]int{":": 1}))}))
+		case "/metadata":
+			_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "metadata_slice", metaValue: metaHydrus(serialisableMetadata(1700000200, metadataRow{updateIndex: 0, updateHashes: []string{updateHash}, begin: 10, end: 20}))}))
+		case "/update":
+			if got := r.URL.Query().Get("update_hash"); got != updateHash {
+				t.Fatalf("update_hash = %q, want %q", got, updateHash)
+			}
+			_, _ = w.Write(updateBody)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := testPTRConfigFromServer(t, server.URL, defaultManagerAccessKey())
+	cfg.Enabled = false
+
+	manager, err := NewManager(context.Background(), nil, cfg, readBundle, writeBundle)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	status, err := manager.Status(context.Background())
+	if err != nil {
+		t.Fatalf("Status() error = %v", err)
+	}
+	if status.Phase != coreptrsync.PhaseDisabled {
+		t.Fatalf("status.Phase = %q, want %q", status.Phase, coreptrsync.PhaseDisabled)
+	}
+
+	triggered, err := manager.Trigger(context.Background())
+	if err != nil {
+		t.Fatalf("Trigger() error = %v", err)
+	}
+	if triggered.Phase != coreptrsync.PhaseSyncing {
+		t.Fatalf("triggered.Phase = %q, want %q", triggered.Phase, coreptrsync.PhaseSyncing)
+	}
+
+	finalStatus := waitForPTRStatus(t, manager, coreptrsync.PhaseIdle, false)
+	if finalStatus.MetadataSlice != 1 {
+		t.Fatalf("finalStatus.MetadataSlice = %d, want 1", finalStatus.MetadataSlice)
+	}
+
+	markerPath, err := ptrSyncOptInMarkerPath(writeBundle)
+	if err != nil {
+		t.Fatalf("ptrSyncOptInMarkerPath() error = %v", err)
+	}
+	markerBytes, err := os.ReadFile(markerPath)
+	if err != nil {
+		t.Fatalf("ReadFile(markerPath) error = %v", err)
+	}
+	if strings.TrimSpace(string(markerBytes)) != "true" {
+		t.Fatalf("marker contents = %q, want %q", strings.TrimSpace(string(markerBytes)), "true")
+	}
+}
+
+func TestManagerAutomaticallyStartsFromOptInMarker(t *testing.T) {
+	dir := createPTRManagerTestBundle(t)
+	updateBody := hydrusNetworkBytes(t, []any{hydrusSerialisableTypeDefinitionsUpdate, 1, []any{}})
+	updateHash := sha256Hex(updateBody)
+
+	readBundle, err := hydrusdb.Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("hydrusdb.Open() error = %v", err)
+	}
+	defer func() {
+		if err := readBundle.Close(); err != nil {
+			t.Fatalf("readBundle.Close() error = %v", err)
+		}
+	}()
+
+	writeBundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("hydrusdb.OpenWritable() error = %v", err)
+	}
+	defer func() {
+		if err := writeBundle.Close(); err != nil {
+			t.Fatalf("writeBundle.Close() error = %v", err)
+		}
+	}()
+
+	if err := writePTRSyncOptInMarker(writeBundle); err != nil {
+		t.Fatalf("writePTRSyncOptInMarker() error = %v", err)
+	}
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/session_key":
+			http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "manager-session", Path: "/"})
+			w.WriteHeader(http.StatusOK)
+		case "/account":
+			_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "account", metaValue: metaJSON([]any{strings.Repeat("aa", 32), unsupportedSerialisable(102), int64(1699990000), nil, serialisableDictionaryString(t, hydrusDictEntry{key: "banned_info", metaValue: metaJSON(nil)}, hydrusDictEntry{key: "bandwidth_tracker", metaValue: metaHydrus(unsupportedSerialisable(39))}, hydrusDictEntry{key: "message", metaValue: metaJSON("shared read-only")}, hydrusDictEntry{key: "message_created", metaValue: metaJSON(int64(1699990100))})})}))
+		case "/options":
+			_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "service_options", metaValue: metaHydrus(serialisableDictionary(hydrusDictEntry{key: "update_period", metaValue: metaJSON(int64(3600))}, hydrusDictEntry{key: "nullification_period", metaValue: metaJSON(int64(86400))}))}))
+		case "/tag_filter":
+			_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "tag_filter", metaValue: metaHydrus(serialisableTagFilter(map[string]int{":": 1}))}))
+		case "/metadata":
+			_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "metadata_slice", metaValue: metaHydrus(serialisableMetadata(1700000200, metadataRow{updateIndex: 0, updateHashes: []string{updateHash}, begin: 10, end: 20}))}))
+		case "/update":
+			if got := r.URL.Query().Get("update_hash"); got != updateHash {
+				t.Fatalf("update_hash = %q, want %q", got, updateHash)
+			}
+			_, _ = w.Write(updateBody)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := testPTRConfigFromServer(t, server.URL, defaultManagerAccessKey())
+	cfg.Enabled = false
+
+	manager, err := NewManager(context.Background(), nil, cfg, readBundle, writeBundle)
+	if err != nil {
+		t.Fatalf("NewManager() error = %v", err)
+	}
+
+	finalStatus := waitForPTRCondition(t, manager, func(status coreptrsync.Status) bool {
+		return status.Phase == coreptrsync.PhaseIdle && !status.IsRunning && status.MetadataSlice == 1
+	})
+	if finalStatus.DownloadedUpdateCount != 1 {
+		t.Fatalf("finalStatus.DownloadedUpdateCount = %d, want 1", finalStatus.DownloadedUpdateCount)
+	}
+}
+
 func TestManagerTrigger(t *testing.T) {
 	t.Run("starts one background run and deduplicates repeated triggers", func(t *testing.T) {
 		dir := createPTRManagerTestBundle(t)
@@ -1367,6 +2144,206 @@ func TestManagerTrigger(t *testing.T) {
 		finalStatus := waitForPTRStatus(t, manager, coreptrsync.PhaseIdle, false)
 		if finalStatus.MetadataSlice != 1 {
 			t.Fatalf("finalStatus.MetadataSlice = %d, want 1", finalStatus.MetadataSlice)
+		}
+	})
+
+	t.Run("continues immediately when the next update is already due", func(t *testing.T) {
+		dir := createPTRManagerTestBundle(t)
+
+		readBundle, err := hydrusdb.Open(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.Open() error = %v", err)
+		}
+		defer func() {
+			if err := readBundle.Close(); err != nil {
+				t.Fatalf("readBundle.Close() error = %v", err)
+			}
+		}()
+
+		writeBundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := writeBundle.Close(); err != nil {
+				t.Fatalf("writeBundle.Close() error = %v", err)
+			}
+		}()
+
+		updateBodyOne := hydrusNetworkBytes(t, []any{hydrusSerialisableTypeDefinitionsUpdate, 1, []any{}})
+		updateBodyTwo := hydrusNetworkBytes(t, []any{hydrusSerialisableTypeDefinitionsUpdate, 2, []any{}})
+		updateHashOne := sha256Hex(updateBodyOne)
+		updateHashTwo := sha256Hex(updateBodyTwo)
+
+		var metadataCalls atomic.Int32
+		var updateCalls atomic.Int32
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/session_key":
+				http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "manager-session", Path: "/"})
+				w.WriteHeader(http.StatusOK)
+			case "/account":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "account", metaValue: metaJSON([]any{strings.Repeat("aa", 32), unsupportedSerialisable(102), int64(1699990000), nil, serialisableDictionaryString(t, hydrusDictEntry{key: "banned_info", metaValue: metaJSON(nil)}, hydrusDictEntry{key: "bandwidth_tracker", metaValue: metaHydrus(unsupportedSerialisable(39))}, hydrusDictEntry{key: "message", metaValue: metaJSON("shared read-only")}, hydrusDictEntry{key: "message_created", metaValue: metaJSON(int64(1699990100))})})}))
+			case "/options":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "service_options", metaValue: metaHydrus(serialisableDictionary(hydrusDictEntry{key: "update_period", metaValue: metaJSON(int64(3600))}, hydrusDictEntry{key: "nullification_period", metaValue: metaJSON(int64(86400))}))}))
+			case "/tag_filter":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "tag_filter", metaValue: metaHydrus(serialisableTagFilter(map[string]int{":": 1}))}))
+			case "/metadata":
+				call := metadataCalls.Add(1)
+				since := r.URL.Query().Get("since")
+				switch call {
+				case 1:
+					if since != "0" {
+						t.Fatalf("first metadata since = %q, want 0", since)
+					}
+					_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "metadata_slice", metaValue: metaHydrus(serialisableMetadata(time.Now().Add(-1*time.Second).Unix(), metadataRow{updateIndex: 0, updateHashes: []string{updateHashOne}, begin: 10, end: 20}))}))
+				case 2:
+					if since != "1" {
+						t.Fatalf("second metadata since = %q, want 1", since)
+					}
+					_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "metadata_slice", metaValue: metaHydrus(serialisableMetadata(time.Now().Add(1*time.Hour).Unix(), metadataRow{updateIndex: 1, updateHashes: []string{updateHashTwo}, begin: 21, end: 30}))}))
+				default:
+					t.Fatalf("unexpected metadata call %d", call)
+				}
+			case "/update":
+				updateCalls.Add(1)
+				switch r.URL.Query().Get("update_hash") {
+				case updateHashOne:
+					_, _ = w.Write(updateBodyOne)
+				case updateHashTwo:
+					_, _ = w.Write(updateBodyTwo)
+				default:
+					t.Fatalf("unexpected update_hash %q", r.URL.Query().Get("update_hash"))
+				}
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		manager, err := NewManager(context.Background(), nil, testPTRConfigFromServer(t, server.URL, defaultManagerAccessKey()), readBundle, writeBundle)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
+		}
+
+		if _, err := manager.Trigger(context.Background()); err != nil {
+			t.Fatalf("Trigger() error = %v", err)
+		}
+
+		finalStatus := waitForPTRCondition(t, manager, func(status coreptrsync.Status) bool {
+			return status.Phase == coreptrsync.PhaseIdle && !status.IsRunning && status.MetadataSlice == 2
+		})
+
+		if got := metadataCalls.Load(); got != 2 {
+			t.Fatalf("metadataCalls = %d, want 2", got)
+		}
+
+		if got := updateCalls.Load(); got != 2 {
+			t.Fatalf("updateCalls = %d, want 2", got)
+		}
+
+		if finalStatus.DownloadedUpdateCount != 2 {
+			t.Fatalf("finalStatus.DownloadedUpdateCount = %d, want 2", finalStatus.DownloadedUpdateCount)
+		}
+	})
+
+	t.Run("schedules the next due sync after a successful manual trigger", func(t *testing.T) {
+		dir := createPTRManagerTestBundle(t)
+
+		readBundle, err := hydrusdb.Open(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.Open() error = %v", err)
+		}
+		defer func() {
+			if err := readBundle.Close(); err != nil {
+				t.Fatalf("readBundle.Close() error = %v", err)
+			}
+		}()
+
+		writeBundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("hydrusdb.OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := writeBundle.Close(); err != nil {
+				t.Fatalf("writeBundle.Close() error = %v", err)
+			}
+		}()
+
+		updateBodyOne := hydrusNetworkBytes(t, []any{hydrusSerialisableTypeDefinitionsUpdate, 1, []any{}})
+		updateBodyTwo := hydrusNetworkBytes(t, []any{hydrusSerialisableTypeDefinitionsUpdate, 2, []any{}})
+		updateHashOne := sha256Hex(updateBodyOne)
+		updateHashTwo := sha256Hex(updateBodyTwo)
+
+		var metadataCalls atomic.Int32
+		var updateCalls atomic.Int32
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/session_key":
+				http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "manager-session", Path: "/"})
+				w.WriteHeader(http.StatusOK)
+			case "/account":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "account", metaValue: metaJSON([]any{strings.Repeat("aa", 32), unsupportedSerialisable(102), int64(1699990000), nil, serialisableDictionaryString(t, hydrusDictEntry{key: "banned_info", metaValue: metaJSON(nil)}, hydrusDictEntry{key: "bandwidth_tracker", metaValue: metaHydrus(unsupportedSerialisable(39))}, hydrusDictEntry{key: "message", metaValue: metaJSON("shared read-only")}, hydrusDictEntry{key: "message_created", metaValue: metaJSON(int64(1699990100))})})}))
+			case "/options":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "service_options", metaValue: metaHydrus(serialisableDictionary(hydrusDictEntry{key: "update_period", metaValue: metaJSON(int64(3600))}, hydrusDictEntry{key: "nullification_period", metaValue: metaJSON(int64(86400))}))}))
+			case "/tag_filter":
+				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "tag_filter", metaValue: metaHydrus(serialisableTagFilter(map[string]int{":": 1}))}))
+			case "/metadata":
+				call := metadataCalls.Add(1)
+				since := r.URL.Query().Get("since")
+				switch call {
+				case 1:
+					if since != "0" {
+						t.Fatalf("first metadata since = %q, want 0", since)
+					}
+					_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "metadata_slice", metaValue: metaHydrus(serialisableMetadata(time.Now().Add(2*time.Second).Unix(), metadataRow{updateIndex: 0, updateHashes: []string{updateHashOne}, begin: 10, end: 20}))}))
+				case 2:
+					if since != "1" {
+						t.Fatalf("second metadata since = %q, want 1", since)
+					}
+					_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{key: "metadata_slice", metaValue: metaHydrus(serialisableMetadata(time.Now().Add(1*time.Hour).Unix(), metadataRow{updateIndex: 1, updateHashes: []string{updateHashTwo}, begin: 21, end: 30}))}))
+				default:
+					t.Fatalf("unexpected metadata call %d", call)
+				}
+			case "/update":
+				updateCalls.Add(1)
+				switch r.URL.Query().Get("update_hash") {
+				case updateHashOne:
+					_, _ = w.Write(updateBodyOne)
+				case updateHashTwo:
+					_, _ = w.Write(updateBodyTwo)
+				default:
+					t.Fatalf("unexpected update_hash %q", r.URL.Query().Get("update_hash"))
+				}
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		manager, err := NewManager(context.Background(), nil, testPTRConfigFromServer(t, server.URL, defaultManagerAccessKey()), readBundle, writeBundle)
+		if err != nil {
+			t.Fatalf("NewManager() error = %v", err)
+		}
+
+		if _, err := manager.Trigger(context.Background()); err != nil {
+			t.Fatalf("Trigger() error = %v", err)
+		}
+
+		finalStatus := waitForPTRCondition(t, manager, func(status coreptrsync.Status) bool {
+			return status.Phase == coreptrsync.PhaseIdle && !status.IsRunning && status.MetadataSlice == 2
+		})
+
+		if got := metadataCalls.Load(); got != 2 {
+			t.Fatalf("metadataCalls = %d, want 2", got)
+		}
+
+		if got := updateCalls.Load(); got != 2 {
+			t.Fatalf("updateCalls = %d, want 2", got)
+		}
+
+		if finalStatus.DownloadedUpdateCount != 2 {
+			t.Fatalf("finalStatus.DownloadedUpdateCount = %d, want 2", finalStatus.DownloadedUpdateCount)
 		}
 	})
 
@@ -1559,6 +2536,11 @@ func openSQLiteForPTRManagerTest(t *testing.T, path string) *sql.DB {
 		t.Fatalf("sql.Open(%q) error = %v", path, err)
 	}
 
+	if _, err := db.Exec(`PRAGMA synchronous = OFF;`); err != nil {
+		_ = db.Close()
+		t.Fatalf("Exec(PRAGMA synchronous = OFF) error = %v", err)
+	}
+
 	return db
 }
 
@@ -1591,6 +2573,14 @@ func defaultManagerAccessKey() string {
 func waitForPTRStatus(t *testing.T, manager *Manager, wantPhase string, wantRunning bool) coreptrsync.Status {
 	t.Helper()
 
+	return waitForPTRCondition(t, manager, func(status coreptrsync.Status) bool {
+		return status.Phase == wantPhase && status.IsRunning == wantRunning
+	})
+}
+
+func waitForPTRCondition(t *testing.T, manager *Manager, predicate func(coreptrsync.Status) bool) coreptrsync.Status {
+	t.Helper()
+
 	deadline := time.Now().Add(5 * time.Second)
 	var lastErr error
 	for time.Now().Before(deadline) {
@@ -1601,7 +2591,7 @@ func waitForPTRStatus(t *testing.T, manager *Manager, wantPhase string, wantRunn
 			continue
 		}
 
-		if status.Phase == wantPhase && status.IsRunning == wantRunning {
+		if predicate(status) {
 			return status
 		}
 
@@ -1617,13 +2607,7 @@ func waitForPTRStatus(t *testing.T, manager *Manager, wantPhase string, wantRunn
 		t.Fatalf("final Status() error = %v", err)
 	}
 
-	t.Fatalf(
-		"timed out waiting for PTR status phase=%q running=%t; got phase=%q running=%t",
-		wantPhase,
-		wantRunning,
-		status.Phase,
-		status.IsRunning,
-	)
+	t.Fatalf("timed out waiting for PTR status predicate; got phase=%q running=%t metadata_slice=%d", status.Phase, status.IsRunning, status.MetadataSlice)
 
 	return coreptrsync.Status{}
 }

@@ -496,13 +496,9 @@ func TestEnsureFreshClientBundle_NativeBootstrapCreatesUsableBundle(t *testing.T
 		t.Fatalf("client_files root %q is not a directory", clientFilesRoot)
 	}
 
-	thumbnailInfo, err := os.Stat(thumbnailRoot)
-	if err != nil {
-		t.Fatalf("Stat(thumbnails) error = %v", err)
-	}
-
-	if !thumbnailInfo.IsDir() {
-		t.Fatalf("thumbnails root %q is not a directory", thumbnailRoot)
+	_, err = os.Stat(thumbnailRoot)
+	if !os.IsNotExist(err) {
+		t.Fatalf("Stat(thumbnails) error = %v, want not exists after bootstrap", err)
 	}
 
 	mainDB, err := sql.Open("sqlite", filepath.Join(dbDir, "client.db"))

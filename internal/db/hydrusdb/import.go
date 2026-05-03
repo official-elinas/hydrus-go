@@ -16,6 +16,7 @@ import (
 // MIME, and other basic media metadata.
 type PreparedLocalImport struct {
 	HashHex             string
+	KnownURLs           []string
 	Size                int64
 	Mime                int
 	Width               *int64
@@ -41,6 +42,7 @@ type PreparedLocalImportResult struct {
 type normalizedPreparedLocalImport struct {
 	hashHex             string
 	hashBytes           []byte
+	knownURLs           []string
 	size                int64
 	mime                int64
 	width               sql.NullInt64
@@ -61,6 +63,7 @@ type preparedLocalImportPlan struct {
 	currentMemberships []preparedCurrentMembershipPlan
 	hasPixelHashMap    bool
 	hasTransparency    bool
+	hasKnownURLs       bool
 	createInbox        bool
 }
 
@@ -128,7 +131,11 @@ func (b *Bundle) RecordPreparedLocalImport(
 					FileID:          hashID,
 					AlreadyImported: true,
 				}
-				return ensurePreparedAuxiliaryMetadata(ctx, tx, hashID, normalized, plan)
+				if err := ensurePreparedAuxiliaryMetadata(ctx, tx, hashID, normalized, plan); err != nil {
+					return err
+				}
+
+				return ensurePreparedKnownURLs(ctx, tx, hashID, normalized, plan)
 			}
 		} else {
 			if _, err := tx.ExecContext(
@@ -190,6 +197,10 @@ func (b *Bundle) RecordPreparedLocalImport(
 			}
 		}
 
+		if err := ensurePreparedKnownURLs(ctx, tx, hashID, normalized, plan); err != nil {
+			return err
+		}
+
 		result = PreparedLocalImportResult{FileID: hashID}
 		return nil
 	})
@@ -231,6 +242,70 @@ func (b *Bundle) LookupImportedFileIDByHash(
 	}
 
 	return fileID, true, nil
+}
+
+// AddKnownURLsByHash attaches known URLs to an already imported file hash when
+// the bundle has the required URL tables.
+func (b *Bundle) AddKnownURLsByHash(
+	ctx context.Context,
+	hashHex string,
+	knownURLs []string,
+) error {
+	normalizedHash, hashBytes, err := normalizePreparedHash(hashHex)
+	if err != nil {
+		return err
+	}
+
+	normalizedURLs, err := normalizeKnownURLs(knownURLs)
+	if err != nil {
+		return err
+	}
+	if len(normalizedURLs) == 0 {
+		return nil
+	}
+
+	return b.WithImmediateTx(ctx, func(tx *ImmediateTx) error {
+		hashID, ok, err := lookupHashIDByHash(ctx, tx, hashBytes)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("prepared import hash %s was not found", normalizedHash)
+		}
+
+		mainTableNames, err := lookupSchemaTableNamesTx(ctx, tx, "main")
+		if err != nil {
+			return err
+		}
+		masterTableNames, err := lookupSchemaTableNamesTx(ctx, tx, "external_master")
+		if err != nil {
+			return err
+		}
+		_, hasURLMap := mainTableNames["url_map"]
+		_, hasURLDomains := masterTableNames["url_domains"]
+		_, hasURLs := masterTableNames["urls"]
+		if !(hasURLMap && hasURLDomains && hasURLs) {
+			return nil
+		}
+
+		for _, knownURL := range normalizedURLs {
+			urlID, err := ensureKnownURLID(ctx, tx, knownURL)
+			if err != nil {
+				return err
+			}
+
+			if _, err := tx.ExecContext(
+				ctx,
+				`INSERT OR IGNORE INTO main.url_map (hash_id, url_id) VALUES (?, ?)`,
+				hashID,
+				urlID,
+			); err != nil {
+				return fmt.Errorf("insert url_map row: %w", err)
+			}
+		}
+
+		return nil
+	})
 }
 
 func normalizePreparedLocalImport(
@@ -290,6 +365,11 @@ func normalizePreparedLocalImport(
 		return normalizedPreparedLocalImport{}, err
 	}
 
+	knownURLs, err := normalizeKnownURLs(prepared.KnownURLs)
+	if err != nil {
+		return normalizedPreparedLocalImport{}, err
+	}
+
 	localFileServiceKey, err := normalizeOptionalHexKey(
 		"local file service key",
 		prepared.LocalFileServiceKey,
@@ -301,6 +381,7 @@ func normalizePreparedLocalImport(
 	return normalizedPreparedLocalImport{
 		hashHex:             hashHex,
 		hashBytes:           hashBytes,
+		knownURLs:           knownURLs,
 		size:                prepared.Size,
 		mime:                int64(prepared.Mime),
 		width:               width,
@@ -358,6 +439,31 @@ func normalizeOptionalHexKey(label string, value string) (string, error) {
 
 	if _, err := hex.DecodeString(normalized); err != nil {
 		return "", fmt.Errorf("decode %s: %w", label, err)
+	}
+
+	return normalized, nil
+}
+
+func normalizeKnownURLs(values []string) ([]string, error) {
+	if len(values) == 0 {
+		return nil, nil
+	}
+
+	normalized := make([]string, 0, len(values))
+	seen := make(map[string]struct{}, len(values))
+	for _, rawValue := range values {
+		parsedURL, ok := parseFullURL(strings.TrimSpace(rawValue))
+		if !ok {
+			return nil, fmt.Errorf("known URL must be a full http or https URL")
+		}
+
+		value := parsedURL.String()
+		if _, exists := seen[value]; exists {
+			continue
+		}
+
+		seen[value] = struct{}{}
+		normalized = append(normalized, value)
 	}
 
 	return normalized, nil
@@ -430,6 +536,14 @@ func (b *Bundle) resolvePreparedLocalImportPlan(
 	plan := preparedLocalImportPlan{}
 	_, plan.hasPixelHashMap = tableNames["pixel_hash_map"]
 	_, plan.hasTransparency = tableNames["has_transparency"]
+	masterTableNames, err := b.lookupSchemaTableNames(ctx, "external_master")
+	if err != nil {
+		return preparedLocalImportPlan{}, err
+	}
+	_, hasURLMap := tableNames["url_map"]
+	_, hasURLDomains := masterTableNames["url_domains"]
+	_, hasURLs := masterTableNames["urls"]
+	plan.hasKnownURLs = hasURLMap && hasURLDomains && hasURLs
 	plan.createInbox = localFileService.serviceType == services.TypeLocalFileDomain
 
 	if localFileService.serviceType == services.TypeLocalFileUpdateDomain {
@@ -622,6 +736,99 @@ func appendPreparedCurrentMembership(
 	)
 
 	return nil
+}
+
+func ensurePreparedKnownURLs(
+	ctx context.Context,
+	tx *ImmediateTx,
+	hashID int64,
+	prepared normalizedPreparedLocalImport,
+	plan preparedLocalImportPlan,
+) error {
+	if !plan.hasKnownURLs || len(prepared.knownURLs) == 0 {
+		return nil
+	}
+
+	for _, knownURL := range prepared.knownURLs {
+		urlID, err := ensureKnownURLID(ctx, tx, knownURL)
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT OR IGNORE INTO main.url_map (hash_id, url_id) VALUES (?, ?)`,
+			hashID,
+			urlID,
+		); err != nil {
+			return fmt.Errorf("insert url_map row: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func ensureKnownURLID(ctx context.Context, tx *ImmediateTx, rawURL string) (int64, error) {
+	parsedURL, ok := parseFullURL(rawURL)
+	if !ok {
+		return 0, fmt.Errorf("known URL must be a full http or https URL")
+	}
+
+	normalizedURL := parsedURL.String()
+	domain := canonicalURLHostForMatching(parsedURL)
+	if domain == "" {
+		return 0, fmt.Errorf("known URL domain is required")
+	}
+
+	domainID, err := ensureKnownURLDomainID(ctx, tx, domain)
+	if err != nil {
+		return 0, err
+	}
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO external_master.urls (domain_id, url) VALUES (?, ?)`,
+		domainID,
+		normalizedURL,
+	); err != nil {
+		return 0, fmt.Errorf("insert url row: %w", err)
+	}
+
+	row := tx.QueryRowContext(
+		ctx,
+		`SELECT url_id FROM external_master.urls WHERE url = ?`,
+		normalizedURL,
+	)
+
+	var urlID int64
+	if err := row.Scan(&urlID); err != nil {
+		return 0, fmt.Errorf("query url row: %w", err)
+	}
+
+	return urlID, nil
+}
+
+func ensureKnownURLDomainID(ctx context.Context, tx *ImmediateTx, domain string) (int64, error) {
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO external_master.url_domains (domain) VALUES (?)`,
+		domain,
+	); err != nil {
+		return 0, fmt.Errorf("insert url domain row: %w", err)
+	}
+
+	row := tx.QueryRowContext(
+		ctx,
+		`SELECT domain_id FROM external_master.url_domains WHERE domain = ?`,
+		domain,
+	)
+
+	var domainID int64
+	if err := row.Scan(&domainID); err != nil {
+		return 0, fmt.Errorf("query url domain row: %w", err)
+	}
+
+	return domainID, nil
 }
 
 func lookupHashIDByHash(

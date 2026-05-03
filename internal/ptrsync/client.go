@@ -16,6 +16,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
@@ -49,6 +50,10 @@ type ptrBusyError struct {
 	retryAfter time.Duration
 }
 
+type ptrTransientTransportError struct {
+	err error
+}
+
 func (e *ptrBusyError) Error() string {
 	if e == nil {
 		return "PTR busy"
@@ -69,6 +74,22 @@ func (e *ptrBusyError) RetryAfter() time.Duration {
 	return e.retryAfter
 }
 
+func (e *ptrTransientTransportError) Error() string {
+	if e == nil || e.err == nil {
+		return "transient PTR transport error"
+	}
+
+	return e.err.Error()
+}
+
+func (e *ptrTransientTransportError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+
+	return e.err
+}
+
 func ptrBusyRetryAfter(err error) (time.Duration, bool) {
 	var busyErr *ptrBusyError
 	if !errors.As(err, &busyErr) {
@@ -76,6 +97,32 @@ func ptrBusyRetryAfter(err error) (time.Duration, bool) {
 	}
 
 	return busyErr.RetryAfter(), true
+}
+
+func ptrTransientTransport(err error) bool {
+	var transientErr *ptrTransientTransportError
+	return errors.As(err, &transientErr)
+}
+
+func isTransientPTRTransportError(err error) bool {
+	if err == nil || errors.Is(err, context.Canceled) {
+		return false
+	}
+
+	if errors.Is(err, io.EOF) ||
+		errors.Is(err, io.ErrUnexpectedEOF) ||
+		errors.Is(err, syscall.ECONNRESET) ||
+		errors.Is(err, syscall.ECONNABORTED) ||
+		errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+
+	return false
 }
 
 // NewClient constructs a real Hydrus remote client using cookie-based session
@@ -321,7 +368,11 @@ func (c *Client) doGET(ctx context.Context, path string, query url.Values) ([]by
 		fmt.Sprintf("PTR /%s response body", strings.TrimPrefix(path, "/")),
 	)
 	if err != nil {
-		return nil, fmt.Errorf("read PTR /%s response: %w", path, err)
+		wrapped := fmt.Errorf("read PTR /%s response: %w", path, err)
+		if isTransientPTRTransportError(err) {
+			return nil, &ptrTransientTransportError{err: wrapped}
+		}
+		return nil, wrapped
 	}
 
 	return body, nil
@@ -388,7 +439,11 @@ func (c *Client) doPTRGETWithRetry(
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("request PTR %s: %w", endpoint, err)
+		wrapped := fmt.Errorf("request PTR %s: %w", endpoint, err)
+		if isTransientPTRTransportError(err) {
+			return nil, &ptrTransientTransportError{err: wrapped}
+		}
+		return nil, wrapped
 	}
 
 	if err := checkPTRResponse(resp, http.MethodGet, endpoint); err != nil {

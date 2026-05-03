@@ -5,11 +5,14 @@ package fyneapp
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"fyne.io/fyne/v2"
+	"fyne.io/fyne/v2/canvas"
+	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
@@ -104,20 +107,137 @@ func TestFormatMetadata(t *testing.T) {
 	})
 }
 
+func TestPrototypeWindowTitle(t *testing.T) {
+	if desktopWindowTitle != "hydrus-go curation cockpit" {
+		t.Fatalf("desktopWindowTitle = %q, want curation cockpit title", desktopWindowTitle)
+	}
+}
+
+func TestPrototypeShellText(t *testing.T) {
+	if desktopHeaderTitle != "Hydrus Go" {
+		t.Fatalf("desktopHeaderTitle = %q, want Hydrus Go", desktopHeaderTitle)
+	}
+	if desktopHeaderSubtitle != "Daemon-backed browse, import, search, and PTR" {
+		t.Fatalf("desktopHeaderSubtitle = %q, want production subtitle", desktopHeaderSubtitle)
+	}
+	if defaultStatusText != "Ready. Connect to hydrusd to start validation." {
+		t.Fatalf("defaultStatusText = %q, want production status text", defaultStatusText)
+	}
+	if defaultPreviewText != "Select an image to preview." {
+		t.Fatalf("defaultPreviewText = %q, want compact preview text", defaultPreviewText)
+	}
+	if defaultMetadataText != "Select a file from the grid to inspect daemon-backed metadata." {
+		t.Fatalf("defaultMetadataText = %q, want compact metadata text", defaultMetadataText)
+	}
+}
+
+func TestSelectedPreviewLabelDoesNotWrap(t *testing.T) {
+	label := newSelectedPreviewLabel(defaultPreviewText)
+
+	if label.Wrapping != fyne.TextWrapOff {
+		t.Fatalf("label.Wrapping = %v, want %v", label.Wrapping, fyne.TextWrapOff)
+	}
+	if label.Alignment != fyne.TextAlignCenter {
+		t.Fatalf("label.Alignment = %v, want %v", label.Alignment, fyne.TextAlignCenter)
+	}
+}
+
+func TestFormatPTRBytesPerSecond(t *testing.T) {
+	if got := formatPTRBytesPerSecond(0); got != "0.00 MB/s" {
+		t.Fatalf("formatPTRBytesPerSecond(0) = %q, want %q", got, "0.00 MB/s")
+	}
+
+	oneMiBPerSecond := int64(1024 * 1024)
+	if got := formatPTRBytesPerSecond(oneMiBPerSecond); got != "1.00 MB/s" {
+		t.Fatalf("formatPTRBytesPerSecond(1MiB/s) = %q, want %q", got, "1.00 MB/s")
+	}
+}
+
+func TestBuildContentOmitsDebugChrome(t *testing.T) {
+	p := &prototype{
+		connectionLabel:   widget.NewLabel("status"),
+		queueSummaryLabel: widget.NewLabel("queue"),
+		queueDetailLabel:  widget.NewLabel("detail"),
+		leftTagsRichText:  widget.NewRichText(),
+		searchHintLabel:   widget.NewLabel("hint"),
+		previewImage:      canvas.NewImageFromImage(nil),
+		previewLabel:      widget.NewLabel(defaultPreviewText),
+		metadataLabel:     widget.NewLabel(defaultMetadataText),
+		tagsRichText:      widget.NewRichText(),
+		activityLabel:     widget.NewLabel("activity"),
+		statusBarLabel:    widget.NewLabel(defaultStatusText),
+		ptrStatusLabel:    widget.NewLabel("ptr"),
+		ptrHeadlineLabel:  widget.NewLabel("headline"),
+		ptrPendingLabel:   widget.NewLabel("pending"),
+		ptrProgressBar:    widget.NewProgressBarInfinite(),
+		gridHost:          container.NewStack(),
+		searchEntry:       widget.NewEntry(),
+		gallerySortSelect: widget.NewSelect(gallerySortModes, nil),
+		searchSuggestionsList: widget.NewList(
+			func() int { return 0 },
+			func() fyne.CanvasObject { return widget.NewLabel("") },
+			func(widget.ListItemID, fyne.CanvasObject) {},
+		),
+		queueList: widget.NewList(
+			func() int { return 0 },
+			func() fyne.CanvasObject { return widget.NewLabel("") },
+			func(widget.ListItemID, fyne.CanvasObject) {},
+		),
+		retrySelectedButton:  widget.NewButton("Retry Selected", nil),
+		removeSelectedButton: widget.NewButton("Remove Selected", nil),
+		retryFailedButton:    widget.NewButton("Retry Failed", nil),
+		clearFinishedButton:  widget.NewButton("Clear Finished", nil),
+		clearQueueButton:     widget.NewButton("Clear Queue", nil),
+		editTagsButton:       widget.NewButton("Edit Tags", nil),
+		ptrRefreshButton:     widget.NewButton("Refresh PTR Status", nil),
+		ptrSyncButton:        widget.NewButton("Manual Sync", nil),
+	}
+	content := p.buildContent()
+	texts := collectCanvasObjectTexts(content)
+	joined := strings.Join(texts, "\n")
+
+	if strings.Contains(joined, "NEW WINDOWS TEST BUILD") {
+		t.Fatal("build content still includes debug header marker")
+	}
+	if strings.Contains(joined, "rebuilt artifact marker for Windows smoke testing") {
+		t.Fatal("build content still includes build banner text")
+	}
+	if strings.Contains(joined, "older build") {
+		t.Fatal("build content still includes older build warning")
+	}
+	if !strings.Contains(joined, desktopHeaderTitle) {
+		t.Fatalf("build content texts = %q, want header title %q", joined, desktopHeaderTitle)
+	}
+	if !strings.Contains(joined, desktopHeaderSubtitle) {
+		t.Fatalf("build content texts = %q, want header subtitle %q", joined, desktopHeaderSubtitle)
+	}
+}
+
 func TestFormatPTRStatus(t *testing.T) {
 	t.Run("renders basic idle status", func(t *testing.T) {
+		mappingCount := int64(321)
 		status := coreptrsync.Status{
-			Enabled:                  true,
-			ServiceName:              "public tag repository",
-			Host:                     "ptr.hydrus.network",
-			Port:                     45871,
-			AccountMode:              coreptrsync.AccountModeSharedReadOnly,
-			Phase:                    "idle",
-			IsRunning:                false,
-			MetadataSlice:            7,
-			ProcessedDefinitionCount: 100,
-			ProcessedContentCount:    200,
-			DownloadedUpdateCount:    5,
+			Enabled:                         true,
+			ServiceName:                     "public tag repository",
+			Host:                            "ptr.hydrus.network",
+			Port:                            45871,
+			AccountMode:                     coreptrsync.AccountModeSharedReadOnly,
+			Phase:                           "idle",
+			IsRunning:                       false,
+			MetadataSlice:                   7,
+			ProcessedDefinitionCount:        100,
+			ProcessedContentCount:           200,
+			DownloadedUpdateCount:           5,
+			DownloadedUpdateBytes:           4096,
+			CurrentRunDownloadedBytes:       1024,
+			CurrentRunDownloadMS:            250,
+			CurrentRunBytesPerSecond:        4096,
+			CurrentRunNetworkFetchedBytes:   1024,
+			CurrentRunNetworkFetchMS:        125,
+			CurrentRunNetworkBytesPerSecond: 8192,
+			PendingDownloadCount:            2,
+			PendingProcessCount:             3,
+			LastSyncMappingCount:            &mappingCount,
 		}
 
 		got := formatPTRStatus(status)
@@ -126,10 +246,23 @@ func TestFormatPTRStatus(t *testing.T) {
 			"Account: shared-read-only\n" +
 			"Phase: idle\n" +
 			"Status: Idle\n" +
-			"Metadata Slice: 7\n" +
-			"Processed Definitions: 100\n" +
-			"Processed Content: 200\n" +
-			"Downloaded Update Files: 5"
+			"Remote Metadata Slice: 7\n" +
+			"Pending Download Bundles: 2\n" +
+			"Pending Process Bundles: 3\n" +
+			"Bundle Download Progress: 5/7 (71%)\n" +
+			"Bundle Apply Progress: 300/303 (99%)\n" +
+			"Next Update Due: unknown\n" +
+			"Applied Definition Bundles: 100\n" +
+			"Applied Content Bundles: 200\n" +
+			"Stored Repository Update Bundles: 5\n" +
+			"Stored Repository Update Bytes: 4096\n" +
+			"Current Run Network Fetched Bytes: 1024\n" +
+			"Current Run Effective Progress Window MS: 250\n" +
+			"Current Run Effective Progress Rate: 0.00 MB/s\n" +
+			"Current Run Raw Network Fetch MS: 125\n" +
+			"Current Run Raw Network Fetch Rate: 0.01 MB/s\n" +
+			"Verified Current PTR Mappings: 321\n" +
+			"Storage: SQLite repository update rows with raw update bodies; client_files reserved for imported media only"
 
 		if got != want {
 			t.Fatalf("formatPTRStatus() = %q, want %q", got, want)
@@ -153,11 +286,23 @@ func TestFormatPTRStatus(t *testing.T) {
 		want := "Service: public tag repository\n" +
 			"Phase: syncing\n" +
 			"Status: Sync is currently running\n" +
-			"Metadata Slice: 12\n" +
+			"Remote Metadata Slice: 12\n" +
+			"Pending Download Bundles: 0\n" +
+			"Pending Process Bundles: 0\n" +
+			"Bundle Download Progress: 0/0\n" +
+			"Bundle Apply Progress: 0/0\n" +
+			"Next Update Due: unknown\n" +
 			"Last error: connection reset by peer\n" +
-			"Processed Definitions: 0\n" +
-			"Processed Content: 0\n" +
-			"Downloaded Update Files: 0"
+			"Applied Definition Bundles: 0\n" +
+			"Applied Content Bundles: 0\n" +
+			"Stored Repository Update Bundles: 0\n" +
+			"Stored Repository Update Bytes: 0\n" +
+			"Current Run Network Fetched Bytes: 0\n" +
+			"Current Run Effective Progress Window MS: 0\n" +
+			"Current Run Effective Progress Rate: 0.00 MB/s\n" +
+			"Current Run Raw Network Fetch MS: 0\n" +
+			"Current Run Raw Network Fetch Rate: 0.00 MB/s\n" +
+			"Storage: SQLite repository update rows with raw update bodies; client_files reserved for imported media only"
 
 		if got != want {
 			t.Fatalf("formatPTRStatus() = %q, want %q", got, want)
@@ -178,11 +323,23 @@ func TestFormatPTRStatus(t *testing.T) {
 		got := formatPTRStatus(status)
 		want := "Service: public tag repository\n" +
 			"Phase: retrying\n" +
-			"Status: Remote PTR busy; retrying in 2m\n" +
-			"Metadata Slice: 0\n" +
-			"Processed Definitions: 0\n" +
-			"Processed Content: 0\n" +
-			"Downloaded Update Files: 7"
+			"Status: Waiting to retry in 2m\n" +
+			"Remote Metadata Slice: 0\n" +
+			"Pending Download Bundles: 0\n" +
+			"Pending Process Bundles: 0\n" +
+			"Bundle Download Progress: 7/7 (100%)\n" +
+			"Bundle Apply Progress: 0/0\n" +
+			"Next Update Due: unknown\n" +
+			"Applied Definition Bundles: 0\n" +
+			"Applied Content Bundles: 0\n" +
+			"Stored Repository Update Bundles: 7\n" +
+			"Stored Repository Update Bytes: 0\n" +
+			"Current Run Network Fetched Bytes: 0\n" +
+			"Current Run Effective Progress Window MS: 0\n" +
+			"Current Run Effective Progress Rate: 0.00 MB/s\n" +
+			"Current Run Raw Network Fetch MS: 0\n" +
+			"Current Run Raw Network Fetch Rate: 0.00 MB/s\n" +
+			"Storage: SQLite repository update rows with raw update bodies; client_files reserved for imported media only"
 
 		if got != want {
 			t.Fatalf("formatPTRStatus() = %q, want %q", got, want)
@@ -190,25 +347,43 @@ func TestFormatPTRStatus(t *testing.T) {
 	})
 
 	t.Run("renders explicit complete status", func(t *testing.T) {
+		mappingCount := int64(5)
+		nextUpdateDue := time.Now().Add(119 * time.Second).Unix()
 		status := coreptrsync.Status{
 			Enabled:                  true,
 			ServiceName:              "public tag repository",
 			Phase:                    coreptrsync.PhaseIdle,
 			IsComplete:               true,
+			IsUpToDate:               true,
 			MetadataSlice:            7,
 			ProcessedDefinitionCount: 2,
 			ProcessedContentCount:    3,
 			DownloadedUpdateCount:    5,
+			NextUpdateDue:            nextUpdateDue,
+			LastSyncMappingCount:     &mappingCount,
 		}
 
 		got := formatPTRStatus(status)
 		want := "Service: public tag repository\n" +
 			"Phase: idle\n" +
-			"Status: Complete\n" +
-			"Metadata Slice: 7\n" +
-			"Processed Definitions: 2\n" +
-			"Processed Content: 3\n" +
-			"Downloaded Update Files: 5"
+			"Status: Up to date\n" +
+			"Remote Metadata Slice: 7\n" +
+			"Pending Download Bundles: 0\n" +
+			"Pending Process Bundles: 0\n" +
+			"Bundle Download Progress: 5/5 (100%)\n" +
+			"Bundle Apply Progress: 5/5 (100%)\n" +
+			"Next Update Due: in 2m\n" +
+			"Applied Definition Bundles: 2\n" +
+			"Applied Content Bundles: 3\n" +
+			"Stored Repository Update Bundles: 5\n" +
+			"Stored Repository Update Bytes: 0\n" +
+			"Current Run Network Fetched Bytes: 0\n" +
+			"Current Run Effective Progress Window MS: 0\n" +
+			"Current Run Effective Progress Rate: 0.00 MB/s\n" +
+			"Current Run Raw Network Fetch MS: 0\n" +
+			"Current Run Raw Network Fetch Rate: 0.00 MB/s\n" +
+			"Verified Current PTR Mappings: 5\n" +
+			"Storage: SQLite repository update rows with raw update bodies; client_files reserved for imported media only"
 
 		if got != want {
 			t.Fatalf("formatPTRStatus() = %q, want %q", got, want)
@@ -243,7 +418,7 @@ func TestPTRStatusSummaryText(t *testing.T) {
 		}
 
 		got := ptrCompletionStatusText(status)
-		want := "PTR server is busy. Retrying in 45s."
+		want := "PTR sync is waiting to retry in 45s."
 		if got != want {
 			t.Fatalf("ptrCompletionStatusText() = %q, want %q", got, want)
 		}
@@ -262,8 +437,13 @@ func TestPTRStatusSummaryText(t *testing.T) {
 		}
 
 		status.IsComplete = true
-		if got := ptrHeadlineText(status); got != "PTR sync: ✓ complete" {
-			t.Fatalf("ptrHeadlineText() = %q, want %q", got, "PTR sync: ✓ complete")
+		if got := ptrHeadlineText(status); got != "PTR sync: ✓ caught up locally" {
+			t.Fatalf("ptrHeadlineText() = %q, want %q", got, "PTR sync: ✓ caught up locally")
+		}
+
+		status.IsUpToDate = true
+		if got := ptrHeadlineText(status); got != "PTR sync: ✓ up to date" {
+			t.Fatalf("ptrHeadlineText() = %q, want %q", got, "PTR sync: ✓ up to date")
 		}
 	})
 }
@@ -668,7 +848,7 @@ func TestPrototypeCollectLoadedSearchSuggestions(t *testing.T) {
 func TestSearchSuggestionsHint(t *testing.T) {
 	t.Run("empty prefix while connected", func(t *testing.T) {
 		got := searchSuggestionsHint("", true, nil, nil)
-		want := "Type a tag prefix to load autocomplete suggestions from hydrusd."
+		want := "Type a tag prefix to load autocomplete suggestions from hydrusd. Search uses daemon-backed tags and supported system predicates."
 		if got != want {
 			t.Fatalf("searchSuggestionsHint() = %q, want %q", got, want)
 		}
@@ -689,6 +869,271 @@ func TestSearchSuggestionsHint(t *testing.T) {
 			t.Fatalf("searchSuggestionsHint() = %q, want %q", got, want)
 		}
 	})
+
+	t.Run("suggestions invite daemon-backed search", func(t *testing.T) {
+		got := searchSuggestionsHint("creator:a", true, []string{"creator:alice"}, nil)
+		want := "Click a suggestion to search the daemon-backed library by that tag."
+		if got != want {
+			t.Fatalf("searchSuggestionsHint() = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestPrototypeSplitGallerySearchQuery(t *testing.T) {
+	t.Run("routes explicit tag terms to daemon search and keeps local overlay terms separate", func(t *testing.T) {
+		p := &prototype{}
+
+		remoteTags, daemonSystem, overlayTerms := p.splitGallerySearchQuery("creator:alice system:size>=2048 SYSTEM:local SYSTEM:WIDTH<800 alice")
+		if !slices.Equal(remoteTags, []string{"creator:alice"}) {
+			t.Fatalf("remoteTags = %v, want [creator:alice]", remoteTags)
+		}
+		if !slices.Equal(daemonSystem, []string{"size>=2048", "width<800"}) {
+			t.Fatalf("daemonSystem = %v, want [size>=2048 width<800]", daemonSystem)
+		}
+		if !slices.Equal(overlayTerms, []string{"SYSTEM:local", "alice"}) {
+			t.Fatalf("overlayTerms = %v, want [SYSTEM:local alice]", overlayTerms)
+		}
+	})
+
+	t.Run("promotes exact suggestion matches into daemon search even without a namespace", func(t *testing.T) {
+		p := &prototype{searchSuggestions: []string{"landscape", "creator:alice"}}
+
+		remoteTags, daemonSystem, overlayTerms := p.splitGallerySearchQuery("landscape")
+		if !slices.Equal(remoteTags, []string{"landscape"}) {
+			t.Fatalf("remoteTags = %v, want [landscape]", remoteTags)
+		}
+		if len(daemonSystem) != 0 {
+			t.Fatalf("daemonSystem = %v, want empty slice", daemonSystem)
+		}
+		if len(overlayTerms) != 0 {
+			t.Fatalf("overlayTerms = %v, want empty slice", overlayTerms)
+		}
+	})
+
+	t.Run("keeps free-text fallback local when no daemon tag hint is available", func(t *testing.T) {
+		p := &prototype{}
+
+		remoteTags, daemonSystem, overlayTerms := p.splitGallerySearchQuery("landscape")
+		if len(remoteTags) != 0 {
+			t.Fatalf("remoteTags = %v, want empty slice", remoteTags)
+		}
+		if len(daemonSystem) != 0 {
+			t.Fatalf("daemonSystem = %v, want empty slice", daemonSystem)
+		}
+		if !slices.Equal(overlayTerms, []string{"landscape"}) {
+			t.Fatalf("overlayTerms = %v, want [landscape]", overlayTerms)
+		}
+	})
+
+	t.Run("routes system:favorite to daemon", func(t *testing.T) {
+		p := &prototype{}
+
+		remoteTags, daemonSystem, overlayTerms := p.splitGallerySearchQuery("system:favorite")
+		if len(remoteTags) != 0 {
+			t.Fatalf("remoteTags = %v, want empty", remoteTags)
+		}
+		if !slices.Equal(daemonSystem, []string{"favorite"}) {
+			t.Fatalf("daemonSystem = %v, want [favorite]", daemonSystem)
+		}
+		if len(overlayTerms) != 0 {
+			t.Fatalf("overlayTerms = %v, want empty", overlayTerms)
+		}
+	})
+
+	t.Run("routes system:favourite=false to daemon", func(t *testing.T) {
+		p := &prototype{}
+
+		remoteTags, daemonSystem, overlayTerms := p.splitGallerySearchQuery("system:favourite=false")
+		if len(remoteTags) != 0 {
+			t.Fatalf("remoteTags = %v, want empty", remoteTags)
+		}
+		if !slices.Equal(daemonSystem, []string{"favourite=false"}) {
+			t.Fatalf("daemonSystem = %v, want [favourite=false]", daemonSystem)
+		}
+		if len(overlayTerms) != 0 {
+			t.Fatalf("overlayTerms = %v, want empty", overlayTerms)
+		}
+	})
+
+	t.Run("routes system:resolution>=WxH to daemon", func(t *testing.T) {
+		p := &prototype{}
+
+		remoteTags, daemonSystem, overlayTerms := p.splitGallerySearchQuery("system:resolution>=1280x720")
+		if len(remoteTags) != 0 {
+			t.Fatalf("remoteTags = %v, want empty", remoteTags)
+		}
+		if !slices.Equal(daemonSystem, []string{"resolution>=1280x720"}) {
+			t.Fatalf("daemonSystem = %v, want [resolution>=1280x720]", daemonSystem)
+		}
+		if len(overlayTerms) != 0 {
+			t.Fatalf("overlayTerms = %v, want empty", overlayTerms)
+		}
+	})
+
+	t.Run("mixes favorite and resolution with tag in daemon search", func(t *testing.T) {
+		p := &prototype{}
+
+		remoteTags, daemonSystem, overlayTerms := p.splitGallerySearchQuery("creator:alice system:favorite system:resolution>=1920x1080")
+		if !slices.Equal(remoteTags, []string{"creator:alice"}) {
+			t.Fatalf("remoteTags = %v, want [creator:alice]", remoteTags)
+		}
+		if !slices.Equal(daemonSystem, []string{"favorite", "resolution>=1920x1080"}) {
+			t.Fatalf("daemonSystem = %v, want [favorite resolution>=1920x1080]", daemonSystem)
+		}
+		if len(overlayTerms) != 0 {
+			t.Fatalf("overlayTerms = %v, want empty", overlayTerms)
+		}
+	})
+}
+
+func TestMapDaemonSort(t *testing.T) {
+	if got := mapDaemonSort(gallerySortNewest); got != "" {
+		t.Errorf("mapDaemonSort(gallerySortNewest) = %q, want \"\"", got)
+	}
+	if got := mapDaemonSort(gallerySortOldest); got != "import_oldest" {
+		t.Errorf("mapDaemonSort(gallerySortOldest) = %q, want \"import_oldest\"", got)
+	}
+	if got := mapDaemonSort(gallerySortSizeDesc); got != "size_desc" {
+		t.Errorf("mapDaemonSort(gallerySortSizeDesc) = %q, want \"size_desc\"", got)
+	}
+	if got := mapDaemonSort(gallerySortSizeAsc); got != "size_asc" {
+		t.Errorf("mapDaemonSort(gallerySortSizeAsc) = %q, want \"size_asc\"", got)
+	}
+	if got := mapDaemonSort(gallerySortNameAZ); got != "" {
+		t.Errorf("mapDaemonSort(gallerySortNameAZ) = %q, want \"\"", got)
+	}
+}
+
+func TestPrototypeGalleryUsesDaemonSearch(t *testing.T) {
+	p := &prototype{
+		connected: true,
+		client:    &daemonclient.Client{},
+	}
+
+	tests := []struct {
+		name     string
+		query    string
+		sortMode string
+		wantUse  bool
+	}{
+		{
+			name:     "pure local free text with default sort stays local",
+			query:    "some local terms",
+			sortMode: gallerySortNewest,
+			wantUse:  false,
+		},
+		{
+			name:     "remote tags trigger daemon search",
+			query:    "creator:alice",
+			sortMode: gallerySortNewest,
+			wantUse:  true,
+		},
+		{
+			name:     "daemon-capable system predicate triggers daemon search",
+			query:    "system:size>=2048",
+			sortMode: gallerySortNewest,
+			wantUse:  true,
+		},
+		{
+			name:     "unsupported system predicate stays local",
+			query:    "system:local",
+			sortMode: gallerySortNewest,
+			wantUse:  false,
+		},
+		{
+			name:     "daemon-capable sort (non-default) triggers daemon search",
+			query:    "",
+			sortMode: gallerySortSizeDesc,
+			wantUse:  true,
+		},
+		{
+			name:     "local sort with no tags stays local",
+			query:    "",
+			sortMode: gallerySortNameAZ,
+			wantUse:  false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			p.galleryFilterQuery = tc.query
+			p.gallerySortMode = tc.sortMode
+			if got := p.galleryUsesDaemonSearch(); got != tc.wantUse {
+				t.Errorf("galleryUsesDaemonSearch() = %v, want %v", got, tc.wantUse)
+			}
+		})
+	}
+
+	t.Run("completion text includes verified mapping count when available", func(t *testing.T) {
+		mappingCount := int64(42)
+		status := coreptrsync.Status{
+			Enabled:                  true,
+			Phase:                    coreptrsync.PhaseIdle,
+			IsComplete:               true,
+			ProcessedDefinitionCount: 2,
+			ProcessedContentCount:    3,
+			DownloadedUpdateCount:    5,
+			LastSyncMappingCount:     &mappingCount,
+		}
+
+		got := ptrCompletionStatusText(status)
+		want := "PTR sync has no local backlog in hydrusd. Applied definition bundles 2 • applied content bundles 3 • stored repository update bundles 5 • verified current mappings 42."
+		if got != want {
+			t.Fatalf("ptrCompletionStatusText() = %q, want %q", got, want)
+		}
+	})
+}
+
+func TestPrototypeFilteredRecentItems(t *testing.T) {
+	importedNewest := int64(300)
+	importedOldest := int64(100)
+	p := &prototype{
+		recent: []daemonclient.RecentItem{
+			{FileID: 1, Hash: "hash-one-abcdef", ImportedAtMS: &importedOldest},
+			{FileID: 2, Hash: "hash-two-abcdef", ImportedAtMS: &importedNewest},
+		},
+		galleryFilterQuery: "alice system:local",
+		gallerySortMode:    gallerySortNewest,
+	}
+
+	filtered := p.filteredRecentItems()
+	assertRecentItemOrder(t, filtered, []int64{2, 1})
+}
+
+func TestUpdateActionStateEnablesPTRSyncWhenDisabledButAvailable(t *testing.T) {
+	p := &prototype{
+		connected:            true,
+		ptrStatusLoaded:      true,
+		ptrStatus:            coreptrsync.Status{Phase: coreptrsync.PhaseDisabled, Enabled: false},
+		addButton:            widget.NewButton("Add File", nil),
+		addFolderButton:      widget.NewButton("Add Folder", nil),
+		refreshButton:        widget.NewButton("Refresh", nil),
+		ptrRefreshButton:     widget.NewButton("Refresh PTR Status", nil),
+		clearQueueButton:     widget.NewButton("Clear Queue", nil),
+		retryFailedButton:    widget.NewButton("Retry Failed", nil),
+		clearFinishedButton:  widget.NewButton("Clear Finished", nil),
+		retrySelectedButton:  widget.NewButton("Retry Selected", nil),
+		removeSelectedButton: widget.NewButton("Remove Selected", nil),
+		trashButton:          widget.NewButton("Trash", nil),
+		editTagsButton:       widget.NewButton("Edit Tags", nil),
+		ptrSyncButton:        widget.NewButton("Manual Sync", nil),
+		connectButton:        widget.NewButton("Connect", nil),
+	}
+
+	p.updateActionState()
+
+	if p.ptrSyncButton.Disabled() {
+		t.Fatal("ptrSyncButton.Disabled() = true, want false when PTR is disabled but available")
+	}
+}
+
+func TestIsDaemonCapableSort(t *testing.T) {
+	if !isDaemonCapableSort(gallerySortNewest) {
+		t.Error("expected gallerySortNewest to be daemon capable")
+	}
+	if isDaemonCapableSort(gallerySortNameAZ) {
+		t.Error("expected gallerySortNameAZ NOT to be daemon capable")
+	}
 }
 
 func TestFormatTagMetadataSegments(t *testing.T) {
@@ -853,103 +1298,6 @@ func TestGallerySortRequiresMetadata(t *testing.T) {
 	}
 }
 
-func TestRecentItemMatchesSystemPredicate(t *testing.T) {
-	width := int64(1920)
-	height := int64(1080)
-	metadata := daemonclient.FileMetadata{
-		Size:      2048,
-		Width:     &width,
-		Height:    &height,
-		IsLocal:   true,
-		IsTrashed: false,
-		IsDeleted: false,
-		Ratings: map[string]any{
-			"favorites-service": true,
-		},
-	}
-
-	tests := []struct {
-		name      string
-		predicate string
-		want      bool
-	}{
-		{name: "size minimum", predicate: "size>=1024", want: true},
-		{name: "size exact fail", predicate: "size=1024", want: false},
-		{name: "width minimum", predicate: "width>=1920", want: true},
-		{name: "height maximum", predicate: "height<=1080", want: true},
-		{name: "resolution minimum", predicate: "resolution>=1280x720", want: true},
-		{name: "resolution exact fail", predicate: "resolution=1280x720", want: false},
-		{name: "local shorthand", predicate: "local", want: true},
-		{name: "favorite shorthand", predicate: "favorite", want: true},
-		{name: "favourite shorthand", predicate: "favourite", want: true},
-		{name: "trashed shorthand", predicate: "trashed", want: false},
-		{name: "local explicit true", predicate: "local=true", want: true},
-		{name: "favorite explicit true", predicate: "favorite=true", want: true},
-		{name: "favorite explicit false", predicate: "favorite=false", want: false},
-		{name: "deleted explicit false", predicate: "deleted=false", want: true},
-		{name: "unknown predicate", predicate: "favorites=true", want: false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := recentItemMatchesSystemPredicate(tt.predicate, metadata, true)
-			if got != tt.want {
-				t.Fatalf("recentItemMatchesSystemPredicate(%q) = %t, want %t", tt.predicate, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestRecentItemMatchesQuery_WithPredicatesAndText(t *testing.T) {
-	width := int64(1920)
-	height := int64(1080)
-	metadata := daemonclient.FileMetadata{
-		Hash:    "abcdef1234567890",
-		MIME:    "image/png",
-		Size:    4096,
-		Width:   &width,
-		Height:  &height,
-		IsLocal: true,
-		Ratings: map[string]any{
-			"favourites": true,
-		},
-		Tags: map[string]daemonclient.FileMetadataTagService{
-			"local": {
-				DisplayTags: map[string][]string{
-					"0": {"creator:alice", "series:zeta"},
-				},
-			},
-		},
-	}
-	item := daemonclient.RecentItem{Hash: "abcdef1234567890", MIME: "image/png"}
-
-	if !recentItemMatchesQuery("alice system:size>=2048 system:resolution>=1280x720", item, metadata, true) {
-		t.Fatal("recentItemMatchesQuery() = false, want true for mixed text and system predicates")
-	}
-
-	if recentItemMatchesQuery("alice system:size>9000", item, metadata, true) {
-		t.Fatal("recentItemMatchesQuery() = true, want false for failing system predicate")
-	}
-
-	if !recentItemMatchesQuery("system:favorite=true alice", item, metadata, true) {
-		t.Fatal("recentItemMatchesQuery() = false, want true for favorite predicate")
-	}
-
-	if recentItemMatchesQuery("system:size>=2048", item, daemonclient.FileMetadata{}, false) {
-		t.Fatal("recentItemMatchesQuery() = true, want false when metadata is unavailable for system predicate")
-	}
-}
-
-func TestMetadataHasFavorite(t *testing.T) {
-	if !metadataHasFavorite(daemonclient.FileMetadata{Ratings: map[string]any{"favourites": true}}) {
-		t.Fatal("metadataHasFavorite() = false, want true")
-	}
-
-	if metadataHasFavorite(daemonclient.FileMetadata{Ratings: map[string]any{"stars": 5.0, "favourites": false}}) {
-		t.Fatal("metadataHasFavorite() = true, want false when no boolean-like rating is true")
-	}
-}
-
 func TestFormatRecentTileText(t *testing.T) {
 	t.Run("prefers creator tag for title and series tag for subtitle", func(t *testing.T) {
 		width := int64(640)
@@ -994,33 +1342,6 @@ func TestFormatRecentTileText(t *testing.T) {
 	})
 }
 
-func TestRecentItemMatchesQuery(t *testing.T) {
-	metadata := daemonclient.FileMetadata{
-		Hash: "abcdef1234567890",
-		MIME: "image/png",
-		Tags: map[string]daemonclient.FileMetadataTagService{
-			"local": {
-				DisplayTags: map[string][]string{
-					"0": {"creator:alice", "series:zeta"},
-				},
-			},
-		},
-	}
-	item := daemonclient.RecentItem{Hash: "abcdef1234567890", MIME: "image/png"}
-
-	if !recentItemMatchesQuery("alice", item, metadata, true) {
-		t.Fatal("recentItemMatchesQuery(alice) = false, want true")
-	}
-
-	if !recentItemMatchesQuery("abcdef123456", item, daemonclient.FileMetadata{}, false) {
-		t.Fatal("recentItemMatchesQuery(hash) = false, want true")
-	}
-
-	if recentItemMatchesQuery("missing-tag", item, metadata, true) {
-		t.Fatal("recentItemMatchesQuery(missing-tag) = true, want false")
-	}
-}
-
 func flattenTextSegments(t *testing.T, segments []widget.RichTextSegment) string {
 	t.Helper()
 
@@ -1029,6 +1350,41 @@ func flattenTextSegments(t *testing.T, segments []widget.RichTextSegment) string
 		textSegment, ok := segment.(*widget.TextSegment)
 		if !ok {
 			t.Fatalf("segment type = %T, want *widget.TextSegment", segment)
+		}
+
+		builder.WriteString(textSegment.Text)
+	}
+
+	return builder.String()
+}
+
+func collectCanvasObjectTexts(object fyne.CanvasObject) []string {
+	switch value := object.(type) {
+	case *fyne.Container:
+		texts := []string{}
+		for _, child := range value.Objects {
+			texts = append(texts, collectCanvasObjectTexts(child)...)
+		}
+		return texts
+	case *widget.Label:
+		return []string{value.Text}
+	case *widget.Button:
+		return []string{value.Text}
+	case *canvas.Text:
+		return []string{value.Text}
+	case *widget.RichText:
+		return []string{flattenTextSegmentsForCollect(value.Segments)}
+	default:
+		return nil
+	}
+}
+
+func flattenTextSegmentsForCollect(segments []widget.RichTextSegment) string {
+	var builder strings.Builder
+	for _, segment := range segments {
+		textSegment, ok := segment.(*widget.TextSegment)
+		if !ok {
+			continue
 		}
 
 		builder.WriteString(textSegment.Text)

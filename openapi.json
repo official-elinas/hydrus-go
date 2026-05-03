@@ -1,0 +1,865 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "hydrus-go HTTP API",
+    "version": "0.1.0",
+    "description": "Machine-readable description of the currently implemented hydrus-go daemon HTTP surface. This spec intentionally describes the implemented migration slice, not full Hydrus Client API parity. Protected operations prefer header credentials; the current implementation also accepts the same access/session key names as query parameters for compatibility."
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:45869",
+      "description": "Default local hydrus-go daemon"
+    }
+  ],
+  "tags": [
+    { "name": "bootstrap", "description": "Public bootstrap and health endpoints" },
+    { "name": "auth", "description": "Access-key and session-key authentication endpoints" },
+    { "name": "services", "description": "Hydrus-compatible service discovery endpoints" },
+    { "name": "metadata", "description": "Hydrus-compatible file metadata read endpoint" },
+    { "name": "browse", "description": "Thin-client recent/search browse endpoints" },
+    { "name": "assets", "description": "Managed original and thumbnail streaming endpoints" },
+    { "name": "imports", "description": "Daemon-owned local path, upload, and direct URL imports" },
+    { "name": "trash", "description": "Thin-client trash mutation endpoint" },
+    { "name": "tags", "description": "Tag autocomplete and narrow PTR pending-add staging" },
+    { "name": "ptr", "description": "Daemon-owned PTR status, trigger, pending count, and commit endpoints" },
+    { "name": "database", "description": "Database integrity-check endpoint" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "HydrusAccessKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Hydrus-Client-API-Access-Key",
+        "description": "64-character hex access key. Preferred auth mechanism for protected endpoints."
+      },
+      "HydrusSessionKey": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "Hydrus-Client-API-Session-Key",
+        "description": "64-character hex session key minted from /session_key. Preferred auth mechanism for protected endpoints."
+      }
+    },
+    "schemas": {
+      "ResponseMeta": {
+        "type": "object",
+        "properties": {
+          "version": { "type": "integer", "description": "Hydrus Client API version injected by the server." },
+          "hydrus_version": {
+            "description": "Hydrus compatibility target injected by the server.",
+            "oneOf": [
+              { "type": "integer" },
+              { "type": "string" }
+            ]
+          }
+        },
+        "required": ["version", "hydrus_version"]
+      },
+      "WelcomeResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ResponseMeta" },
+          {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "message": { "type": "string" }
+            },
+            "required": ["name", "message"]
+          }
+        ]
+      },
+      "HealthResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ResponseMeta" },
+          {
+            "type": "object",
+            "properties": {
+              "status": { "type": "string", "enum": ["ok"] }
+            },
+            "required": ["status"]
+          }
+        ]
+      },
+      "APIVersionResponse": {
+        "$ref": "#/components/schemas/ResponseMeta"
+      },
+      "VerifyAccessKeyResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ResponseMeta" },
+          {
+            "type": "object",
+            "properties": {
+              "name": { "type": "string" },
+              "permits_everything": { "type": "boolean" },
+              "basic_permissions": {
+                "type": "array",
+                "items": { "type": "integer" }
+              },
+              "human_description": { "type": "string" }
+            },
+            "required": ["name", "permits_everything", "basic_permissions", "human_description"]
+          }
+        ]
+      },
+      "SessionKeyResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ResponseMeta" },
+          {
+            "type": "object",
+            "properties": {
+              "session_key": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            },
+            "required": ["session_key"]
+          }
+        ]
+      },
+      "Service": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "service_key": { "type": "string" },
+          "type": { "type": "integer" },
+          "type_pretty": { "type": "string" }
+        },
+        "required": ["name", "service_key", "type", "type_pretty"],
+        "additionalProperties": true
+      },
+      "LegacyService": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "type": { "type": "integer" },
+          "type_pretty": { "type": "string" }
+        },
+        "required": ["name", "type", "type_pretty"],
+        "additionalProperties": true
+      },
+      "ServicesResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ResponseMeta" },
+          {
+            "type": "object",
+            "properties": {
+              "services": {
+                "type": "object",
+                "additionalProperties": { "$ref": "#/components/schemas/LegacyService" }
+              },
+              "services_v2": {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/Service" }
+              }
+            },
+            "required": ["services", "services_v2"],
+            "additionalProperties": true
+          }
+        ]
+      },
+      "ServiceLookupResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ResponseMeta" },
+          {
+            "type": "object",
+            "properties": {
+              "service": { "$ref": "#/components/schemas/Service" }
+            },
+            "required": ["service"]
+          }
+        ]
+      },
+      "FileMetadataRow": {
+        "type": "object",
+        "description": "Hydrus-compatible metadata row. The current migration slice returns a dynamic object with fields varying by request flags.",
+        "additionalProperties": true
+      },
+      "FileMetadataResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ResponseMeta" },
+          {
+            "type": "object",
+            "properties": {
+              "metadata": {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/FileMetadataRow" }
+              },
+              "services": {
+                "type": "object",
+                "additionalProperties": { "$ref": "#/components/schemas/LegacyService" }
+              },
+              "services_v2": {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/Service" }
+              }
+            },
+            "required": ["metadata"]
+          }
+        ]
+      },
+      "BrowseItem": {
+        "type": "object",
+        "properties": {
+          "file_id": { "type": "integer", "format": "int64" },
+          "hash": { "type": "string" },
+          "mime": { "type": "string" },
+          "has_thumbnail": { "type": "boolean" },
+          "content_url": { "type": "string" },
+          "thumbnail_url": { "type": "string" },
+          "metadata_url": { "type": "string" },
+          "imported_at_ms": { "type": "integer", "format": "int64", "nullable": true },
+          "width": { "type": "integer", "format": "int64", "nullable": true },
+          "height": { "type": "integer", "format": "int64", "nullable": true }
+        },
+        "required": ["file_id", "hash", "mime", "has_thumbnail", "content_url", "thumbnail_url", "metadata_url"]
+      },
+      "RecentFilesResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ResponseMeta" },
+          {
+            "type": "object",
+            "properties": {
+              "offset": { "type": "integer" },
+              "limit": { "type": "integer" },
+              "has_more": { "type": "boolean" },
+              "items": {
+                "type": "array",
+                "items": { "$ref": "#/components/schemas/BrowseItem" }
+              }
+            },
+            "required": ["offset", "limit", "has_more", "items"]
+          }
+        ]
+      },
+      "SystemPredicate": {
+        "type": "object",
+        "properties": {
+          "Field": { "type": "string", "enum": ["size", "width", "height"] },
+          "Op": { "type": "string", "enum": ["<", "<=", "=", ">=", ">"] },
+          "Value": { "type": "integer", "format": "int64" }
+        },
+        "required": ["Field", "Op", "Value"]
+      },
+      "SearchFilesResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ResponseMeta" },
+          {
+            "type": "object",
+            "properties": {
+              "offset": { "type": "integer" },
+              "limit": { "type": "integer" },
+              "tags": { "type": "array", "items": { "type": "string" } },
+              "sort_by": { "type": "string" },
+              "system_predicates": { "type": "array", "items": { "$ref": "#/components/schemas/SystemPredicate" } },
+              "has_more": { "type": "boolean" },
+              "items": { "type": "array", "items": { "$ref": "#/components/schemas/BrowseItem" } }
+            },
+            "required": ["offset", "limit", "tags", "sort_by", "system_predicates", "has_more", "items"]
+          }
+        ]
+      },
+      "TagAutocompleteResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ResponseMeta" },
+          {
+            "type": "object",
+            "properties": {
+              "query": { "type": "string" },
+              "suggestions": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["query", "suggestions"]
+          }
+        ]
+      },
+      "ImportLocalFileRequest": {
+        "type": "object",
+        "properties": {
+          "path": { "type": "string" },
+          "local_file_service_key": { "type": "string" }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      },
+      "ImportURLRequest": {
+        "type": "object",
+        "properties": {
+          "url": { "type": "string", "format": "uri" },
+          "referral_url": { "type": "string", "format": "uri" },
+          "local_file_service_key": { "type": "string" }
+        },
+        "required": ["url"],
+        "additionalProperties": false
+      },
+      "ImportResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ResponseMeta" },
+          {
+            "type": "object",
+            "properties": {
+              "file_id": { "type": "integer", "format": "int64" },
+              "hash": { "type": "string" },
+              "already_imported": { "type": "boolean" },
+              "managed_file_already_present": { "type": "boolean" },
+              "content_url": { "type": "string" },
+              "thumbnail_url": { "type": "string" },
+              "metadata_url": { "type": "string" }
+            },
+            "required": ["file_id", "hash", "already_imported", "managed_file_already_present", "content_url", "thumbnail_url", "metadata_url"]
+          }
+        ]
+      },
+      "TrashRequest": {
+        "type": "object",
+        "properties": {
+          "file_id": { "type": "integer", "format": "int64" }
+        },
+        "required": ["file_id"],
+        "additionalProperties": false
+      },
+      "TrashResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ResponseMeta" },
+          {
+            "type": "object",
+            "properties": {
+              "file_id": { "type": "integer", "format": "int64" },
+              "trashed": { "type": "boolean" },
+              "removed_from_recent": { "type": "boolean" },
+              "state": { "type": "string", "enum": ["trashed"] }
+            },
+            "required": ["file_id", "trashed", "removed_from_recent", "state"]
+          }
+        ]
+      },
+      "AddTagsRequest": {
+        "type": "object",
+        "description": "Narrow current implementation: one service only, one action only, and only CONTENT_UPDATE_PEND (2) is supported.",
+        "properties": {
+          "hash": { "type": "string" },
+          "hashes": { "type": "array", "items": { "type": "string" } },
+          "file_id": { "type": "integer", "format": "int64" },
+          "file_ids": { "type": "array", "items": { "type": "integer", "format": "int64" } },
+          "service_keys_to_actions_to_tags": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": {
+                "type": "array",
+                "items": { "type": "string" }
+              }
+            }
+          }
+        },
+        "required": ["service_keys_to_actions_to_tags"],
+        "additionalProperties": false
+      },
+      "AddTagsResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ResponseMeta" },
+          {
+            "type": "object",
+            "properties": {
+              "service_key": { "type": "string" },
+              "added_mappings": { "type": "integer", "format": "int64" }
+            },
+            "required": ["service_key", "added_mappings"]
+          }
+        ]
+      },
+      "CommitPendingRequest": {
+        "type": "object",
+        "properties": {
+          "service_key": { "type": "string" }
+        },
+        "additionalProperties": false
+      },
+      "CommitPendingResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ResponseMeta" },
+          {
+            "type": "object",
+            "properties": {
+              "service_key": { "type": "string" },
+              "committed_mappings": { "type": "integer", "format": "int64" }
+            },
+            "required": ["service_key", "committed_mappings"]
+          }
+        ]
+      },
+      "PendingCountResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ResponseMeta" },
+          {
+            "type": "object",
+            "properties": {
+              "service_key": { "type": "string" },
+              "pending_count": { "type": "integer", "format": "int64" }
+            },
+            "required": ["service_key", "pending_count"]
+          }
+        ]
+      },
+      "PTRStatus": {
+        "type": "object",
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "configured": { "type": "boolean" },
+          "service_name": { "type": "string" },
+          "service_key": { "type": "string" },
+          "host": { "type": "string" },
+          "port": { "type": "integer" },
+          "account_mode": { "type": "string" },
+          "phase": { "type": "string", "enum": ["disabled", "unavailable", "idle", "syncing", "retrying"] },
+          "is_running": { "type": "boolean" },
+          "is_complete": { "type": "boolean" },
+          "is_up_to_date": { "type": "boolean" },
+          "metadata_slice": { "type": "integer", "format": "int64" },
+          "downloaded_update_count": { "type": "integer", "format": "int64" },
+          "downloaded_update_bytes": { "type": "integer", "format": "int64" },
+          "current_run_downloaded_bytes": { "type": "integer", "format": "int64" },
+          "current_run_download_ms": { "type": "integer", "format": "int64" },
+          "current_run_bytes_per_second": { "type": "integer", "format": "int64" },
+          "current_run_network_fetched_bytes": { "type": "integer", "format": "int64" },
+          "current_run_network_fetch_ms": { "type": "integer", "format": "int64" },
+          "current_run_network_bytes_per_second": { "type": "integer", "format": "int64" },
+          "processed_definition_count": { "type": "integer", "format": "int64" },
+          "processed_content_count": { "type": "integer", "format": "int64" },
+          "pending_download_count": { "type": "integer", "format": "int64" },
+          "pending_process_count": { "type": "integer", "format": "int64" },
+          "next_update_due": { "type": "integer", "format": "int64", "description": "Unix seconds timestamp from remote PTR metadata." },
+          "last_sync_mapping_count": { "type": "integer", "format": "int64" },
+          "retry_at_ms": { "type": "integer", "format": "int64" },
+          "retry_attempt": { "type": "integer", "format": "int64" },
+          "last_error": { "type": "string" },
+          "unavailable_reason": { "type": "string" },
+          "updated_at_ms": { "type": "integer", "format": "int64" }
+        },
+        "required": ["enabled", "configured", "phase", "is_running", "is_complete", "is_up_to_date", "metadata_slice", "downloaded_update_count", "downloaded_update_bytes", "current_run_downloaded_bytes", "current_run_download_ms", "current_run_bytes_per_second", "processed_definition_count", "processed_content_count", "pending_download_count", "pending_process_count"]
+      },
+      "PTRStatusResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ResponseMeta" },
+          {
+            "type": "object",
+            "properties": {
+              "ptr": { "$ref": "#/components/schemas/PTRStatus" }
+            },
+            "required": ["ptr"]
+          }
+        ]
+      },
+      "IntegrityCheckResult": {
+        "type": "object",
+        "properties": {
+          "passed": { "type": "boolean" },
+          "results": { "type": "array", "items": { "type": "string" } }
+        },
+        "required": ["passed", "results"]
+      },
+      "IntegrityResponse": {
+        "allOf": [
+          { "$ref": "#/components/schemas/ResponseMeta" },
+          {
+            "type": "object",
+            "properties": {
+              "integrity": { "$ref": "#/components/schemas/IntegrityCheckResult" }
+            },
+            "required": ["integrity"]
+          }
+        ]
+      }
+    }
+  },
+  "paths": {
+    "/": {
+      "get": {
+        "tags": ["bootstrap"],
+        "summary": "Welcome",
+        "responses": {
+          "200": {
+            "description": "Daemon welcome payload",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/WelcomeResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/healthz": {
+      "get": {
+        "tags": ["bootstrap"],
+        "summary": "Health check",
+        "responses": {
+          "200": {
+            "description": "Health status",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/HealthResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api_version": {
+      "get": {
+        "tags": ["bootstrap"],
+        "summary": "API version envelope",
+        "responses": {
+          "200": {
+            "description": "Current version envelope",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/APIVersionResponse" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/verify_access_key": {
+      "get": {
+        "tags": ["auth"],
+        "summary": "Verify access/session key",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "responses": {
+          "200": {
+            "description": "Authenticated principal details",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/VerifyAccessKeyResponse" }
+              }
+            }
+          },
+          "401": { "description": "Missing credentials", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "403": { "description": "Invalid credentials or permissions", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "419": { "description": "Expired session key", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/session_key": {
+      "get": {
+        "tags": ["auth"],
+        "summary": "Mint session key",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "responses": {
+          "200": {
+            "description": "Session key created",
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "#/components/schemas/SessionKeyResponse" }
+              }
+            }
+          },
+          "401": { "description": "Missing credentials", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "403": { "description": "Invalid access key", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "419": { "description": "Expired session key", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/get_services": {
+      "get": {
+        "tags": ["services"],
+        "summary": "List services",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "responses": {
+          "200": { "description": "Discovery-visible services", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ServicesResponse" } } } },
+          "401": { "description": "Missing credentials", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "403": { "description": "Insufficient permissions", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "419": { "description": "Expired session", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "500": { "description": "Service list unavailable", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/get_service": {
+      "get": {
+        "tags": ["services"],
+        "summary": "Lookup one service",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "parameters": [
+          { "name": "service_key", "in": "query", "schema": { "type": "string" }, "description": "Hex service key. Provide either service_key or service_name." },
+          { "name": "service_name", "in": "query", "schema": { "type": "string" }, "description": "Public discovery-visible service name. Provide either service_key or service_name." }
+        ],
+        "responses": {
+          "200": { "description": "Service lookup result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ServiceLookupResponse" } } } },
+          "400": { "description": "Invalid query or undiscoverable service", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "404": { "description": "Service not found", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/get_files/file_metadata": {
+      "get": {
+        "tags": ["metadata"],
+        "summary": "Hydrus-compatible file metadata",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "parameters": [
+          { "name": "hash", "in": "query", "schema": { "type": "string" }, "description": "One SHA-256 hex hash." },
+          { "name": "hashes", "in": "query", "schema": { "type": "string" }, "description": "JSON-encoded array of SHA-256 hex hashes." },
+          { "name": "file_id", "in": "query", "schema": { "type": "integer", "format": "int64" }, "description": "One file id." },
+          { "name": "file_ids", "in": "query", "schema": { "type": "string" }, "description": "JSON-encoded array of file ids." },
+          { "name": "only_return_identifiers", "in": "query", "schema": { "type": "boolean" } },
+          { "name": "only_return_basic_information", "in": "query", "schema": { "type": "boolean" } },
+          { "name": "include_services_object", "in": "query", "schema": { "type": "boolean", "default": true } },
+          { "name": "hide_service_keys_tags", "in": "query", "schema": { "type": "boolean", "default": true } },
+          { "name": "include_blurhash", "in": "query", "schema": { "type": "boolean" } },
+          { "name": "include_milliseconds", "in": "query", "schema": { "type": "boolean" } },
+          { "name": "detailed_url_information", "in": "query", "schema": { "type": "boolean" } },
+          { "name": "include_notes", "in": "query", "schema": { "type": "boolean" } },
+          { "name": "create_new_file_ids", "in": "query", "schema": { "type": "boolean" } }
+        ],
+        "responses": {
+          "200": { "description": "Metadata rows", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/FileMetadataResponse" } } } },
+          "400": { "description": "Invalid metadata request", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "404": { "description": "Requested file not found", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "501": { "description": "Requested metadata mode not implemented", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/v1/tags/autocomplete": {
+      "get": {
+        "tags": ["tags"],
+        "summary": "Autocomplete tags",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "parameters": [
+          { "name": "q", "in": "query", "required": false, "schema": { "type": "string" }, "description": "Tag prefix. Blank or omitted values return an empty suggestion list." },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 20, "minimum": 1 } }
+        ],
+        "responses": {
+          "200": { "description": "Tag suggestions", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TagAutocompleteResponse" } } } },
+          "400": { "description": "Invalid limit", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "500": { "description": "Autocomplete unavailable", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/v1/library/recent": {
+      "get": {
+        "tags": ["browse"],
+        "summary": "Recent local files",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "parameters": [
+          { "name": "offset", "in": "query", "schema": { "type": "integer", "default": 0, "minimum": 0 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 100, "minimum": 1, "maximum": 250 } }
+        ],
+        "responses": {
+          "200": { "description": "Recent browse page", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/RecentFilesResponse" } } } },
+          "400": { "description": "Invalid offset or limit", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "501": { "description": "Recent browse unavailable", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/v1/library/search": {
+      "get": {
+        "tags": ["browse"],
+        "summary": "Daemon-backed local-library search",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "parameters": [
+          { "name": "offset", "in": "query", "schema": { "type": "integer", "default": 0, "minimum": 0 } },
+          { "name": "limit", "in": "query", "schema": { "type": "integer", "default": 100, "minimum": 1, "maximum": 250 } },
+          { "name": "tags", "in": "query", "schema": { "type": "array", "items": { "type": "string" } }, "style": "form", "explode": true, "description": "Repeat this parameter for AND-tag queries." },
+          { "name": "sort_by", "in": "query", "schema": { "type": "string", "enum": ["", "import_newest", "import_oldest", "size_desc", "size_asc"] } },
+          { "name": "system_predicates[]", "in": "query", "schema": { "type": "array", "items": { "type": "string" } }, "style": "form", "explode": true, "description": "Repeat this parameter for supported size/width/height/favorite/resolution predicates." }
+        ],
+        "responses": {
+          "200": { "description": "Search page", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/SearchFilesResponse" } } } },
+          "400": { "description": "Invalid search request", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "501": { "description": "Unsupported search mode", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/v1/files/content": {
+      "get": {
+        "tags": ["assets"],
+        "summary": "Stream managed original file",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "parameters": [
+          { "name": "file_id", "in": "query", "required": true, "schema": { "type": "integer", "format": "int64" } }
+        ],
+        "responses": {
+          "200": { "description": "Managed original file stream", "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } },
+          "400": { "description": "Invalid file id", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "404": { "description": "Asset not found", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "501": { "description": "Asset serving unavailable", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/v1/files/thumbnail": {
+      "get": {
+        "tags": ["assets"],
+        "summary": "Stream managed thumbnail",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "parameters": [
+          { "name": "file_id", "in": "query", "required": true, "schema": { "type": "integer", "format": "int64" } }
+        ],
+        "responses": {
+          "200": { "description": "Managed thumbnail stream", "content": { "application/octet-stream": { "schema": { "type": "string", "format": "binary" } } } },
+          "400": { "description": "Invalid file id", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "404": { "description": "Asset not found", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "501": { "description": "Asset serving unavailable", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/v1/files/trash": {
+      "post": {
+        "tags": ["trash"],
+        "summary": "Trash one file",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TrashRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "File trashed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/TrashResponse" } } } },
+          "400": { "description": "Invalid trash request", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "404": { "description": "File not found", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "501": { "description": "Trash unavailable", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/v1/import/local_file": {
+      "post": {
+        "tags": ["imports"],
+        "summary": "Import one daemon-local path",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ImportLocalFileRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Import result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ImportResponse" } } } },
+          "400": { "description": "Invalid import request", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "404": { "description": "Local path not found", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "501": { "description": "Import unavailable", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/v1/import/url": {
+      "post": {
+        "tags": ["imports"],
+        "summary": "Import one direct file URL",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ImportURLRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Import result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ImportResponse" } } } },
+          "400": { "description": "Invalid URL import request or remote URL fetch failure", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "501": { "description": "URL import unavailable", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/v1/import/upload": {
+      "post": {
+        "tags": ["imports"],
+        "summary": "Import one uploaded file",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "file": { "type": "string", "format": "binary" },
+                  "local_file_service_key": { "type": "string" },
+                  "file_modified_at_ms": { "type": "string", "description": "Unix milliseconds as a string field." }
+                },
+                "required": ["file"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Import result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/ImportResponse" } } } },
+          "400": { "description": "Invalid upload form", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "413": { "description": "Upload exceeds body limit", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "501": { "description": "Upload import unavailable", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/add_tags/add_tags": {
+      "post": {
+        "tags": ["tags", "ptr"],
+        "summary": "Stage PTR pending-add mappings",
+        "description": "Current narrow implementation: exactly one service and only CONTENT_UPDATE_PEND (2) are supported.",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AddTagsRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Pending mappings staged", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AddTagsResponse" } } } },
+          "400": { "description": "Invalid add-tags request", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "503": { "description": "PTR staging unavailable", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/manage_services/pending_counts": {
+      "get": {
+        "tags": ["ptr"],
+        "summary": "Get locally staged PTR pending count",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "parameters": [
+          { "name": "service_key", "in": "query", "schema": { "type": "string" }, "description": "Optional PTR service key. Defaults to the daemon-owned public tag repository service." }
+        ],
+        "responses": {
+          "200": { "description": "Pending mapping count", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PendingCountResponse" } } } },
+          "404": { "description": "PTR service not found", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "503": { "description": "PTR pending counts unavailable", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/manage_services/commit_pending": {
+      "post": {
+        "tags": ["ptr"],
+        "summary": "Commit staged PTR pending mappings",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "requestBody": {
+          "required": false,
+          "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CommitPendingRequest" } } }
+        },
+        "responses": {
+          "200": { "description": "Pending mappings committed", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/CommitPendingResponse" } } } },
+          "400": { "description": "Invalid commit request", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "503": { "description": "PTR pending commit unavailable", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/service/ptr/status": {
+      "get": {
+        "tags": ["ptr"],
+        "summary": "Get daemon-owned PTR status",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "responses": {
+          "200": { "description": "PTR status", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PTRStatusResponse" } } } },
+          "501": { "description": "PTR status unavailable", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/service/ptr/sync": {
+      "post": {
+        "tags": ["ptr"],
+        "summary": "Trigger one daemon-owned PTR sync pass",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "responses": {
+          "200": { "description": "Immediate PTR status after accepted trigger", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PTRStatusResponse" } } } },
+          "400": { "description": "PTR disabled; status payload returned", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PTRStatusResponse" } } } },
+          "503": { "description": "PTR unavailable; status payload returned", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PTRStatusResponse" } } } },
+          "501": { "description": "PTR trigger unavailable", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/manage_database/integrity_check": {
+      "post": {
+        "tags": ["database"],
+        "summary": "Run SQLite integrity check",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "responses": {
+          "200": { "description": "Integrity check result", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/IntegrityResponse" } } } },
+          "501": { "description": "Integrity checks unavailable", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    }
+  }
+}

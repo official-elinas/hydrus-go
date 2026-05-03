@@ -59,6 +59,8 @@ type cliOptions struct {
 	bootstrapTimeoutSet     bool
 }
 
+const defaultBootstrapDBDir = "db"
+
 func loadRuntimeConfig(args []string, stderr io.Writer) (config.Config, error) {
 	options, err := parseCLIOptions(args, stderr)
 	if err != nil {
@@ -83,11 +85,28 @@ func loadRuntimeConfig(args []string, stderr io.Writer) (config.Config, error) {
 		cfg.BootstrapTimeout = options.bootstrapTimeout
 	}
 
+	if !bootstrapBehaviorConfigured(options) {
+		cfg.EnableFreshClientBootstrap = true
+	}
+
+	if cfg.EnableFreshClientBootstrap && strings.TrimSpace(cfg.DBDir) == "" {
+		cfg.DBDir = defaultBootstrapDBDir
+	}
+
 	if err := cfg.Validate(); err != nil {
 		return config.Config{}, err
 	}
 
 	return cfg, nil
+}
+
+func bootstrapBehaviorConfigured(options cliOptions) bool {
+	if options.bootstrapFreshClientSet {
+		return true
+	}
+
+	return strings.TrimSpace(os.Getenv("HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP")) != "" ||
+		strings.TrimSpace(os.Getenv("HYDRUS_GO_ENABLE_PYTHON_FRESH_CLIENT_BOOTSTRAP")) != ""
 }
 
 func parseCLIOptions(args []string, stderr io.Writer) (cliOptions, error) {
@@ -112,7 +131,7 @@ func parseCLIOptions(args []string, stderr io.Writer) (cliOptions, error) {
 		&options.bootstrapFreshClient,
 		"bootstrap-fresh-client",
 		false,
-		"if HYDRUS_GO_DB_DIR is empty or missing, create a fresh canonical client bundle using the native hydrus-go bootstrap",
+		"override whether hydrusd creates a fresh canonical client bundle for a missing or empty DB target; plain hydrusd defaults to bootstrapping ./db",
 	)
 	flagSet.DurationVar(
 		&options.bootstrapTimeout,

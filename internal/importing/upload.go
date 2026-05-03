@@ -68,6 +68,7 @@ func (i *Importer) ImportUpload(
 	result, err := i.ImportPreparedFile(ctx, PreparedFile{
 		SourcePath:          stagedPath,
 		HashHex:             hashHex,
+		KnownURLs:           append([]string(nil), request.KnownURLs...),
 		Size:                info.Size(),
 		Mime:                mimeEnum,
 		Width:               stillImageMetadata.Width,

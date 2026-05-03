@@ -24,14 +24,16 @@ This repository currently provides the following early migration slices:
 - Hydrus-compatible service catalog foundation
 - access key and session key flow for the initial compatibility endpoints
 - initial DB-backed file metadata compatibility, including first full/default metadata slices for both non-tag fields and a first daemon-served tags payload
+- a first daemon-side search foundation for AND-tag queries, `system:` predicates (`size`, `width`, `height`, `favorite`, `resolution`), and server-side sort modes (`import_oldest`, `size_desc`, `size_asc`)
 - an internal prepared-file import checkpoint that composes managed placement with serialized DB writes
 - first thin-client browse/asset endpoints for recent local files, originals, and thumbnails
-- public local-path import and trash endpoints for thin-client-driven library testing
-- daemon-owned anonymous PTR sync foundations, remote snapshot persistence, real `/update` download plus local repository-updates registration, batched local repository-update finalization, and first status/trigger APIs with remote-busy retry handling
-- an initial Fyne-based desktop prototype for `hydrusd`, including selected JPEG/PNG/GIF original preview, incremental recent loading, a more resizable split-shell layout, and PTR status/manual sync through daemon APIs
+- public local-path import, trash, and tag-mutation endpoints for thin-client-driven library testing
+- daemon-owned anonymous PTR sync foundations, remote snapshot persistence, real `/update` download plus local repository-update registration, existing-DB restart/continuation handling, batched local repository-update finalization, and daemon status APIs that now distinguish local backlog completion from true up-to-date state
+- real-time PTR pending-count visibility and commit support across the daemon, daemonclient, and desktop prototype
+- an initial Fyne-based desktop prototype for `hydrusd`, including selected JPEG/PNG/GIF original preview, incremental recent loading, a more resizable split-shell layout, daemon-backed search/sorting, and PTR status/manual sync/pending-count visibility
 - real `hydrusd --listen host:port` runtime overrides for temporary LAN testing
 - explicit Linux/Windows desktop build targets, including a Windows GUI-subsystem executable for Explorer launches
-- an opt-in native-Go fresh Hydrus client bundle bootstrap for empty or missing DB directories
+- a native-Go fresh Hydrus client bundle bootstrap for empty or missing DB directories, with plain `hydrusd` now seeding `./db` by default and verified end-to-end through live smoke testing
 
 Project notes live in:
 
@@ -40,6 +42,10 @@ Project notes live in:
 - [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — current system shape
 - [`docs/DECISIONS.md`](docs/DECISIONS.md) — important architectural decisions
 - [`docs/thin-client-mvp.md`](docs/thin-client-mvp.md) — first desktop client scope and daemon contract
+
+Machine-readable API reference:
+
+- [`openapi.json`](openapi.json) — OpenAPI 3.1 description of the currently implemented HTTP surface for Swagger/ReDoc-style tooling
 
 ## Implemented endpoints
 
@@ -55,19 +61,28 @@ Project notes live in:
   - `GET /get_files/file_metadata`
   - `GET /service/ptr/status`
   - `GET /v1/library/recent`
+  - `GET /v1/library/search`
   - `GET /v1/files/content`
   - `GET /v1/files/thumbnail`
+  - `GET /v1/tags/autocomplete`
+  - `GET /manage_services/pending_counts`
   - `POST /service/ptr/sync`
   - `POST /v1/files/trash`
   - `POST /v1/import/local_file`
+  - `POST /v1/import/url`
+  - `POST /v1/import/upload`
+  - `POST /add_tags/add_tags`
+  - `POST /manage_services/commit_pending`
+  - `POST /manage_database/integrity_check`
 
-Protected endpoints accept either of these credentials:
+Protected endpoints accept either of these credentials as headers:
 
 - `Hydrus-Client-API-Access-Key: <64-char hex>`
 - `Hydrus-Client-API-Session-Key: <64-char hex>`
 
-For the currently implemented GET endpoints, the same names may also be sent as
-query parameters.
+For compatibility with the current thin-client/testing surface, the same names
+may also be sent as query parameters. Header credentials remain the preferred
+form for both GET and POST requests.
 
 These endpoints are the first compatibility-oriented slices of the Hydrus Client
 API. They are intentionally narrow and are meant to establish a stable daemon
@@ -78,7 +93,7 @@ added.
 
 If `HYDRUS_GO_DB_DIR` points at a valid Hydrus client database directory, the
 daemon will open a read bundle and attempt to open a separate writable bundle.
-When the writable bundle is available, these endpoints switch to live DB-backed
+When a readable bundle is available, these endpoints switch to live DB-backed
 behavior:
 
 - `GET /get_services`
@@ -86,11 +101,23 @@ behavior:
 - `GET /get_files/file_metadata`
 - `GET /service/ptr/status`
 - `GET /v1/library/recent`
+- `GET /v1/library/search`
 - `GET /v1/files/content`
 - `GET /v1/files/thumbnail`
+- `GET /v1/tags/autocomplete`
+- `GET /manage_services/pending_counts`
+
+When the writable bundle is also available, these mutation/status endpoints use
+the live Hydrus bundle too:
+
 - `POST /service/ptr/sync`
 - `POST /v1/files/trash`
 - `POST /v1/import/local_file`
+- `POST /v1/import/url`
+- `POST /v1/import/upload`
+- `POST /add_tags/add_tags`
+- `POST /manage_services/commit_pending`
+- `POST /manage_database/integrity_check`
 
 Expected bundle files today:
 
@@ -105,6 +132,7 @@ Implementation notes for this slice:
 - uses `modernc.org/sqlite`
 - uses one dedicated connection per bundle so attached DB aliases remain stable
 - keeps the read bundle in `PRAGMA query_only = ON`
+- writable bundle opens enable SQLite WAL on the main and attached DBs, so `*.db-wal` and `*.db-shm` sidecars are expected while `hydrusd` is running; these are SQLite runtime artifacts, not extra logical Hydrus databases
 - uses a separate writable bundle for public local-path imports and trash writes when writable access is available
 - degrades safely to read-only daemon mode when the writable bundle cannot be opened
 - expands `GET /get_files/file_metadata` in safe read-only vertical slices rather than attempting full parity at once
@@ -114,19 +142,23 @@ Implementation notes for this slice:
 `hydrusd` can now create a fresh canonical client bundle in Go instead of
 requiring an existing library bundle.
 
-Enable it with:
+Plain `hydrusd` now defaults to bootstrapping a fresh canonical bundle into
+`./db` when no DB directory is configured.
+
+You can override that behavior with:
 
 - `HYDRUS_GO_DB_DIR=/path/to/new/or/existing/db`
-- `HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP=true` or
-  `--bootstrap-fresh-client`
+- `HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP=true|false` or
+  `--bootstrap-fresh-client[=true|false]`
 - optional `HYDRUS_GO_BOOTSTRAP_TIMEOUT` or `--bootstrap-timeout`
 
-`HYDRUS_GO_DB_DIR` is required when fresh bootstrap is enabled.
+If no DB directory is set and bootstrap remains enabled, `hydrusd` defaults the
+bundle location to `./db` relative to the current working directory.
 
 Bundle-state behavior today:
 
-- missing DB dir: created if fresh bootstrap is enabled
-- empty DB dir: bootstraps a fresh canonical bundle only if enabled
+- missing DB dir: created and bootstrapped by default unless bootstrap is explicitly disabled
+- empty DB dir: bootstraps a fresh canonical bundle by default unless bootstrap is explicitly disabled
 - existing valid bundle: bootstrap is skipped and the bundle is opened normally
 - partial bundle: startup fails; `hydrus-go` does not repair or overwrite it
 - non-empty dir without a canonical bundle: startup fails; fresh bootstrap only
@@ -135,10 +167,12 @@ Bundle-state behavior today:
 One concrete first-start example:
 
 ```bash
-export HYDRUS_GO_DB_DIR=/tmp/hydrus-go-smoke-db
-./bin/hydrusd \
-  --bootstrap-fresh-client
+./bin/hydrusd
 ```
+
+That command now seeds the bundle into `./db` by default. With that layout,
+managed thumbnails live in `./thumbnails` while the bootstrapped bundle and
+current managed `client_files` root stay under `./db`.
 
 Platform notes for this bootstrap path:
 
@@ -203,68 +237,21 @@ Current session behavior:
 
 ## Current milestone limits
 
-This is still an early migration milestone, not feature parity.
+This is still a migration milestone, not feature parity.
 
 Important current limitations:
-
-- the daemon now exposes public local-path import and trash APIs, but there is still no permanent delete flow
-- deterministic managed `client_files` path resolution and internal file placement are now composed into both the internal prepared-file checkpoint and the first public local-path import flow
-- the first thin client prototype is now a Fyne-based shell aimed at testing browse/add/trash/original-preview behavior against `hydrusd`, not a fuller desktop app
+- search is currently a narrow slice focused on AND-tags, daemon-backed `system:` predicates (`size`, `width`, `height`, `favorite`, `resolution`), and server-side sort modes; complex union/negation logic plus other system predicates are still pending daemon-side support, and unsupported desktop terms are currently ignored rather than applied as local fallback filters
+- the desktop grid now uses client-local thumbnail generation from daemon-served originals instead of fetching daemon thumbnail bytes over the LAN; unsupported or oversized originals may still show no preview
+- PTR sync now supports definitions/content application and pending mapping staging/commit, and daemon status now distinguishes local backlog completion from true up-to-date state, but broader petition/review-services flows are still missing
 - selected-file original preview currently supports JPEG/PNG/GIF only and is intentionally bounded to 16 MiB payloads, 8192px maximum dimension, and 16,000,000 decoded pixels
-- selected-file preview is not cached yet, so refresh/reconnect cycles can redownload the same original over LAN while testing
-- `GET /get_files/file_metadata` currently supports:
-  - `only_return_identifiers=true`
-  - `only_return_basic_information=true`
-  - optional `include_blurhash=true` in basic mode
-  - default/full read-only metadata for:
-    - `file_services`
-    - `time_modified` and `time_modified_details`
-    - `time_archived`
-    - `is_inbox`, `is_local`, `is_trashed`, `is_deleted`
-    - `known_urls`
-    - optional `detailed_known_urls` when `detailed_url_information=true`, preserving `known_urls` while adding Hydrus-like normalized/classified URL rows for the currently implemented URL-detail layer
-    - `pixel_hash`
-    - `ipfs_multihashes`
-    - optional `notes` when `include_notes=true`, emitted as a Hydrus-like note-name → note-text object with `{}` for files that currently have no notes
-    - `ratings`, keyed by rating service key with Hydrus-like like/numerical/inc-dec API values and unrated `null`/`0` defaults
-    - `file_viewing_statistics`, always emitted in Hydrus canvas order with float-second `viewtime`/`last_viewed_timestamp` values
-    - `has_transparency`, `has_exif`, `has_human_readable_embedded_metadata`, `has_icc_profile`
-    - Hydrus-like `tags`, including per-service `storage_tags` and `display_tags` that prefer specific display cache tables when available, fall back to sibling/parent-expanded storage tags when not, and copy deleted/petitioned display entries from storage
-  - `include_milliseconds=true` for the implemented full-mode timestamp fields
-  - optional `include_services_object=false`
-  - optional `hide_service_keys_tags=false` to also include the older `service_keys_to_statuses_to_tags` and `service_keys_to_statuses_to_display_tags` compatibility maps, with legacy display values matching `tags[*].display_tags`
-  - `create_new_file_ids=true` when a writable bundle is available:
-    - unknown hashes get master `hash_id`/`file_id` rows allocated in `external_master.hashes`
-    - identifier mode returns the new `file_id` immediately
-    - basic/full modes still return missing rows until a real `main.files_info` record exists for that hash
-- daemon-local and staged-upload imports now backfill best-effort still-image metadata for JPEG/PNG sources so newly imported files immediately round-trip through full metadata with:
-  - `pixel_hash`
-  - `has_transparency`
-- full/default `GET /get_files/file_metadata` parity is still incomplete; this slice does not yet implement:
-  - exact thumbnail-dimension parity
+- selected-file preview is cached in memory, but refresh/reconnect cycles still redownload the same original over LAN while testing
+- `GET /get_files/file_metadata` parity is still incomplete; this slice does not yet implement exact thumbnail-dimension parity
 - import-time still-image enrichment is currently bounded to the Go JPEG/PNG decode path; animated-media/blurhash parity is still pending
-- `create_new_file_ids=true` is still rejected in read-only/degraded daemon mode
 - no public batch import flow yet
 - no public permanent delete flow yet
-- staged upload is still a narrow single-file flow rather than a broader Hydrus-style import pipeline
-- PTR work now provides:
-  - opt-in public PTR defaults (shared read-only anonymous key, host, port)
-  - local PTR service/mapping-table provisioning
-  - persisted daemon-side PTR status/state foundation
-  - real anonymous PTR session/account/options/tag-filter/metadata fetch plumbing
-  - durable remote snapshot and repository-metadata persistence in daemon-owned storage
-  - real anonymous PTR `/update` download with expected-hash verification
-  - Hydrus-style classification plus extensionless managed storage for downloaded repository update blobs
-  - local registration of downloaded update blobs in the daemon-owned `repository updates` file domain
-  - daemon-side downloaded-update bookkeeping driven by real local registration state
-  - batched local repository-update registration/finalization to reduce repeated DB transaction overhead during one sync pass
-  - daemon-owned single-flight background sync triggering with shutdown-safe lease cleanup
-  - `GET /service/ptr/status` for thin-client polling
-  - `POST /service/ptr/sync` for manual daemon-owned sync starts
-- PTR sync is still user-triggered rather than fully scheduled, but busy PTR responses now retry with a short ladder (`2s`, `3s`, `4s`, `5s`, `5s`) before escalating into capped backoff and surfacing an explicit server-issue failure
-- actual PTR definitions/content processing is not implemented yet, so the daemon now downloads and locally registers repository update blobs but still does not apply definitions/content into local mappings/tag state
-- no search/tagging engine yet
-- no downloader/subscription/parsing system yet
+- no native in-app video playback; video files show a placeholder message in the watcher
+- full downloader/parser/subscription parity is still missing
+
 
 The point of this slice is to lock down daemon startup, auth, DB bundle access,
 and early API contracts before the deeper Hydrus client core is ported.
@@ -326,13 +313,14 @@ To run in DB-backed daemon mode, also set:
 export HYDRUS_GO_DB_DIR=/path/to/hydrus/db
 ```
 
-If you do not already have a Hydrus bundle, point `HYDRUS_GO_DB_DIR` at a new
-or empty directory and launch with the fresh-bootstrap flags instead:
+If you do not already have a Hydrus bundle, plain `hydrusd` now boots `./db`
+automatically. To place the bundle somewhere else, point `HYDRUS_GO_DB_DIR` at
+a new or empty directory and launch normally or with an explicit bootstrap
+override:
 
 ```bash
 ./bin/hydrusd \
-  --listen 0.0.0.0:5555 \
-	--bootstrap-fresh-client
+  --listen 0.0.0.0:5555
 ```
 
 When the configured Hydrus bundle is writable, `hydrusd` will also enable the
@@ -377,6 +365,7 @@ Notes:
 - the desktop prototype talks to `hydrusd`; it never touches SQLite or
   `client_files` directly
 - the main shell now uses a more breathable split layout, and the empty selected-preview state no longer collapses into vertical placeholder text
+- `Network > PTR Sync` now reports repository update bundle counts, local caught-up vs up-to-date state, pending download/process bundle backlogs, and separate effective-progress vs raw-network-fetch metrics
 - current import testing can be driven through a single-file picker, a folder
   picker, or drag-and-drop into the desktop window; queued items are uploaded
   sequentially through the daemon's remote-safe upload endpoint
@@ -427,8 +416,8 @@ This bootstrap currently targets the Go toolchain declared in `go.mod`
 ## Environment variables
 
 - `HYDRUS_GO_LISTEN_ADDR` (default: `127.0.0.1:45869`)
-- `HYDRUS_GO_DB_DIR` (optional path to a Hydrus client DB directory; required when fresh bootstrap is enabled)
-- `HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP` (default: `false`)
+- `HYDRUS_GO_DB_DIR` (optional path to a Hydrus client DB directory; when this is unset and bootstrap remains enabled, `hydrusd` defaults to `./db`)
+- `HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP` (optional explicit override; plain `hydrusd` currently defaults to enabled bootstrap)
 - `HYDRUS_GO_BOOTSTRAP_TIMEOUT` (default: `2m`)
 - `HYDRUS_GO_ENABLE_PTR_SYNC` (default: `false`; opt-in only, matching Hydrus' “never connect until you tell it to” stance)
 - `HYDRUS_GO_PTR_HOST` (default: `ptr.hydrus.network`)
@@ -460,8 +449,5 @@ This bootstrap currently targets the Go toolchain declared in `go.mod`
 - iterate on the Fyne prototype's preview caching, reconnect behavior, metadata ergonomics, and remaining visual polish now that the first connect/browse/add/trash/original-preview loop, incremental loading, and PTR status/manual sync are wired
 - run real Windows-over-LAN smoke tests against a live `hydrusd` + Hydrus library and tighten any failures quickly
 - validate add/trash latency and recent-grid refresh behavior on a real Hydrus library through the prototype
-- process downloaded anonymous PTR definitions/content into local mappings and tag/query state
-- add the first daemon-side search/query foundation for tags and file-domain constraints
-- add daemon-side tag mutation and pending-state APIs as the prerequisite for PTR sync-out/upload
 - broaden daemon-owned PTR sync progress and job control for the thin client beyond the current status + manual trigger
 - broaden default/full metadata parity for `GET /get_files/file_metadata`

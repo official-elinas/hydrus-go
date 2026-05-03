@@ -138,6 +138,39 @@ func parseAddTagsRequest(r *http.Request) (coreptrsync.PendingMappingsRequest, e
 	return request, nil
 }
 
+func (s *Server) handleGetPendingCounts(w http.ResponseWriter, r *http.Request) {
+	_, statusCode, err := s.access.Authorize(r, PermissionEditFileTags)
+	if err != nil {
+		writeError(w, statusCode, err.Error())
+		return
+	}
+
+	if s.ptrStore == nil {
+		writeError(w, http.StatusNotImplemented, "PTR pending counts are unavailable")
+		return
+	}
+
+	serviceKey := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("service_key")))
+
+	info, err := s.ptrStore.PendingMappingCount(r.Context(), coreptrsync.PendingCountRequest{ServiceKey: serviceKey})
+	if err != nil {
+		switch {
+		case errors.Is(err, coreptrsync.ErrSyncDisabled), errors.Is(err, coreptrsync.ErrCommitPendingUnavailable):
+			writeError(w, http.StatusServiceUnavailable, err.Error())
+		case errors.Is(err, coreptrsync.ErrPTRServiceNotFound):
+			writeError(w, http.StatusNotFound, err.Error())
+		default:
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"service_key":   info.ServiceKey,
+		"pending_count": info.PendingCount,
+	})
+}
+
 func parseCommitPendingRequest(r *http.Request) (coreptrsync.CommitPendingRequest, error) {
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()

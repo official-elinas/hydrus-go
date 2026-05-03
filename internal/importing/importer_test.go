@@ -8,11 +8,14 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
 	"github.com/official-elinas/hydrus-go/internal/core/filemetadata"
 	"github.com/official-elinas/hydrus-go/internal/core/services"
 	"github.com/official-elinas/hydrus-go/internal/db/hydrusdb"
@@ -453,6 +456,72 @@ func TestImporterImportPreparedFile(t *testing.T) {
 		}
 	})
 
+	t.Run("URL import preserves known URLs on already imported files", func(t *testing.T) {
+		dir, _ := createImportTestBundle(t)
+
+		bundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		importer, err := NewDefaultImporter(bundle, dir)
+		if err != nil {
+			t.Fatalf("NewDefaultImporter() error = %v", err)
+		}
+
+		sourcePath := writePNGSourceFile(t, t.TempDir(), "duplicate-url.png", 16, 24)
+		sourceInfo, err := os.Stat(sourcePath)
+		if err != nil {
+			t.Fatalf("Stat(sourcePath) error = %v", err)
+		}
+		first, err := importer.ImportLocalPath(context.Background(), fileimport.Request{Path: sourcePath})
+		if err != nil {
+			t.Fatalf("ImportLocalPath() error = %v", err)
+		}
+
+		sourceBytes, err := os.ReadFile(sourcePath)
+		if err != nil {
+			t.Fatalf("ReadFile(sourcePath) error = %v", err)
+		}
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Last-Modified", sourceInfo.ModTime().UTC().Format(http.TimeFormat))
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(sourceBytes)
+		}))
+		defer server.Close()
+
+		second, err := importer.ImportURL(context.Background(), fileimport.URLRequest{URL: server.URL + "/image.png"})
+		if err != nil {
+			t.Fatalf("ImportURL() error = %v", err)
+		}
+
+		if !second.AlreadyImported {
+			t.Fatal("second.AlreadyImported = false, want true")
+		}
+		if second.FileID != first.FileID {
+			t.Fatalf("second.FileID = %d, want %d", second.FileID, first.FileID)
+		}
+
+		rows, err := bundle.GetMetadata(context.Background(), filemetadata.Request{FileIDs: []int64{first.FileID}})
+		if err != nil {
+			t.Fatalf("GetMetadata() error = %v", err)
+		}
+
+		knownURLs, ok := rows[0]["known_urls"].([]string)
+		if !ok {
+			t.Fatalf("known_urls type = %T, want []string", rows[0]["known_urls"])
+		}
+		if len(knownURLs) != 1 || knownURLs[0] != server.URL+"/image.png" {
+			t.Fatalf("knownURLs = %v, want [%s]", knownURLs, server.URL+"/image.png")
+		}
+	})
+
 	t.Run("imports extensionless repository update bytes into managed storage", func(t *testing.T) {
 		dir, _ := createImportTestBundle(t)
 
@@ -501,6 +570,68 @@ func TestImporterImportPreparedFile(t *testing.T) {
 
 		if filepath.Ext(result.ManagedPath) != "" {
 			t.Fatalf("filepath.Ext(result.ManagedPath) = %q, want empty", filepath.Ext(result.ManagedPath))
+		}
+	})
+
+	t.Run("imports a direct URL and records known URLs", func(t *testing.T) {
+		dir, _ := createImportTestBundle(t)
+
+		bundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		importer, err := NewDefaultImporter(bundle, dir)
+		if err != nil {
+			t.Fatalf("NewDefaultImporter() error = %v", err)
+		}
+
+		sourcePath := writePNGSourceFile(t, t.TempDir(), "remote.png", 16, 24)
+		sourceBytes, err := os.ReadFile(sourcePath)
+		if err != nil {
+			t.Fatalf("ReadFile(sourcePath) error = %v", err)
+		}
+
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/redirect":
+				http.Redirect(w, r, "/image.png", http.StatusFound)
+			case "/image.png":
+				w.Header().Set("Content-Type", "image/png")
+				_, _ = w.Write(sourceBytes)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		result, err := importer.ImportURL(context.Background(), fileimport.URLRequest{
+			URL:         server.URL + "/redirect",
+			ReferralURL: server.URL + "/post/123",
+		})
+		if err != nil {
+			t.Fatalf("ImportURL() error = %v", err)
+		}
+
+		rows, err := bundle.GetMetadata(context.Background(), filemetadata.Request{FileIDs: []int64{result.FileID}})
+		if err != nil {
+			t.Fatalf("GetMetadata() error = %v", err)
+		}
+
+		knownURLs, ok := rows[0]["known_urls"].([]string)
+		if !ok {
+			t.Fatalf("known_urls type = %T, want []string", rows[0]["known_urls"])
+		}
+		if len(knownURLs) != 2 {
+			t.Fatalf("len(knownURLs) = %d, want 2 (%v)", len(knownURLs), knownURLs)
+		}
+		if knownURLs[0] != server.URL+"/image.png" || knownURLs[1] != server.URL+"/redirect" {
+			t.Fatalf("knownURLs = %v, want redirected and requested URLs", knownURLs)
 		}
 	})
 }
@@ -665,6 +796,11 @@ func openSQLiteForTest(t *testing.T, path string) *sql.DB {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatalf("sql.Open(%q) error = %v", path, err)
+	}
+
+	if _, err := db.Exec(`PRAGMA synchronous = OFF;`); err != nil {
+		_ = db.Close()
+		t.Fatalf("Exec(PRAGMA synchronous = OFF) error = %v", err)
 	}
 
 	return db
