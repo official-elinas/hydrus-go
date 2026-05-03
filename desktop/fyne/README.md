@@ -47,8 +47,7 @@ against a new or empty `HYDRUS_GO_DB_DIR` and let it bootstrap one natively:
 
 ```bash
 export HYDRUS_GO_DB_DIR=/tmp/hydrus-go-fyne-smoke-db
-./bin/hydrusd \
-  --bootstrap-fresh-client
+./bin/hydrusd
 ```
 
 For temporary LAN testing, `make run-lan` starts `hydrusd` with the runtime flag
