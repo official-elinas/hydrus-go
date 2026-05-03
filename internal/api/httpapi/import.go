@@ -58,6 +58,39 @@ func (s *Server) handleImportLocalFile(w http.ResponseWriter, r *http.Request) {
 	return
 }
 
+func (s *Server) handleImportURL(w http.ResponseWriter, r *http.Request) {
+	_, statusCode, err := s.access.Authorize(
+		r,
+		PermissionImportAndDeleteFiles,
+	)
+	if err != nil {
+		writeError(w, statusCode, err.Error())
+		return
+	}
+
+	if s.importStore == nil {
+		writeError(
+			w,
+			http.StatusNotImplemented,
+			"URL import is unavailable until HYDRUS_GO_DB_DIR is configured",
+		)
+		return
+	}
+
+	request, err := parseURLImportRequest(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	result, err := s.importStore.ImportURL(r.Context(), request)
+	if writeImportStoreError(w, err) {
+		return
+	}
+
+	writeImportResponse(w, result)
+}
+
 func (s *Server) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 	_, statusCode, err := s.access.Authorize(
 		r,
@@ -115,6 +148,22 @@ func parseLocalFileImportRequest(r *http.Request) (fileimport.Request, error) {
 
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return fileimport.Request{}, errors.New("request body must contain a single JSON object")
+	}
+
+	return request, nil
+}
+
+func parseURLImportRequest(r *http.Request) (fileimport.URLRequest, error) {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+
+	var request fileimport.URLRequest
+	if err := decoder.Decode(&request); err != nil {
+		return fileimport.URLRequest{}, err
+	}
+
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return fileimport.URLRequest{}, errors.New("request body must contain a single JSON object")
 	}
 
 	return request, nil

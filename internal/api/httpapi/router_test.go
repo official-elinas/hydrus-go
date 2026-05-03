@@ -292,21 +292,32 @@ func TestProtectedEndpoints(t *testing.T) {
 	t.Run("ptr status returns daemon-owned sync status", func(t *testing.T) {
 		ptrStore := stubPTRStore{
 			status: coreptrsync.Status{
-				Enabled:                  true,
-				Configured:               true,
-				ServiceName:              "public tag repository",
-				ServiceKey:               "7075626c696320746167207265706f7369746f7279",
-				Host:                     "ptr.hydrus.network",
-				Port:                     45871,
-				AccountMode:              coreptrsync.AccountModeSharedReadOnly,
-				Phase:                    coreptrsync.PhaseIdle,
-				IsComplete:               true,
-				MetadataSlice:            7,
-				DownloadedUpdateCount:    11,
-				ProcessedDefinitionCount: 5,
-				ProcessedContentCount:    6,
-				LastSyncMappingCount:     func() *int64 { v := int64(99); return &v }(),
-				UpdatedAtMS:              1700000000123,
+				Enabled:                         true,
+				Configured:                      true,
+				ServiceName:                     "public tag repository",
+				ServiceKey:                      "7075626c696320746167207265706f7369746f7279",
+				Host:                            "ptr.hydrus.network",
+				Port:                            45871,
+				AccountMode:                     coreptrsync.AccountModeSharedReadOnly,
+				Phase:                           coreptrsync.PhaseIdle,
+				IsComplete:                      true,
+				IsUpToDate:                      true,
+				MetadataSlice:                   7,
+				DownloadedUpdateCount:           11,
+				DownloadedUpdateBytes:           4096,
+				CurrentRunDownloadedBytes:       1024,
+				CurrentRunDownloadMS:            250,
+				CurrentRunBytesPerSecond:        4096,
+				CurrentRunNetworkFetchedBytes:   1024,
+				CurrentRunNetworkFetchMS:        125,
+				CurrentRunNetworkBytesPerSecond: 8192,
+				ProcessedDefinitionCount:        5,
+				ProcessedContentCount:           6,
+				PendingDownloadCount:            0,
+				PendingProcessCount:             0,
+				NextUpdateDue:                   1700003600,
+				LastSyncMappingCount:            func() *int64 { v := int64(99); return &v }(),
+				UpdatedAtMS:                     1700000000123,
 			},
 		}
 
@@ -345,8 +356,32 @@ func TestProtectedEndpoints(t *testing.T) {
 			t.Fatalf("is_complete = %v, want true", ptr["is_complete"])
 		}
 
+		if ptr["is_up_to_date"] != true {
+			t.Fatalf("is_up_to_date = %v, want true", ptr["is_up_to_date"])
+		}
+
 		if got, ok := ptr["last_sync_mapping_count"].(float64); !ok || int64(got) != 99 {
 			t.Fatalf("last_sync_mapping_count = %v, want 99", ptr["last_sync_mapping_count"])
+		}
+
+		if got, ok := ptr["downloaded_update_bytes"].(float64); !ok || int64(got) != 4096 {
+			t.Fatalf("downloaded_update_bytes = %v, want 4096", ptr["downloaded_update_bytes"])
+		}
+
+		if got, ok := ptr["current_run_bytes_per_second"].(float64); !ok || int64(got) != 4096 {
+			t.Fatalf("current_run_bytes_per_second = %v, want 4096", ptr["current_run_bytes_per_second"])
+		}
+
+		if got, ok := ptr["current_run_network_bytes_per_second"].(float64); !ok || int64(got) != 8192 {
+			t.Fatalf("current_run_network_bytes_per_second = %v, want 8192", ptr["current_run_network_bytes_per_second"])
+		}
+
+		if got, ok := ptr["pending_download_count"].(float64); !ok || int64(got) != 0 {
+			t.Fatalf("pending_download_count = %v, want 0", ptr["pending_download_count"])
+		}
+
+		if got, ok := ptr["next_update_due"].(float64); !ok || int64(got) != 1700003600 {
+			t.Fatalf("next_update_due = %v, want 1700003600", ptr["next_update_due"])
 		}
 	})
 
@@ -375,18 +410,18 @@ func TestProtectedEndpoints(t *testing.T) {
 		}
 	})
 
-		t.Run("ptr trigger returns immediate daemon-owned status", func(t *testing.T) {
-			mappingCount := int64(7)
-			ptrStore := stubPTRStore{
-				triggerStatus: coreptrsync.Status{
-					Enabled:              true,
-					Configured:           true,
-					ServiceName:          "public tag repository",
-					Phase:                coreptrsync.PhaseSyncing,
-					IsRunning:            true,
-					LastSyncMappingCount: &mappingCount,
-				},
-			}
+	t.Run("ptr trigger returns immediate daemon-owned status", func(t *testing.T) {
+		mappingCount := int64(7)
+		ptrStore := stubPTRStore{
+			triggerStatus: coreptrsync.Status{
+				Enabled:              true,
+				Configured:           true,
+				ServiceName:          "public tag repository",
+				Phase:                coreptrsync.PhaseSyncing,
+				IsRunning:            true,
+				LastSyncMappingCount: &mappingCount,
+			},
+		}
 
 		handler := newHandlerWithPTRStore(t, ptrStore)
 		req := httptest.NewRequest(http.MethodPost, "/service/ptr/sync", nil)
@@ -411,14 +446,14 @@ func TestProtectedEndpoints(t *testing.T) {
 			t.Fatalf("phase = %v, want %s", ptr["phase"], coreptrsync.PhaseSyncing)
 		}
 
-			if ptr["is_running"] != true {
-				t.Fatalf("is_running = %v, want true", ptr["is_running"])
-			}
+		if ptr["is_running"] != true {
+			t.Fatalf("is_running = %v, want true", ptr["is_running"])
+		}
 
-			if got, ok := ptr["last_sync_mapping_count"].(float64); !ok || int64(got) != 7 {
-				t.Fatalf("last_sync_mapping_count = %v, want 7", ptr["last_sync_mapping_count"])
-			}
-		})
+		if got, ok := ptr["last_sync_mapping_count"].(float64); !ok || int64(got) != 7 {
+			t.Fatalf("last_sync_mapping_count = %v, want 7", ptr["last_sync_mapping_count"])
+		}
+	})
 
 	t.Run("ptr trigger returns status payload when disabled", func(t *testing.T) {
 		ptrStore := stubPTRStore{
@@ -1086,6 +1121,66 @@ func TestThinClientEndpoints(t *testing.T) {
 			http.MethodPost,
 			"/v1/import/local_file",
 			strings.NewReader(`{"path":`),
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("URL import returns imported file payload", func(t *testing.T) {
+		store := &fakeMetadataStore{
+			importURLHandle: func(request fileimport.URLRequest) (fileimport.Result, error) {
+				if request.URL != "https://example.com/image.png" {
+					t.Fatalf("request.URL = %q, want https://example.com/image.png", request.URL)
+				}
+				if request.ReferralURL != "https://example.com/post/123" {
+					t.Fatalf("request.ReferralURL = %q, want https://example.com/post/123", request.ReferralURL)
+				}
+
+				return fileimport.Result{
+					FileID:                    43,
+					Hash:                      strings.Repeat("e", 64),
+					AlreadyImported:           false,
+					ManagedFileAlreadyPresent: false,
+				}, nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, provider, store, false)
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/v1/import/url",
+			strings.NewReader(`{"url":"https://example.com/image.png","referral_url":"https://example.com/post/123"}`),
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		if int(payload["file_id"].(float64)) != 43 {
+			t.Fatalf("file_id = %v, want 43", payload["file_id"])
+		}
+	})
+
+	t.Run("URL import rejects malformed JSON", func(t *testing.T) {
+		store := &fakeMetadataStore{}
+		handler := newHandlerWithDeps(t, provider, store, false)
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/v1/import/url",
+			strings.NewReader(`{"url":`),
 		)
 		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
 		rr := httptest.NewRecorder()
@@ -2580,6 +2675,7 @@ type fakeMetadataStore struct {
 	resolveContentHandle   func(int64) (fileassets.Descriptor, error)
 	resolveThumbnailHandle func(int64) (fileassets.Descriptor, error)
 	importLocalHandle      func(fileimport.Request) (fileimport.Result, error)
+	importURLHandle        func(fileimport.URLRequest) (fileimport.Result, error)
 	importUploadHandle     func(fileimport.UploadRequest) (fileimport.Result, error)
 	trashFileHandle        func(filetrash.Request) (filetrash.Result, error)
 	lastRequest            *filemetadata.Request
@@ -2680,6 +2776,17 @@ func (s *fakeMetadataStore) ImportUpload(
 ) (fileimport.Result, error) {
 	if s.importUploadHandle != nil {
 		return s.importUploadHandle(request)
+	}
+
+	return fileimport.Result{}, nil
+}
+
+func (s *fakeMetadataStore) ImportURL(
+	_ context.Context,
+	request fileimport.URLRequest,
+) (fileimport.Result, error) {
+	if s.importURLHandle != nil {
+		return s.importURLHandle(request)
 	}
 
 	return fileimport.Result{}, nil
