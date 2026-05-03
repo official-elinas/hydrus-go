@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -15,6 +16,7 @@ import (
 	"time"
 
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
+	"github.com/official-elinas/hydrus-go/internal/db/hydrusdb"
 )
 
 func TestClientFetchRemoteState(t *testing.T) {
@@ -298,88 +300,86 @@ func TestClientFetchRemoteState(t *testing.T) {
 			t.Fatalf("FetchUpdate() error = %v, want hash mismatch", err)
 		}
 	})
-}
 
-func TestClientFetchRemoteStateRetriesBusyResponses(t *testing.T) {
-	originalDelays := ptrSyncBusyRetryDelays
-	ptrSyncBusyRetryDelays = []time.Duration{0, 0}
-	t.Cleanup(func() {
-		ptrSyncBusyRetryDelays = originalDelays
-	})
-
-	t.Run("retries PTR session login when the remote is temporarily busy", func(t *testing.T) {
-		var sessionAttempts atomic.Int32
+	t.Run("uploads pending mappings to update with hydrus client-to-server payload", func(t *testing.T) {
+		const accessKey = "4a285629721ca442541ef2c15ea17d1f7f7578b0c3f4f5f2a05f8f0ab297786f"
 
 		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch r.URL.Path {
 			case "/session_key":
-				if sessionAttempts.Add(1) <= 2 {
-					http.Error(
-						w,
-						`{"error":"This server is busy, please try again later.","exception_type":"ServerBusyException","status_code":503}`,
-						http.StatusServiceUnavailable,
-					)
+				if got := r.Header.Get("Hydrus-Key"); got != accessKey {
+					t.Errorf("Hydrus-Key = %q, want %q", got, accessKey)
+				}
+				http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "remote-session", Path: "/"})
+				w.WriteHeader(http.StatusOK)
+			case "/update":
+				if err := validateSessionCookie(r); err != nil {
+					t.Error(err)
+					http.Error(w, err.Error(), http.StatusUnauthorized)
 					return
 				}
 
-				http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "remote-session", Path: "/"})
+				if got := r.Header.Get("Content-Type"); got != "application/json" {
+					t.Errorf("Content-Type = %q, want application/json", got)
+				}
+
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					t.Fatalf("io.ReadAll(update body) error = %v", err)
+				}
+
+				decoded, err := decodeHydrusNetworkBytes(body)
+				if err != nil {
+					t.Fatalf("decodeHydrusNetworkBytes(update body) error = %v", err)
+				}
+
+				serialisableDict := decoded.([]any)
+				entries := serialisableDict[2].([]any)
+				pair := entries[0].([]any)
+				valueTuple := pair[1].([]any)
+				clientUpdate := valueTuple[1].([]any)
+				actions := clientUpdate[2].([]any)
+				actionTuple := actions[0].([]any)
+				if got, err := anyToInt(actionTuple[0]); err != nil || got != hydrusContentUpdatePend {
+					t.Fatalf("action = %d, want %d", got, hydrusContentUpdatePend)
+				}
+
+				contentsAndReasons := actionTuple[1].([]any)
+				if len(contentsAndReasons) != 2 {
+					t.Fatalf("len(contentsAndReasons) = %d, want 2", len(contentsAndReasons))
+				}
+
+				firstContent := contentsAndReasons[0].([]any)[0].([]any)
+				contentInfo := firstContent[2].([]any)
+				mappingData := contentInfo[1].([]any)
+				if mappingData[0] != "creator:alice" {
+					t.Fatalf("first mapping tag = %v, want creator:alice", mappingData[0])
+				}
+
 				w.WriteHeader(http.StatusOK)
-			case "/account":
-				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{
-					key: "account",
-					metaValue: metaJSON([]any{
-						strings.Repeat("aa", 32),
-						unsupportedSerialisable(102),
-						int64(1699990000),
-						nil,
-						serialisableDictionaryString(t,
-							hydrusDictEntry{key: "banned_info", metaValue: metaJSON(nil)},
-							hydrusDictEntry{key: "bandwidth_tracker", metaValue: metaHydrus(unsupportedSerialisable(39))},
-							hydrusDictEntry{key: "message", metaValue: metaJSON("shared read-only")},
-							hydrusDictEntry{key: "message_created", metaValue: metaJSON(int64(1699990100))},
-						),
-					}),
-				}))
-			case "/options":
-				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{
-					key: "service_options",
-					metaValue: metaHydrus(serialisableDictionary(
-						hydrusDictEntry{key: "update_period", metaValue: metaJSON(int64(3600))},
-						hydrusDictEntry{key: "nullification_period", metaValue: metaJSON(int64(86400))},
-					)),
-				}))
-			case "/tag_filter":
-				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{
-					key:       "tag_filter",
-					metaValue: metaHydrus(serialisableTagFilter(map[string]int{"creator:": 0})),
-				}))
-			case "/metadata":
-				_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{
-					key:       "metadata_slice",
-					metaValue: metaHydrus(serialisableMetadata(1700000200, metadataRow{updateIndex: 2, updateHashes: []string{strings.Repeat("11", 32)}, begin: 10, end: 20})),
-				}))
 			default:
 				http.NotFound(w, r)
 			}
 		}))
 		defer server.Close()
 
-		client, err := NewClient(testPTRConfigFromServer(t, server.URL, coreptrsync.DefaultSharedAccessKey))
+		client, err := NewClient(testPTRConfigFromServer(t, server.URL, accessKey))
 		if err != nil {
 			t.Fatalf("NewClient() error = %v", err)
 		}
 
-		_, err = client.FetchRemoteState(context.Background(), 0)
+		err = client.CommitPendingMappings(context.Background(), []hydrusdb.PTRPendingMappingGroup{
+			{Tag: "creator:alice", Hashes: []string{strings.Repeat("11", 32), strings.Repeat("22", 32)}},
+			{Tag: "series:zeta", Hashes: []string{strings.Repeat("33", 32)}},
+		})
 		if err != nil {
-			t.Fatalf("FetchRemoteState() error = %v", err)
-		}
-
-		if got := sessionAttempts.Load(); got != 3 {
-			t.Fatalf("session attempts = %d, want 3", got)
+			t.Fatalf("CommitPendingMappings() error = %v", err)
 		}
 	})
+}
 
-	t.Run("returns the final busy error after exhausting GET retries", func(t *testing.T) {
+func TestClientFetchRemoteStateBusyResponses(t *testing.T) {
+	t.Run("returns a typed busy error without retrying GET requests", func(t *testing.T) {
 		var accountAttempts atomic.Int32
 
 		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -407,11 +407,59 @@ func TestClientFetchRemoteStateRetriesBusyResponses(t *testing.T) {
 
 		_, err = client.FetchRemoteState(context.Background(), 0)
 		if err == nil || !strings.Contains(err.Error(), `PTR GET /account returned 503 Service Unavailable`) {
-			t.Fatalf("FetchRemoteState() error = %v, want exhausted /account 503 error", err)
+			t.Fatalf("FetchRemoteState() error = %v, want /account 503 busy error", err)
 		}
 
-		if got := accountAttempts.Load(); got != 3 {
-			t.Fatalf("account attempts = %d, want 3", got)
+		retryAfter, ok := ptrBusyRetryAfter(err)
+		if !ok {
+			t.Fatalf("ptrBusyRetryAfter(%v) ok = false, want true", err)
+		}
+
+		if retryAfter != 0 {
+			t.Fatalf("retryAfter = %v, want 0", retryAfter)
+		}
+
+		if got := accountAttempts.Load(); got != 1 {
+			t.Fatalf("account attempts = %d, want 1", got)
+		}
+	})
+
+	t.Run("parses Retry-After from busy responses", func(t *testing.T) {
+		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			switch r.URL.Path {
+			case "/session_key":
+				http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "remote-session", Path: "/"})
+				w.WriteHeader(http.StatusOK)
+			case "/account":
+				w.Header().Set("Retry-After", "120")
+				http.Error(
+					w,
+					`{"error":"This server is busy, please try again later.","exception_type":"ServerBusyException","status_code":503}`,
+					http.StatusServiceUnavailable,
+				)
+			default:
+				http.NotFound(w, r)
+			}
+		}))
+		defer server.Close()
+
+		client, err := NewClient(testPTRConfigFromServer(t, server.URL, coreptrsync.DefaultSharedAccessKey))
+		if err != nil {
+			t.Fatalf("NewClient() error = %v", err)
+		}
+
+		_, err = client.FetchRemoteState(context.Background(), 0)
+		if err == nil {
+			t.Fatal("FetchRemoteState() error = nil, want busy error")
+		}
+
+		retryAfter, ok := ptrBusyRetryAfter(err)
+		if !ok {
+			t.Fatalf("ptrBusyRetryAfter(%v) ok = false, want true", err)
+		}
+
+		if retryAfter != 120*time.Second {
+			t.Fatalf("retryAfter = %v, want %v", retryAfter, 120*time.Second)
 		}
 	})
 

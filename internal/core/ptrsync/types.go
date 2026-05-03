@@ -20,6 +20,8 @@ const (
 	PhaseUnavailable = "unavailable"
 	PhaseIdle        = "idle"
 	PhaseSyncing     = "syncing"
+	PhaseRetrying    = "retrying"
+	PhaseThrottling  = PhaseRetrying
 )
 
 var (
@@ -31,6 +33,9 @@ var (
 	ErrSyncUnavailable = errors.New("ptr sync is unavailable")
 	// ErrSyncAlreadyRunning reports that a PTR sync pass is already in progress.
 	ErrSyncAlreadyRunning = errors.New("ptr sync is already running")
+	// ErrCommitPendingUnavailable reports that PTR pending-content commit cannot run
+	// because required local or remote prerequisites are unavailable.
+	ErrCommitPendingUnavailable = errors.New("ptr commit pending is unavailable")
 )
 
 // Config describes daemon-side PTR sync settings.
@@ -76,10 +81,13 @@ type Status struct {
 	AccountMode              string `json:"account_mode,omitempty"`
 	Phase                    string `json:"phase"`
 	IsRunning                bool   `json:"is_running"`
+	IsComplete               bool   `json:"is_complete"`
 	MetadataSlice            int64  `json:"metadata_slice"`
 	DownloadedUpdateCount    int64  `json:"downloaded_update_count"`
 	ProcessedDefinitionCount int64  `json:"processed_definition_count"`
 	ProcessedContentCount    int64  `json:"processed_content_count"`
+	RetryAtMS                int64  `json:"retry_at_ms,omitempty"`
+	RetryAttempt             int64  `json:"retry_attempt,omitempty"`
 	LastError                string `json:"last_error,omitempty"`
 	UnavailableReason        string `json:"unavailable_reason,omitempty"`
 	UpdatedAtMS              int64  `json:"updated_at_ms,omitempty"`
@@ -135,9 +143,40 @@ type RemoteState struct {
 	Metadata       MetadataSlice
 }
 
+// PendingMappingsRequest describes one daemon-side request to stage pending tag
+// mappings for the PTR service using either known file IDs or SHA-256 hashes.
+type PendingMappingsRequest struct {
+	ServiceKey string
+	FileIDs    []int64
+	Hashes     []string
+	Tags       []string
+}
+
+// PendingMappingsResult reports the local staging outcome for one PTR pending
+// mapping request.
+type PendingMappingsResult struct {
+	ServiceKey    string `json:"service_key,omitempty"`
+	AddedMappings int64  `json:"added_mappings"`
+}
+
+// CommitPendingRequest identifies the service whose locally pending PTR content
+// should be committed to the remote repository.
+type CommitPendingRequest struct {
+	ServiceKey string
+}
+
+// CommitPendingResult reports the remote/local outcome of one PTR pending
+// content commit.
+type CommitPendingResult struct {
+	ServiceKey        string `json:"service_key,omitempty"`
+	CommittedMappings int64  `json:"committed_mappings"`
+}
+
 // Store exposes daemon-owned PTR status and trigger operations for HTTP/UI
 // callers.
 type Store interface {
 	Status(context.Context) (Status, error)
 	Trigger(context.Context) (Status, error)
+	AddPendingMappings(context.Context, PendingMappingsRequest) (PendingMappingsResult, error)
+	CommitPending(context.Context, CommitPendingRequest) (CommitPendingResult, error)
 }

@@ -18,10 +18,18 @@ import (
 
 const (
 	ptrSyncStateSingleton                = 1
+	ptrRepositoryHashIDMapTablePrefix    = "repository_hash_id_map_"
+	ptrRepositoryTagIDMapTablePrefix     = "repository_tag_id_map_"
 	ptrRepositoryUpdatesTablePrefix      = "repository_updates_"
 	ptrRepositoryUnregisteredTablePrefix = "repository_unregistered_updates_"
 	ptrRepositoryProcessedTablePrefix    = "repository_updates_processed_"
 	ptrRepositoryUpdatesServiceName      = "repository updates"
+
+	PTRContentTypeMappings    int64 = 0
+	PTRContentTypeDefinitions int64 = 21
+
+	ptrHydrusUpdateDefinitionsMime = 28
+	ptrHydrusUpdateContentMime     = 29
 )
 
 // ErrPTRServiceNameCollision reports that the configured PTR display name is
@@ -35,6 +43,56 @@ var errPTRSyncRunNotActive = errors.New("PTR sync run token is not active")
 type PTRSyncLease struct {
 	RunToken string
 	Status   coreptrsync.Status
+}
+
+// PTRDownloadedUpdateBatchItem is one locally stored PTR update artifact that
+// should be registered and marked downloaded inside a single DB transaction.
+type PTRDownloadedUpdateBatchItem struct {
+	HashHex        string
+	PreparedImport PreparedLocalImport
+}
+
+// PTRProcessableUpdate describes one locally present repository update blob
+// that is eligible for ordered processing in the current sync pass.
+type PTRProcessableUpdate struct {
+	UpdateIndex int64
+	HashID      int64
+	HashHex     string
+	ContentType int64
+	Processed   bool
+}
+
+// PTRDefinitionsUpdate is the minimal decoded repository definitions payload
+// needed to normalize future mapping updates.
+type PTRDefinitionsUpdate struct {
+	ServiceHashIDsToHashes map[int64]string
+	ServiceTagIDsToTags    map[int64]string
+}
+
+// PTRMappingUpdateRow is one repository-local mappings row.
+type PTRMappingUpdateRow struct {
+	ServiceTagID   int64
+	ServiceHashIDs []int64
+}
+
+// PTRMappingsUpdate is the minimal decoded mappings payload needed to write the
+// external_mappings current/deleted tables.
+type PTRMappingsUpdate struct {
+	Adds    []PTRMappingUpdateRow
+	Deletes []PTRMappingUpdateRow
+}
+
+// PTRPendingMappingGroup is one outbound pending mappings group in the exact
+// logical shape Hydrus uploads to tag repositories: one tag plus many hashes.
+type PTRPendingMappingGroup struct {
+	Tag    string
+	Hashes []string
+}
+
+type processedRow struct {
+	hashID      int64
+	contentType int64
+	processed   bool
 }
 
 // EnsurePTRSyncFoundation guarantees that the public tag repository service,
@@ -65,6 +123,215 @@ func (b *Bundle) EnsurePTRSyncFoundation(
 	}
 
 	return status, nil
+}
+
+// StagePTRPendingMappings records add-only pending mappings for the daemon-owned
+// PTR service using either file IDs or hash hex strings as file identifiers.
+func (b *Bundle) StagePTRPendingMappings(
+	ctx context.Context,
+	cfg coreptrsync.Config,
+	request coreptrsync.PendingMappingsRequest,
+) (coreptrsync.PendingMappingsResult, error) {
+	if !cfg.Enabled {
+		return coreptrsync.PendingMappingsResult{}, coreptrsync.ErrSyncDisabled
+	}
+
+	targetServiceKey, err := normalizePTRTargetServiceKey(request.ServiceKey)
+	if err != nil {
+		return coreptrsync.PendingMappingsResult{}, err
+	}
+
+	tags := dedupeStrings(request.Tags)
+	if len(tags) == 0 {
+		return coreptrsync.PendingMappingsResult{}, errors.New("at least one tag is required")
+	}
+
+	hashes, err := b.resolvePTRPendingRequestHashes(ctx, request)
+	if err != nil {
+		return coreptrsync.PendingMappingsResult{}, err
+	}
+	if len(hashes) == 0 {
+		return coreptrsync.PendingMappingsResult{}, errors.New("at least one file identifier is required")
+	}
+
+	hashIDsByHash, err := b.lookupKnownHashIDs(ctx, hashes)
+	if err != nil {
+		return coreptrsync.PendingMappingsResult{}, err
+	}
+
+	missingHashes := []string{}
+	hashIDs := make([]int64, 0, len(hashes))
+	for _, hash := range hashes {
+		hashID, ok := hashIDsByHash[hash]
+		if !ok {
+			missingHashes = append(missingHashes, hash)
+			continue
+		}
+
+		hashIDs = append(hashIDs, hashID)
+	}
+	if len(missingHashes) > 0 {
+		return coreptrsync.PendingMappingsResult{}, fmt.Errorf("hashes not found: %v", missingHashes)
+	}
+
+	result := coreptrsync.PendingMappingsResult{ServiceKey: targetServiceKey}
+	err = b.WithImmediateTx(ctx, func(tx *ImmediateTx) error {
+		service, serviceID, err := preparePTRSyncFoundationTx(ctx, tx, cfg)
+		if err != nil {
+			return err
+		}
+
+		if service.ServiceKey != targetServiceKey {
+			return fmt.Errorf("PTR service key %q is unavailable", targetServiceKey)
+		}
+
+		addedMappings, err := stagePTRPendingMappingsTx(ctx, tx, serviceID, tags, hashIDs)
+		if err != nil {
+			return err
+		}
+
+		result.AddedMappings = addedMappings
+		return nil
+	})
+	if err != nil {
+		return coreptrsync.PendingMappingsResult{}, err
+	}
+
+	return result, nil
+}
+
+// ListPTRPendingMappingsForCommit returns grouped pending add mappings in the
+// exact logical shape needed for Hydrus client-to-server repository updates.
+func (b *Bundle) ListPTRPendingMappingsForCommit(
+	ctx context.Context,
+	cfg coreptrsync.Config,
+	serviceKey string,
+) ([]PTRPendingMappingGroup, error) {
+	if !cfg.Enabled {
+		return nil, coreptrsync.ErrSyncDisabled
+	}
+
+	targetServiceKey, err := normalizePTRTargetServiceKey(serviceKey)
+	if err != nil {
+		return nil, err
+	}
+
+	service, ok, err := lookupServiceByKeyTx(ctx, b.conn, targetServiceKey)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("PTR service key %q is unavailable", targetServiceKey)
+	}
+
+	serviceID, err := lookupServiceIDByKeyTx(ctx, b.conn, targetServiceKey)
+	if err != nil {
+		return nil, err
+	}
+
+	if service.Type != services.TypeTagRepository {
+		return nil, fmt.Errorf("service %q is not a tag repository", targetServiceKey)
+	}
+
+	query := fmt.Sprintf(
+		`SELECT pm.tag_id, lower(hex(h.hash))
+		FROM external_mappings.pending_mappings_%d pm
+		JOIN external_master.hashes h USING (hash_id)
+		ORDER BY pm.tag_id ASC, pm.hash_id ASC`,
+		serviceID,
+	)
+
+	rows, err := b.conn.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("query PTR pending mappings for commit: %w", err)
+	}
+	defer rows.Close()
+
+	tagIDsInOrder := []int64{}
+	hashesByTagID := map[int64][]string{}
+	seenTagIDs := map[int64]struct{}{}
+	for rows.Next() {
+		var (
+			tagID   int64
+			hashHex string
+		)
+
+		if err := rows.Scan(&tagID, &hashHex); err != nil {
+			return nil, fmt.Errorf("scan PTR pending mapping row: %w", err)
+		}
+
+		if _, ok := seenTagIDs[tagID]; !ok {
+			seenTagIDs[tagID] = struct{}{}
+			tagIDsInOrder = append(tagIDsInOrder, tagID)
+		}
+
+		hashesByTagID[tagID] = append(hashesByTagID[tagID], hashHex)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate PTR pending mapping rows: %w", err)
+	}
+
+	tagsByID, err := b.lookupTagsByID(ctx, tagIDsInOrder)
+	if err != nil {
+		return nil, err
+	}
+
+	groups := make([]PTRPendingMappingGroup, 0, len(tagIDsInOrder))
+	for _, tagID := range tagIDsInOrder {
+		tag, ok := tagsByID[tagID]
+		if !ok {
+			return nil, fmt.Errorf("PTR pending mapping tag_id %d could not be resolved", tagID)
+		}
+
+		groups = append(groups, PTRPendingMappingGroup{
+			Tag:    tag,
+			Hashes: hashesByTagID[tagID],
+		})
+	}
+
+	return groups, nil
+}
+
+// CommitPTRPendingMappingsSuccess applies the local successful-commit state
+// transition for all currently pending add mappings on the daemon-owned PTR.
+func (b *Bundle) CommitPTRPendingMappingsSuccess(
+	ctx context.Context,
+	cfg coreptrsync.Config,
+	serviceKey string,
+) (coreptrsync.CommitPendingResult, error) {
+	if !cfg.Enabled {
+		return coreptrsync.CommitPendingResult{}, coreptrsync.ErrSyncDisabled
+	}
+
+	targetServiceKey, err := normalizePTRTargetServiceKey(serviceKey)
+	if err != nil {
+		return coreptrsync.CommitPendingResult{}, err
+	}
+
+	result := coreptrsync.CommitPendingResult{ServiceKey: targetServiceKey}
+	err = b.WithImmediateTx(ctx, func(tx *ImmediateTx) error {
+		service, serviceID, err := preparePTRSyncFoundationTx(ctx, tx, cfg)
+		if err != nil {
+			return err
+		}
+
+		if service.ServiceKey != targetServiceKey {
+			return fmt.Errorf("PTR service key %q is unavailable", targetServiceKey)
+		}
+
+		committedMappings, err := commitPTRPendingMappingsSuccessTx(ctx, tx, serviceID)
+		if err != nil {
+			return err
+		}
+
+		result.CommittedMappings = committedMappings
+		return nil
+	})
+	if err != nil {
+		return coreptrsync.CommitPendingResult{}, err
+	}
+
+	return result, nil
 }
 
 // RecoverPTRSyncFoundation prepares the daemon-owned PTR foundation and resets
@@ -159,6 +426,10 @@ func (b *Bundle) PersistPTRSyncMetadata(
 			return err
 		}
 
+		if err := ensurePTRRepositoryDefinitionTables(ctx, tx, serviceID); err != nil {
+			return err
+		}
+
 		if err := ensurePTRSyncRunActive(ctx, tx, serviceID, runToken); err != nil {
 			return err
 		}
@@ -199,6 +470,10 @@ func (b *Bundle) PersistPTRSyncMetadata(
 			return err
 		}
 
+		if err := recomputePTRProcessedCounts(ctx, tx, serviceID, runToken); err != nil {
+			return err
+		}
+
 		status, err = lookupPTRSyncStatus(ctx, tx, cfg, service)
 		return err
 	})
@@ -215,6 +490,26 @@ func (b *Bundle) CompletePTRSyncSuccess(
 	ctx context.Context,
 	cfg coreptrsync.Config,
 	runToken string,
+) (coreptrsync.Status, error) {
+	return b.finishPTRSyncIdle(ctx, cfg, runToken, "")
+}
+
+// CancelPTRSync clears an active PTR sync lease without recording a failure.
+// This is used for interrupted runs such as daemon shutdown where the next run
+// should continue from persisted state rather than surface a terminal error.
+func (b *Bundle) CancelPTRSync(
+	ctx context.Context,
+	cfg coreptrsync.Config,
+	runToken string,
+) (coreptrsync.Status, error) {
+	return b.finishPTRSyncIdle(ctx, cfg, runToken, "")
+}
+
+func (b *Bundle) finishPTRSyncIdle(
+	ctx context.Context,
+	cfg coreptrsync.Config,
+	runToken string,
+	lastError string,
 ) (coreptrsync.Status, error) {
 	if !cfg.Enabled {
 		return coreptrsync.Status{}, coreptrsync.ErrSyncDisabled
@@ -233,7 +528,7 @@ func (b *Bundle) CompletePTRSyncSuccess(
 			return err
 		}
 
-		if err := setPTRSyncIdle(ctx, tx, serviceID, runToken, nextUpdateIndex, ""); err != nil {
+		if err := setPTRSyncIdle(ctx, tx, serviceID, runToken, nextUpdateIndex, lastError); err != nil {
 			return err
 		}
 
@@ -397,6 +692,189 @@ func (b *Bundle) FinalizePTRDownloadedUpdate(
 	return status, nil
 }
 
+// FinalizePTRDownloadedUpdatesBatch marks multiple successfully downloaded PTR
+// updates as locally registered while keeping the sync lease active.
+func (b *Bundle) FinalizePTRDownloadedUpdatesBatch(
+	ctx context.Context,
+	cfg coreptrsync.Config,
+	runToken string,
+	items []PTRDownloadedUpdateBatchItem,
+) (coreptrsync.Status, error) {
+	if !cfg.Enabled {
+		return coreptrsync.Status{}, coreptrsync.ErrSyncDisabled
+	}
+
+	if len(items) == 0 {
+		return b.GetPTRSyncStatus(ctx, cfg)
+	}
+
+	status := coreptrsync.Status{}
+	err := b.WithImmediateTx(ctx, func(tx *ImmediateTx) error {
+		service, serviceID, err := lookupPTRServiceTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+
+		if err := ensurePTRSyncPersistenceTables(ctx, tx, serviceID); err != nil {
+			return err
+		}
+
+		if err := ensurePTRSyncRunActive(ctx, tx, serviceID, runToken); err != nil {
+			return err
+		}
+
+		_, updateServiceID, err := ensurePTRRepositoryUpdatesService(ctx, tx)
+		if err != nil {
+			return err
+		}
+
+		_, repositoryUnregisteredTableName, _ := generatePTRRepositoryTableNames(serviceID)
+		for _, item := range items {
+			hashHex := strings.ToLower(strings.TrimSpace(item.HashHex))
+			if hashHex == "" {
+				return fmt.Errorf("PTR downloaded update hash is required")
+			}
+
+			if strings.TrimSpace(item.PreparedImport.HashHex) != "" {
+				if !strings.EqualFold(item.PreparedImport.HashHex, hashHex) {
+					return fmt.Errorf(
+						"prepared PTR import hash %q did not match batch hash %q",
+						item.PreparedImport.HashHex,
+						hashHex,
+					)
+				}
+			}
+
+			prepared := item.PreparedImport
+			prepared.HashHex = hashHex
+			if _, err := finalizePTRPreparedImportTx(ctx, tx, prepared); err != nil {
+				return err
+			}
+
+			hashBytes, decodeErr := hex.DecodeString(hashHex)
+			if decodeErr != nil {
+				return fmt.Errorf("decode PTR downloaded update hash: %w", decodeErr)
+			}
+
+			hashID, ok, err := lookupHashIDByHash(ctx, tx, hashBytes)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("PTR downloaded update hash %s is not registered locally", hashHex)
+			}
+
+			if _, err := tx.ExecContext(
+				ctx,
+				fmt.Sprintf("DELETE FROM %s WHERE hash_id = ?", repositoryUnregisteredTableName),
+				hashID,
+			); err != nil {
+				return fmt.Errorf("delete PTR repository unregistered update row: %w", err)
+			}
+		}
+
+		downloadedCount, err := queryPTRDownloadedUpdateCount(ctx, tx, updateServiceID)
+		if err != nil {
+			return err
+		}
+
+		if err := updatePTRSyncDownloadedUpdateCount(ctx, tx, runToken, downloadedCount); err != nil {
+			return err
+		}
+
+		status, err = lookupPTRSyncStatus(ctx, tx, cfg, service)
+		return err
+	})
+	if err != nil {
+		return coreptrsync.Status{}, err
+	}
+
+	return status, nil
+}
+
+func finalizePTRPreparedImportTx(
+	ctx context.Context,
+	tx *ImmediateTx,
+	prepared PreparedLocalImport,
+) (PreparedLocalImportResult, error) {
+	normalized, err := normalizePreparedLocalImport(prepared)
+	if err != nil {
+		return PreparedLocalImportResult{}, err
+	}
+
+	plan, err := resolvePreparedLocalImportPlanTx(ctx, tx, normalized.localFileServiceKey)
+	if err != nil {
+		return PreparedLocalImportResult{}, err
+	}
+
+	hashID, hashExists, err := lookupHashIDByHash(ctx, tx, normalized.hashBytes)
+	if err != nil {
+		return PreparedLocalImportResult{}, err
+	}
+
+	if hashExists {
+		record, ok, err := lookupBasicRecordByHashID(ctx, tx, hashID)
+		if err != nil {
+			return PreparedLocalImportResult{}, err
+		}
+
+		if ok {
+			if !basicRecordMatchesPreparedImport(record, normalized) {
+				return PreparedLocalImportResult{}, fmt.Errorf(
+					"prepared import conflicts with existing file_id %d",
+					hashID,
+				)
+			}
+
+			if err := ensurePreparedAuxiliaryMetadata(ctx, tx, hashID, normalized, plan); err != nil {
+				return PreparedLocalImportResult{}, err
+			}
+
+			if err := ensurePreparedCurrentMemberships(ctx, tx, hashID, plan, normalized.importedAtMS); err != nil {
+				return PreparedLocalImportResult{}, err
+			}
+
+			return PreparedLocalImportResult{FileID: hashID, AlreadyImported: true}, nil
+		}
+	}
+
+	return recordPreparedLocalImportTx(ctx, tx, prepared)
+}
+
+// SetPTRSyncThrottled ends an active PTR sync lease in a retrying state after
+// the remote requested a temporary backoff.
+func (b *Bundle) SetPTRSyncThrottled(
+	ctx context.Context,
+	cfg coreptrsync.Config,
+	runToken string,
+	retryAtMS int64,
+	retryAttempt int64,
+) (coreptrsync.Status, error) {
+	if !cfg.Enabled {
+		return coreptrsync.Status{}, coreptrsync.ErrSyncDisabled
+	}
+
+	status := coreptrsync.Status{}
+	err := b.WithImmediateTx(ctx, func(tx *ImmediateTx) error {
+		service, serviceID, err := lookupPTRServiceTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+
+		if err := setPTRSyncThrottled(ctx, tx, serviceID, runToken, retryAtMS, retryAttempt); err != nil {
+			return err
+		}
+
+		status, err = lookupPTRSyncStatus(ctx, tx, cfg, service)
+		return err
+	})
+	if err != nil {
+		return coreptrsync.Status{}, err
+	}
+
+	return status, nil
+}
+
 // FinishPTRSyncFailure records the latest daemon-visible PTR sync failure while
 // returning the persisted idle status.
 func (b *Bundle) FinishPTRSyncFailure(
@@ -490,6 +968,10 @@ func preparePTRSyncFoundationTxWithMode(
 	}
 
 	if err := ensurePTRMappingsTables(ctx, tx, serviceID); err != nil {
+		return services.Service{}, 0, err
+	}
+
+	if err := ensurePTRRepositoryDefinitionTables(ctx, tx, serviceID); err != nil {
 		return services.Service{}, 0, err
 	}
 
@@ -681,6 +1163,39 @@ func ensurePTRMappingsTables(ctx context.Context, tx *ImmediateTx, serviceID int
 	return nil
 }
 
+func ensurePTRRepositoryDefinitionTables(
+	ctx context.Context,
+	tx *ImmediateTx,
+	serviceID int64,
+) error {
+	hashIDMapTableName, tagIDMapTableName := generatePTRRepositoryDefinitionTableNames(serviceID)
+
+	statements := []string{
+		fmt.Sprintf(
+			`CREATE TABLE IF NOT EXISTS %s (
+				service_hash_id INTEGER PRIMARY KEY,
+				hash_id INTEGER
+			)`,
+			hashIDMapTableName,
+		),
+		fmt.Sprintf(
+			`CREATE TABLE IF NOT EXISTS %s (
+				service_tag_id INTEGER PRIMARY KEY,
+				tag_id INTEGER
+			)`,
+			tagIDMapTableName,
+		),
+	}
+
+	for _, statement := range statements {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("ensure PTR repository definition table: %w", err)
+		}
+	}
+
+	return nil
+}
+
 func ensurePTRRepositoryUpdatesService(
 	ctx context.Context,
 	tx *ImmediateTx,
@@ -822,6 +1337,8 @@ func ensurePTRSyncStateTable(ctx context.Context, tx *ImmediateTx) error {
 			downloaded_update_count INTEGER NOT NULL,
 			processed_definition_count INTEGER NOT NULL,
 			processed_content_count INTEGER NOT NULL,
+			retry_at_ms INTEGER NOT NULL DEFAULT 0,
+			retry_attempt INTEGER NOT NULL DEFAULT 0,
 			last_error TEXT,
 			updated_at_ms INTEGER NOT NULL
 		)`,
@@ -834,6 +1351,20 @@ func ensurePTRSyncStateTable(ctx context.Context, tx *ImmediateTx) error {
 		`ALTER TABLE main.ptr_sync_state ADD COLUMN run_token TEXT`,
 	); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name: run_token") {
 		return fmt.Errorf("ensure ptr_sync_state.run_token column: %w", err)
+	}
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`ALTER TABLE main.ptr_sync_state ADD COLUMN retry_at_ms INTEGER NOT NULL DEFAULT 0`,
+	); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name: retry_at_ms") {
+		return fmt.Errorf("ensure ptr_sync_state.retry_at_ms column: %w", err)
+	}
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`ALTER TABLE main.ptr_sync_state ADD COLUMN retry_attempt INTEGER NOT NULL DEFAULT 0`,
+	); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column name: retry_attempt") {
+		return fmt.Errorf("ensure ptr_sync_state.retry_attempt column: %w", err)
 	}
 
 	return nil
@@ -873,19 +1404,21 @@ func upsertPTRSyncState(
 ) error {
 	row := tx.QueryRowContext(
 		ctx,
-		`SELECT service_id, account_mode, phase, is_running, run_token, last_error
+		`SELECT service_id, account_mode, phase, is_running, run_token, retry_at_ms, retry_attempt, last_error
 		FROM main.ptr_sync_state
 		WHERE singleton = ?`,
 		ptrSyncStateSingleton,
 	)
 
 	var (
-		existingServiceID   int64
-		existingAccountMode string
-		existingPhase       string
-		existingIsRunning   int64
-		existingRunToken    sql.NullString
-		existingLastError   sql.NullString
+		existingServiceID    int64
+		existingAccountMode  string
+		existingPhase        string
+		existingIsRunning    int64
+		existingRunToken     sql.NullString
+		existingRetryAtMS    int64
+		existingRetryAttempt int64
+		existingLastError    sql.NullString
 	)
 
 	err := row.Scan(
@@ -894,6 +1427,8 @@ func upsertPTRSyncState(
 		&existingPhase,
 		&existingIsRunning,
 		&existingRunToken,
+		&existingRetryAtMS,
+		&existingRetryAttempt,
 		&existingLastError,
 	)
 	if err != nil {
@@ -912,15 +1447,19 @@ func upsertPTRSyncState(
 					downloaded_update_count,
 					processed_definition_count,
 					processed_content_count,
+					retry_at_ms,
+					retry_attempt,
 					last_error,
 					updated_at_ms
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 				ptrSyncStateSingleton,
 				serviceID,
 				coreptrsync.AccountModeSharedReadOnly,
 				coreptrsync.PhaseIdle,
 				0,
 				nil,
+				0,
+				0,
 				0,
 				0,
 				0,
@@ -943,6 +1482,14 @@ func upsertPTRSyncState(
 
 	if existingServiceID == serviceID &&
 		existingAccountMode == coreptrsync.AccountModeSharedReadOnly &&
+		existingPhase == coreptrsync.PhaseThrottling &&
+		existingIsRunning == 0 &&
+		!existingRunToken.Valid {
+		return nil
+	}
+
+	if existingServiceID == serviceID &&
+		existingAccountMode == coreptrsync.AccountModeSharedReadOnly &&
 		existingPhase == coreptrsync.PhaseIdle &&
 		existingIsRunning == 0 &&
 		!existingRunToken.Valid &&
@@ -959,6 +1506,8 @@ func upsertPTRSyncState(
 			phase = ?,
 			is_running = ?,
 			run_token = ?,
+			retry_at_ms = ?,
+			retry_attempt = ?,
 			last_error = ?,
 			updated_at_ms = ?
 		WHERE singleton = ?`,
@@ -967,6 +1516,8 @@ func upsertPTRSyncState(
 		coreptrsync.PhaseIdle,
 		0,
 		nil,
+		0,
+		0,
 		nil,
 		nowMS,
 		ptrSyncStateSingleton,
@@ -983,6 +1534,11 @@ func lookupPTRSyncStatus(
 	cfg coreptrsync.Config,
 	service services.Service,
 ) (coreptrsync.Status, error) {
+	serviceID, err := lookupServiceIDByKeyTx(ctx, q, service.ServiceKey)
+	if err != nil {
+		return coreptrsync.Status{}, err
+	}
+
 	row := q.QueryRowContext(
 		ctx,
 		`SELECT
@@ -993,6 +1549,8 @@ func lookupPTRSyncStatus(
 			downloaded_update_count,
 			processed_definition_count,
 			processed_content_count,
+			retry_at_ms,
+			retry_attempt,
 			last_error,
 			updated_at_ms
 		FROM main.ptr_sync_state
@@ -1008,6 +1566,8 @@ func lookupPTRSyncStatus(
 		downloadedUpdateCount    int64
 		processedDefinitionCount int64
 		processedContentCount    int64
+		retryAtMS                int64
+		retryAttempt             int64
 		lastError                sql.NullString
 		updatedAtMS              int64
 	)
@@ -1020,6 +1580,8 @@ func lookupPTRSyncStatus(
 		&downloadedUpdateCount,
 		&processedDefinitionCount,
 		&processedContentCount,
+		&retryAtMS,
+		&retryAttempt,
 		&lastError,
 		&updatedAtMS,
 	); err != nil {
@@ -1033,6 +1595,25 @@ func lookupPTRSyncStatus(
 		return coreptrsync.Status{}, fmt.Errorf("query PTR sync state: %w", err)
 	}
 
+	pendingDownloadCount, err := queryPTRPendingDownloadCount(ctx, q, serviceID)
+	if err != nil {
+		return coreptrsync.Status{}, err
+	}
+
+	pendingProcessCount, err := queryPTRPendingProcessCount(ctx, q, serviceID)
+	if err != nil {
+		return coreptrsync.Status{}, err
+	}
+
+	hasObservedSyncProgress := metadataSlice > 0 || downloadedUpdateCount > 0 || processedDefinitionCount > 0 || processedContentCount > 0
+	isComplete :=
+		phase == coreptrsync.PhaseIdle &&
+			isRunning == 0 &&
+			!lastError.Valid &&
+			pendingDownloadCount == 0 &&
+			pendingProcessCount == 0 &&
+			hasObservedSyncProgress
+
 	status := coreptrsync.Status{
 		Enabled:                  cfg.Enabled,
 		Configured:               true,
@@ -1043,10 +1624,13 @@ func lookupPTRSyncStatus(
 		AccountMode:              accountMode,
 		Phase:                    phase,
 		IsRunning:                isRunning != 0,
+		IsComplete:               isComplete,
 		MetadataSlice:            metadataSlice,
 		DownloadedUpdateCount:    downloadedUpdateCount,
 		ProcessedDefinitionCount: processedDefinitionCount,
 		ProcessedContentCount:    processedContentCount,
+		RetryAtMS:                retryAtMS,
+		RetryAttempt:             retryAttempt,
 		UpdatedAtMS:              updatedAtMS,
 	}
 	if lastError.Valid {
@@ -1108,10 +1692,153 @@ func defaultPTRSyncStatus(cfg coreptrsync.Config) coreptrsync.Status {
 	}
 }
 
+func generatePTRRepositoryDefinitionTableNames(serviceID int64) (string, string) {
+	return fmt.Sprintf("external_master.%s%d", ptrRepositoryHashIDMapTablePrefix, serviceID),
+		fmt.Sprintf("external_master.%s%d", ptrRepositoryTagIDMapTablePrefix, serviceID)
+}
+
 func generatePTRRepositoryTableNames(serviceID int64) (string, string, string) {
 	return fmt.Sprintf("%s%d", ptrRepositoryUpdatesTablePrefix, serviceID),
 		fmt.Sprintf("%s%d", ptrRepositoryUnregisteredTablePrefix, serviceID),
 		fmt.Sprintf("%s%d", ptrRepositoryProcessedTablePrefix, serviceID)
+}
+
+// ListPTRProcessableUpdates reconciles already-local repository update blobs
+// into the processed table and returns the currently processable work in update
+// order with definitions before mappings.
+func (b *Bundle) ListPTRProcessableUpdates(
+	ctx context.Context,
+	cfg coreptrsync.Config,
+	runToken string,
+) ([]PTRProcessableUpdate, error) {
+	if !cfg.Enabled {
+		return nil, coreptrsync.ErrSyncDisabled
+	}
+
+	processable := []PTRProcessableUpdate{}
+	err := b.WithImmediateTx(ctx, func(tx *ImmediateTx) error {
+		_, serviceID, err := lookupPTRServiceTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+
+		if err := ensurePTRSyncRunActive(ctx, tx, serviceID, runToken); err != nil {
+			return err
+		}
+
+		_, updateServiceID, err := ensurePTRRepositoryUpdatesService(ctx, tx)
+		if err != nil {
+			return err
+		}
+
+		if err := ensurePTRRepositoryDefinitionTables(ctx, tx, serviceID); err != nil {
+			return err
+		}
+
+		if err := reconcilePTRProcessedUpdatesForLocalBlobs(ctx, tx, serviceID, updateServiceID); err != nil {
+			return err
+		}
+
+		processable, err = queryPTRProcessableUpdates(ctx, tx, serviceID, updateServiceID)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return processable, nil
+}
+
+// ApplyPTRDefinitions persists repository-local definitions into repository id
+// map tables before marking the source update processed.
+func (b *Bundle) ApplyPTRDefinitions(
+	ctx context.Context,
+	cfg coreptrsync.Config,
+	runToken string,
+	updateHashHex string,
+	update PTRDefinitionsUpdate,
+) error {
+	if !cfg.Enabled {
+		return coreptrsync.ErrSyncDisabled
+	}
+
+	return b.WithImmediateTx(ctx, func(tx *ImmediateTx) error {
+		_, serviceID, err := lookupPTRServiceTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+
+		if err := ensurePTRSyncRunActive(ctx, tx, serviceID, runToken); err != nil {
+			return err
+		}
+
+		updateHashID, err := lookupRequiredHashIDByHex(ctx, tx, updateHashHex)
+		if err != nil {
+			return err
+		}
+
+		if err := ensurePTRRepositoryDefinitionTables(ctx, tx, serviceID); err != nil {
+			return err
+		}
+
+		if err := applyPTRDefinitionsTx(ctx, tx, serviceID, update); err != nil {
+			return err
+		}
+
+		if err := markPTRUpdateProcessed(ctx, tx, serviceID, updateHashID, PTRContentTypeDefinitions); err != nil {
+			return err
+		}
+
+		return recomputePTRProcessedCounts(ctx, tx, serviceID, runToken)
+	})
+}
+
+// ApplyPTRMappings normalizes repository-local ids through repository map
+// tables, writes mapping state, and marks the source update processed.
+func (b *Bundle) ApplyPTRMappings(
+	ctx context.Context,
+	cfg coreptrsync.Config,
+	runToken string,
+	updateHashHex string,
+	update PTRMappingsUpdate,
+) error {
+	if !cfg.Enabled {
+		return coreptrsync.ErrSyncDisabled
+	}
+
+	return b.WithImmediateTx(ctx, func(tx *ImmediateTx) error {
+		_, serviceID, err := lookupPTRServiceTx(ctx, tx)
+		if err != nil {
+			return err
+		}
+
+		if err := ensurePTRSyncRunActive(ctx, tx, serviceID, runToken); err != nil {
+			return err
+		}
+
+		updateHashID, err := lookupRequiredHashIDByHex(ctx, tx, updateHashHex)
+		if err != nil {
+			return err
+		}
+
+		if err := ensurePTRMappingsTables(ctx, tx, serviceID); err != nil {
+			return err
+		}
+
+		if err := ensurePTRRepositoryDefinitionTables(ctx, tx, serviceID); err != nil {
+			return err
+		}
+
+		if err := applyPTRMappingsTx(ctx, tx, serviceID, update); err != nil {
+			return err
+		}
+
+		if err := markPTRUpdateProcessed(ctx, tx, serviceID, updateHashID, PTRContentTypeMappings); err != nil {
+			return err
+		}
+
+		return recomputePTRProcessedCounts(ctx, tx, serviceID, runToken)
+	})
 }
 
 func lookupPTRServiceTx(
@@ -1150,6 +1877,7 @@ func setPTRSyncRunning(ctx context.Context, tx *ImmediateTx, serviceID int64) (s
 			phase = ?,
 			is_running = ?,
 			run_token = ?,
+			retry_at_ms = ?,
 			last_error = ?,
 			updated_at_ms = ?
 		WHERE singleton = ? AND is_running = 0`,
@@ -1158,6 +1886,7 @@ func setPTRSyncRunning(ctx context.Context, tx *ImmediateTx, serviceID int64) (s
 		coreptrsync.PhaseSyncing,
 		1,
 		runToken,
+		0,
 		nil,
 		nowMS,
 		ptrSyncStateSingleton,
@@ -1228,6 +1957,8 @@ func setPTRSyncIdle(
 			is_running = ?,
 			run_token = ?,
 			metadata_slice = ?,
+			retry_at_ms = ?,
+			retry_attempt = ?,
 			last_error = ?,
 			updated_at_ms = ?
 		WHERE singleton = ? AND is_running = 1 AND run_token = ?`,
@@ -1237,6 +1968,8 @@ func setPTRSyncIdle(
 		0,
 		nil,
 		nextUpdateIndex,
+		0,
+		0,
 		lastErrorValue,
 		nowMS,
 		ptrSyncStateSingleton,
@@ -1279,6 +2012,8 @@ func setPTRSyncFailed(
 			phase = ?,
 			is_running = ?,
 			run_token = ?,
+			retry_at_ms = ?,
+			retry_attempt = ?,
 			last_error = ?,
 			updated_at_ms = ?
 		WHERE singleton = ? AND is_running = 1 AND run_token = ?`,
@@ -1287,6 +2022,8 @@ func setPTRSyncFailed(
 		coreptrsync.PhaseIdle,
 		0,
 		nil,
+		0,
+		0,
 		trimmedLastError,
 		nowMS,
 		ptrSyncStateSingleton,
@@ -1299,6 +2036,60 @@ func setPTRSyncFailed(
 	rowsAffected, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("read ptr_sync_state failed rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return errPTRSyncRunNotActive
+	}
+
+	return nil
+}
+
+func setPTRSyncThrottled(
+	ctx context.Context,
+	tx *ImmediateTx,
+	serviceID int64,
+	runToken string,
+	retryAtMS int64,
+	retryAttempt int64,
+) error {
+	if retryAttempt < 1 {
+		retryAttempt = 1
+	}
+
+	nowMS := time.Now().UTC().UnixMilli()
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE main.ptr_sync_state
+		SET service_id = ?,
+			account_mode = ?,
+			phase = ?,
+			is_running = ?,
+			run_token = ?,
+			retry_at_ms = ?,
+			retry_attempt = ?,
+			last_error = ?,
+			updated_at_ms = ?
+		WHERE singleton = ? AND is_running = 1 AND run_token = ?`,
+		serviceID,
+		coreptrsync.AccountModeSharedReadOnly,
+		coreptrsync.PhaseThrottling,
+		0,
+		nil,
+		retryAtMS,
+		retryAttempt,
+		nil,
+		nowMS,
+		ptrSyncStateSingleton,
+		runToken,
+	)
+	if err != nil {
+		return fmt.Errorf("set ptr_sync_state retrying: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read ptr_sync_state retrying rows affected: %w", err)
 	}
 
 	if rowsAffected == 0 {
@@ -1597,6 +2388,766 @@ func queryPTRDownloadedUpdateCount(
 	}
 
 	return count, nil
+}
+
+func queryPTRPendingDownloadCount(
+	ctx context.Context,
+	q queryRowContextQuerier,
+	serviceID int64,
+) (int64, error) {
+	_, repositoryUnregisteredTableName, _ := generatePTRRepositoryTableNames(serviceID)
+
+	row := q.QueryRowContext(
+		ctx,
+		fmt.Sprintf("SELECT COUNT(*) FROM %s", repositoryUnregisteredTableName),
+	)
+
+	var count int64
+	if err := row.Scan(&count); err != nil {
+		return 0, fmt.Errorf("query PTR pending download count: %w", err)
+	}
+
+	return count, nil
+}
+
+func queryPTRPendingProcessCount(
+	ctx context.Context,
+	q queryRowContextQuerier,
+	serviceID int64,
+) (int64, error) {
+	_, _, repositoryProcessedTableName := generatePTRRepositoryTableNames(serviceID)
+
+	row := q.QueryRowContext(
+		ctx,
+		fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE processed = ?", repositoryProcessedTableName),
+		0,
+	)
+
+	var count int64
+	if err := row.Scan(&count); err != nil {
+		return 0, fmt.Errorf("query PTR pending process count: %w", err)
+	}
+
+	return count, nil
+}
+
+func reconcilePTRProcessedUpdatesForLocalBlobs(
+	ctx context.Context,
+	tx *ImmediateTx,
+	serviceID int64,
+	updateServiceID int64,
+) error {
+	repositoryUpdatesTableName, repositoryUnregisteredTableName, repositoryProcessedTableName := generatePTRRepositoryTableNames(serviceID)
+
+	rows, err := tx.QueryContext(
+		ctx,
+		fmt.Sprintf(
+			`SELECT ru.hash_id, fi.mime
+			FROM %s ru
+			JOIN main.current_files_%d cf USING (hash_id)
+			JOIN main.files_info fi USING (hash_id)`,
+			repositoryUpdatesTableName,
+			updateServiceID,
+		),
+	)
+	if err != nil {
+		return fmt.Errorf("query locally registered PTR updates: %w", err)
+	}
+	defer rows.Close()
+
+	correctRows := map[[2]int64]struct{}{}
+	localHashIDs := map[int64]struct{}{}
+	for rows.Next() {
+		var (
+			hashID int64
+			mime   int64
+		)
+
+		if err := rows.Scan(&hashID, &mime); err != nil {
+			return fmt.Errorf("scan locally registered PTR update row: %w", err)
+		}
+
+		contentType, ok := ptrContentTypeForUpdateMime(mime)
+		if !ok {
+			continue
+		}
+
+		correctRows[[2]int64{hashID, contentType}] = struct{}{}
+		localHashIDs[hashID] = struct{}{}
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate locally registered PTR update rows: %w", err)
+	}
+
+	currentRows, err := queryPTRProcessedRows(ctx, tx, repositoryProcessedTableName)
+	if err != nil {
+		return err
+	}
+
+	for _, row := range currentRows {
+		key := [2]int64{row.hashID, row.contentType}
+		if _, ok := localHashIDs[row.hashID]; !ok {
+			continue
+		}
+
+		if _, ok := correctRows[key]; ok {
+			delete(correctRows, key)
+			continue
+		}
+
+		if _, err := tx.ExecContext(
+			ctx,
+			fmt.Sprintf("DELETE FROM %s WHERE hash_id = ? AND content_type = ?", repositoryProcessedTableName),
+			row.hashID,
+			row.contentType,
+		); err != nil {
+			return fmt.Errorf("delete stale PTR processed row: %w", err)
+		}
+	}
+
+	for key := range correctRows {
+		if _, err := tx.ExecContext(
+			ctx,
+			fmt.Sprintf(
+				"INSERT OR IGNORE INTO %s (hash_id, content_type, processed) VALUES (?, ?, ?)",
+				repositoryProcessedTableName,
+			),
+			key[0],
+			key[1],
+			0,
+		); err != nil {
+			return fmt.Errorf("insert PTR processed row: %w", err)
+		}
+	}
+
+	if len(localHashIDs) > 0 {
+		for hashID := range localHashIDs {
+			if _, err := tx.ExecContext(
+				ctx,
+				fmt.Sprintf("DELETE FROM %s WHERE hash_id = ?", repositoryUnregisteredTableName),
+				hashID,
+			); err != nil {
+				return fmt.Errorf("delete reconciled PTR unregistered row: %w", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func queryPTRProcessedRows(
+	ctx context.Context,
+	tx *ImmediateTx,
+	processedTableName string,
+) ([]processedRow, error) {
+	rows, err := tx.QueryContext(
+		ctx,
+		fmt.Sprintf("SELECT hash_id, content_type, processed FROM %s", processedTableName),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query PTR processed rows: %w", err)
+	}
+	defer rows.Close()
+
+	processedRows := []processedRow{}
+	for rows.Next() {
+		var (
+			row       processedRow
+			processed int64
+		)
+
+		if err := rows.Scan(&row.hashID, &row.contentType, &processed); err != nil {
+			return nil, fmt.Errorf("scan PTR processed row: %w", err)
+		}
+
+		row.processed = processed != 0
+		processedRows = append(processedRows, row)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate PTR processed rows: %w", err)
+	}
+
+	return processedRows, nil
+}
+
+func queryPTRProcessableUpdates(
+	ctx context.Context,
+	tx *ImmediateTx,
+	serviceID int64,
+	updateServiceID int64,
+) ([]PTRProcessableUpdate, error) {
+	repositoryUpdatesTableName, _, repositoryProcessedTableName :=
+		generatePTRRepositoryTableNames(serviceID)
+
+	var minBlockedUpdateIndex sql.NullInt64
+	if err := tx.QueryRowContext(
+		ctx,
+		fmt.Sprintf(
+			`SELECT MIN(update_index)
+			FROM %s ru
+			LEFT JOIN main.current_files_%d cf USING (hash_id)
+			WHERE cf.hash_id IS NULL`,
+			repositoryUpdatesTableName,
+			updateServiceID,
+		),
+	).Scan(&minBlockedUpdateIndex); err != nil {
+		return nil, fmt.Errorf("query PTR earliest blocked update index: %w", err)
+	}
+
+	predicate := "rp.content_type IN (?, ?)"
+	args := []any{PTRContentTypeDefinitions, PTRContentTypeMappings}
+	if minBlockedUpdateIndex.Valid {
+		predicate += " AND ru.update_index < ?"
+		args = append(args, minBlockedUpdateIndex.Int64)
+	}
+
+	rows, err := tx.QueryContext(
+		ctx,
+		fmt.Sprintf(
+			`SELECT ru.update_index, rp.hash_id, lower(hex(h.hash)), rp.content_type, rp.processed
+			FROM %s rp
+			JOIN %s ru USING (hash_id)
+			JOIN main.current_files_%d cf USING (hash_id)
+			JOIN external_master.hashes h USING (hash_id)
+			WHERE %s
+			ORDER BY ru.update_index ASC,
+				CASE WHEN rp.content_type = %d THEN 0 ELSE 1 END ASC,
+				rp.hash_id ASC`,
+			repositoryProcessedTableName,
+			repositoryUpdatesTableName,
+			updateServiceID,
+			predicate,
+			PTRContentTypeDefinitions,
+		),
+		args...,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query PTR processable updates: %w", err)
+	}
+	defer rows.Close()
+
+	processable := []PTRProcessableUpdate{}
+	for rows.Next() {
+		var (
+			item      PTRProcessableUpdate
+			processed int64
+		)
+
+		if err := rows.Scan(
+			&item.UpdateIndex,
+			&item.HashID,
+			&item.HashHex,
+			&item.ContentType,
+			&processed,
+		); err != nil {
+			return nil, fmt.Errorf("scan PTR processable update row: %w", err)
+		}
+
+		item.Processed = processed != 0
+		processable = append(processable, item)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate PTR processable update rows: %w", err)
+	}
+
+	return processable, nil
+}
+
+func ptrContentTypeForUpdateMime(mime int64) (int64, bool) {
+	switch mime {
+	case ptrHydrusUpdateDefinitionsMime:
+		return PTRContentTypeDefinitions, true
+	case ptrHydrusUpdateContentMime:
+		return PTRContentTypeMappings, true
+	default:
+		return 0, false
+	}
+}
+
+func lookupRequiredHashIDByHex(ctx context.Context, tx *ImmediateTx, hashHex string) (int64, error) {
+	_, hashBytes, err := normalizePreparedHash(hashHex)
+	if err != nil {
+		return 0, fmt.Errorf("normalize PTR update hash %q: %w", hashHex, err)
+	}
+
+	hashID, ok, err := lookupHashIDByHash(ctx, tx, hashBytes)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return 0, fmt.Errorf("PTR update hash %s is not registered locally", hashHex)
+	}
+
+	return hashID, nil
+}
+
+func applyPTRDefinitionsTx(
+	ctx context.Context,
+	tx *ImmediateTx,
+	serviceID int64,
+	update PTRDefinitionsUpdate,
+) error {
+	hashIDMapTableName, tagIDMapTableName := generatePTRRepositoryDefinitionTableNames(serviceID)
+
+	if len(update.ServiceHashIDsToHashes) > 0 {
+		hashHexes := make([]string, 0, len(update.ServiceHashIDsToHashes))
+		for _, hashHex := range update.ServiceHashIDsToHashes {
+			hashHexes = append(hashHexes, hashHex)
+		}
+
+		hashIDsByHash, err := ensureHashIDsTx(ctx, tx, hashHexes)
+		if err != nil {
+			return fmt.Errorf("ensure PTR definition hash ids: %w", err)
+		}
+
+		for serviceHashID, hashHex := range update.ServiceHashIDsToHashes {
+			hashID, ok := hashIDsByHash[hashHex]
+			if !ok {
+				return fmt.Errorf("missing PTR definition hash id for %q", hashHex)
+			}
+
+			if _, err := tx.ExecContext(
+				ctx,
+				fmt.Sprintf(
+					"REPLACE INTO %s (service_hash_id, hash_id) VALUES (?, ?)",
+					hashIDMapTableName,
+				),
+				serviceHashID,
+				hashID,
+			); err != nil {
+				return fmt.Errorf("upsert PTR repository hash id map row: %w", err)
+			}
+		}
+	}
+
+	for serviceTagID, tag := range update.ServiceTagIDsToTags {
+		tagID, err := ensureTagIDTx(ctx, tx, tag)
+		if err != nil {
+			return fmt.Errorf("ensure PTR definition tag id for %q: %w", tag, err)
+		}
+
+		if _, err := tx.ExecContext(
+			ctx,
+			fmt.Sprintf(
+				"REPLACE INTO %s (service_tag_id, tag_id) VALUES (?, ?)",
+				tagIDMapTableName,
+			),
+			serviceTagID,
+			tagID,
+		); err != nil {
+			return fmt.Errorf("upsert PTR repository tag id map row: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func applyPTRMappingsTx(
+	ctx context.Context,
+	tx *ImmediateTx,
+	serviceID int64,
+	update PTRMappingsUpdate,
+) error {
+	for _, row := range update.Adds {
+		tagID, hashIDs, err := normalizePTRMappingRow(ctx, tx, serviceID, row)
+		if err != nil {
+			return err
+		}
+
+		for _, hashID := range hashIDs {
+			if _, err := tx.ExecContext(
+				ctx,
+				fmt.Sprintf("DELETE FROM external_mappings.deleted_mappings_%d WHERE tag_id = ? AND hash_id = ?", serviceID),
+				tagID,
+				hashID,
+			); err != nil {
+				return fmt.Errorf("delete PTR deleted mapping row before add: %w", err)
+			}
+
+			if _, err := tx.ExecContext(
+				ctx,
+				fmt.Sprintf("DELETE FROM external_mappings.pending_mappings_%d WHERE tag_id = ? AND hash_id = ?", serviceID),
+				tagID,
+				hashID,
+			); err != nil {
+				return fmt.Errorf("delete PTR pending mapping row before add: %w", err)
+			}
+
+			if _, err := tx.ExecContext(
+				ctx,
+				fmt.Sprintf("INSERT OR IGNORE INTO external_mappings.current_mappings_%d (tag_id, hash_id) VALUES (?, ?)", serviceID),
+				tagID,
+				hashID,
+			); err != nil {
+				return fmt.Errorf("insert PTR current mapping row: %w", err)
+			}
+		}
+	}
+
+	for _, row := range update.Deletes {
+		tagID, hashIDs, err := normalizePTRMappingRow(ctx, tx, serviceID, row)
+		if err != nil {
+			return err
+		}
+
+		for _, hashID := range hashIDs {
+			if _, err := tx.ExecContext(
+				ctx,
+				fmt.Sprintf("DELETE FROM external_mappings.current_mappings_%d WHERE tag_id = ? AND hash_id = ?", serviceID),
+				tagID,
+				hashID,
+			); err != nil {
+				return fmt.Errorf("delete PTR current mapping row before delete: %w", err)
+			}
+
+			if _, err := tx.ExecContext(
+				ctx,
+				fmt.Sprintf("DELETE FROM external_mappings.petitioned_mappings_%d WHERE tag_id = ? AND hash_id = ?", serviceID),
+				tagID,
+				hashID,
+			); err != nil {
+				return fmt.Errorf("delete PTR petitioned mapping row before delete: %w", err)
+			}
+
+			if _, err := tx.ExecContext(
+				ctx,
+				fmt.Sprintf("INSERT OR IGNORE INTO external_mappings.deleted_mappings_%d (tag_id, hash_id) VALUES (?, ?)", serviceID),
+				tagID,
+				hashID,
+			); err != nil {
+				return fmt.Errorf("insert PTR deleted mapping row: %w", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func normalizePTRMappingRow(
+	ctx context.Context,
+	tx *ImmediateTx,
+	serviceID int64,
+	row PTRMappingUpdateRow,
+) (int64, []int64, error) {
+	hashIDMapTableName, tagIDMapTableName := generatePTRRepositoryDefinitionTableNames(serviceID)
+
+	var tagID int64
+	if err := tx.QueryRowContext(
+		ctx,
+		fmt.Sprintf("SELECT tag_id FROM %s WHERE service_tag_id = ?", tagIDMapTableName),
+		row.ServiceTagID,
+	).Scan(&tagID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return 0, nil, fmt.Errorf("PTR repository tag definition missing for service_tag_id %d", row.ServiceTagID)
+		}
+
+		return 0, nil, fmt.Errorf("query PTR repository tag definition row: %w", err)
+	}
+
+	hashIDs := make([]int64, 0, len(row.ServiceHashIDs))
+	for _, serviceHashID := range row.ServiceHashIDs {
+		var hashID int64
+		if err := tx.QueryRowContext(
+			ctx,
+			fmt.Sprintf("SELECT hash_id FROM %s WHERE service_hash_id = ?", hashIDMapTableName),
+			serviceHashID,
+		).Scan(&hashID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return 0, nil, fmt.Errorf("PTR repository hash definition missing for service_hash_id %d", serviceHashID)
+			}
+
+			return 0, nil, fmt.Errorf("query PTR repository hash definition row: %w", err)
+		}
+
+		hashIDs = append(hashIDs, hashID)
+	}
+
+	return tagID, hashIDs, nil
+}
+
+func markPTRUpdateProcessed(
+	ctx context.Context,
+	tx *ImmediateTx,
+	serviceID int64,
+	hashID int64,
+	contentType int64,
+) error {
+	_, _, repositoryProcessedTableName := generatePTRRepositoryTableNames(serviceID)
+
+	if _, err := tx.ExecContext(
+		ctx,
+		fmt.Sprintf("UPDATE %s SET processed = ? WHERE hash_id = ? AND content_type = ?", repositoryProcessedTableName),
+		1,
+		hashID,
+		contentType,
+	); err != nil {
+		return fmt.Errorf("mark PTR update processed: %w", err)
+	}
+
+	return nil
+}
+
+func recomputePTRProcessedCounts(
+	ctx context.Context,
+	tx *ImmediateTx,
+	serviceID int64,
+	runToken string,
+) error {
+	_, _, repositoryProcessedTableName := generatePTRRepositoryTableNames(serviceID)
+
+	var processedDefinitionCount int64
+	if err := tx.QueryRowContext(
+		ctx,
+		fmt.Sprintf(
+			"SELECT COUNT(*) FROM %s WHERE content_type = ? AND processed = ?",
+			repositoryProcessedTableName,
+		),
+		PTRContentTypeDefinitions,
+		1,
+	).Scan(&processedDefinitionCount); err != nil {
+		return fmt.Errorf("query PTR processed definition count: %w", err)
+	}
+
+	var processedContentCount int64
+	if err := tx.QueryRowContext(
+		ctx,
+		fmt.Sprintf(
+			"SELECT COUNT(*) FROM %s WHERE content_type = ? AND processed = ?",
+			repositoryProcessedTableName,
+		),
+		PTRContentTypeMappings,
+		1,
+	).Scan(&processedContentCount); err != nil {
+		return fmt.Errorf("query PTR processed content count: %w", err)
+	}
+
+	nowMS := time.Now().UTC().UnixMilli()
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE main.ptr_sync_state
+		SET processed_definition_count = ?,
+			processed_content_count = ?,
+			updated_at_ms = ?
+		WHERE singleton = ? AND is_running = 1 AND run_token = ?`,
+		processedDefinitionCount,
+		processedContentCount,
+		nowMS,
+		ptrSyncStateSingleton,
+		runToken,
+	)
+	if err != nil {
+		return fmt.Errorf("update ptr_sync_state processed counts: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("read ptr_sync_state processed counts rows affected: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return errPTRSyncRunNotActive
+	}
+
+	return nil
+}
+
+func stagePTRPendingMappingsTx(
+	ctx context.Context,
+	tx *ImmediateTx,
+	serviceID int64,
+	tags []string,
+	hashIDs []int64,
+) (int64, error) {
+	var addedMappings int64
+	for _, tag := range tags {
+		tagID, err := ensureTagIDTx(ctx, tx, tag)
+		if err != nil {
+			return 0, fmt.Errorf("ensure PTR pending tag id for %q: %w", tag, err)
+		}
+
+		for _, hashID := range hashIDs {
+			if _, err := tx.ExecContext(
+				ctx,
+				fmt.Sprintf("DELETE FROM external_mappings.deleted_mappings_%d WHERE tag_id = ? AND hash_id = ?", serviceID),
+				tagID,
+				hashID,
+			); err != nil {
+				return 0, fmt.Errorf("delete PTR deleted mapping row before pending add: %w", err)
+			}
+
+			if _, err := tx.ExecContext(
+				ctx,
+				fmt.Sprintf("DELETE FROM external_mappings.petitioned_mappings_%d WHERE tag_id = ? AND hash_id = ?", serviceID),
+				tagID,
+				hashID,
+			); err != nil {
+				return 0, fmt.Errorf("delete PTR petitioned mapping row before pending add: %w", err)
+			}
+
+			exists, err := ptrMappingExistsTx(
+				ctx,
+				tx,
+				fmt.Sprintf("external_mappings.current_mappings_%d", serviceID),
+				tagID,
+				hashID,
+			)
+			if err != nil {
+				return 0, err
+			}
+			if exists {
+				continue
+			}
+
+			result, err := tx.ExecContext(
+				ctx,
+				fmt.Sprintf("INSERT OR IGNORE INTO external_mappings.pending_mappings_%d (tag_id, hash_id) VALUES (?, ?)", serviceID),
+				tagID,
+				hashID,
+			)
+			if err != nil {
+				return 0, fmt.Errorf("insert PTR pending mapping row: %w", err)
+			}
+
+			rowsAffected, err := result.RowsAffected()
+			if err != nil {
+				return 0, fmt.Errorf("read PTR pending mapping insert rows affected: %w", err)
+			}
+
+			addedMappings += rowsAffected
+		}
+	}
+
+	return addedMappings, nil
+}
+
+func commitPTRPendingMappingsSuccessTx(
+	ctx context.Context,
+	tx *ImmediateTx,
+	serviceID int64,
+) (int64, error) {
+	pendingTableName := fmt.Sprintf("external_mappings.pending_mappings_%d", serviceID)
+	deletedTableName := fmt.Sprintf("external_mappings.deleted_mappings_%d", serviceID)
+	petitionedTableName := fmt.Sprintf("external_mappings.petitioned_mappings_%d", serviceID)
+	currentTableName := fmt.Sprintf("external_mappings.current_mappings_%d", serviceID)
+
+	var committedMappings int64
+	if err := tx.QueryRowContext(
+		ctx,
+		fmt.Sprintf("SELECT COUNT(*) FROM %s", pendingTableName),
+	).Scan(&committedMappings); err != nil {
+		return 0, fmt.Errorf("count PTR pending mappings before commit: %w", err)
+	}
+
+	if committedMappings == 0 {
+		return 0, nil
+	}
+
+	for _, statement := range []string{
+		fmt.Sprintf(
+			`DELETE FROM %s
+			WHERE EXISTS (
+				SELECT 1 FROM %s pending
+				WHERE pending.tag_id = %s.tag_id AND pending.hash_id = %s.hash_id
+			)`,
+			deletedTableName,
+			pendingTableName,
+			deletedTableName,
+			deletedTableName,
+		),
+		fmt.Sprintf(
+			`DELETE FROM %s
+			WHERE EXISTS (
+				SELECT 1 FROM %s pending
+				WHERE pending.tag_id = %s.tag_id AND pending.hash_id = %s.hash_id
+			)`,
+			petitionedTableName,
+			pendingTableName,
+			petitionedTableName,
+			petitionedTableName,
+		),
+		fmt.Sprintf(
+			`INSERT OR IGNORE INTO %s (tag_id, hash_id)
+			SELECT tag_id, hash_id FROM %s`,
+			currentTableName,
+			pendingTableName,
+		),
+		fmt.Sprintf(`DELETE FROM %s`, pendingTableName),
+	} {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return 0, fmt.Errorf("apply PTR pending commit success transition: %w", err)
+		}
+	}
+
+	return committedMappings, nil
+}
+
+func ptrMappingExistsTx(
+	ctx context.Context,
+	tx *ImmediateTx,
+	tableName string,
+	tagID int64,
+	hashID int64,
+) (bool, error) {
+	row := tx.QueryRowContext(
+		ctx,
+		fmt.Sprintf("SELECT 1 FROM %s WHERE tag_id = ? AND hash_id = ? LIMIT 1", tableName),
+		tagID,
+		hashID,
+	)
+
+	var sentinel int64
+	if err := row.Scan(&sentinel); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+
+		return false, fmt.Errorf("query PTR mapping existence in %s: %w", tableName, err)
+	}
+
+	return true, nil
+}
+
+func (b *Bundle) resolvePTRPendingRequestHashes(
+	ctx context.Context,
+	request coreptrsync.PendingMappingsRequest,
+) ([]string, error) {
+	hashes := dedupeStrings(request.Hashes)
+
+	if len(request.FileIDs) == 0 {
+		return hashes, nil
+	}
+
+	resolvedByFileID, err := b.lookupHashesByFileIDs(ctx, dedupeInt64s(request.FileIDs))
+	if err != nil {
+		return nil, err
+	}
+
+	for _, fileID := range request.FileIDs {
+		hash, ok := resolvedByFileID[fileID]
+		if !ok {
+			return nil, fmt.Errorf("file_id %d could not be resolved to a hash", fileID)
+		}
+
+		hashes = append(hashes, hash)
+	}
+
+	return dedupeStrings(hashes), nil
+}
+
+func normalizePTRTargetServiceKey(serviceKey string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(serviceKey))
+	if normalized == "" {
+		return coreptrsync.DaemonServiceKeyHex(), nil
+	}
+
+	if normalized != coreptrsync.DaemonServiceKeyHex() {
+		return "", fmt.Errorf("unsupported PTR service key %q", serviceKey)
+	}
+
+	return normalized, nil
 }
 
 func recordPreparedLocalImportTx(

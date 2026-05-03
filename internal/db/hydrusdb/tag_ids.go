@@ -76,6 +76,191 @@ func (b *Bundle) EnsureTagID(ctx context.Context, tag string) (int64, error) {
 	return tagID, nil
 }
 
+func ensureTagIDTx(ctx context.Context, tx *ImmediateTx, tag string) (int64, error) {
+	cleanTag := coretags.Clean(tag)
+	if err := coretags.CheckNotEmpty(cleanTag); err != nil {
+		return 0, fmt.Errorf("validate tag %q: %w", tag, err)
+	}
+
+	tableNames, err := lookupSchemaTableNamesTx(ctx, tx, "external_master")
+	if err != nil {
+		return 0, err
+	}
+
+	tagColumns, err := lookupTagColumns(ctx, tx, `PRAGMA external_master.table_info(tags)`, tableNames)
+	if err != nil {
+		return 0, err
+	}
+
+	schemaMode, err := masterTagSchemaModeFromTableNames(tableNames, tagColumns)
+	if err != nil {
+		return 0, err
+	}
+
+	if schemaMode == masterTagSchemaLegacyFlat {
+		return 0, errors.New(
+			"legacy flat external_master.tags schema is read-compatible only; tag writes require the split namespaces/subtags/tags schema",
+		)
+	}
+
+	if err := ensureAttachedMasterTagSchema(ctx, tx); err != nil {
+		return 0, err
+	}
+
+	namespace, subtag := coretags.Split(cleanTag)
+
+	namespaceID, err := ensureAttachedNamespaceID(ctx, tx, namespace)
+	if err != nil {
+		return 0, err
+	}
+
+	subtagID, err := ensureAttachedSubtagID(ctx, tx, subtag)
+	if err != nil {
+		return 0, err
+	}
+
+	return ensureAttachedMasterTagID(ctx, tx, namespaceID, subtagID)
+}
+
+func ensureAttachedMasterTagSchema(ctx context.Context, tx *ImmediateTx) error {
+	for _, statement := range []string{
+		`CREATE TABLE IF NOT EXISTS external_master.namespaces (
+			namespace_id INTEGER PRIMARY KEY,
+			namespace TEXT UNIQUE
+		);`,
+		`CREATE TABLE IF NOT EXISTS external_master.subtags (
+			subtag_id INTEGER PRIMARY KEY,
+			subtag TEXT UNIQUE
+		);`,
+		`CREATE TABLE IF NOT EXISTS external_master.tags (
+			tag_id INTEGER PRIMARY KEY,
+			namespace_id INTEGER,
+			subtag_id INTEGER
+		);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS external_master.tags_namespace_subtag_idx
+		ON tags (namespace_id, subtag_id);`,
+	} {
+		if _, err := tx.ExecContext(ctx, statement); err != nil {
+			return fmt.Errorf("ensure attached master tag schema: %w", err)
+		}
+	}
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO external_master.namespaces (namespace_id, namespace)
+		VALUES (?, ?)`,
+		nullNamespaceID,
+		"",
+	); err != nil {
+		return fmt.Errorf("seed attached null namespace row: %w", err)
+	}
+
+	return nil
+}
+
+func ensureAttachedNamespaceID(ctx context.Context, tx *ImmediateTx, namespace string) (int64, error) {
+	row := tx.QueryRowContext(
+		ctx,
+		`SELECT namespace_id FROM external_master.namespaces WHERE namespace = ?`,
+		namespace,
+	)
+
+	var namespaceID int64
+	if err := row.Scan(&namespaceID); err == nil {
+		return namespaceID, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("query attached namespace row: %w", err)
+	}
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO external_master.namespaces (namespace) VALUES (?)`,
+		namespace,
+	); err != nil {
+		return 0, fmt.Errorf("insert attached namespaces row: %w", err)
+	}
+
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT namespace_id FROM external_master.namespaces WHERE namespace = ?`,
+		namespace,
+	).Scan(&namespaceID); err != nil {
+		return 0, fmt.Errorf("query attached namespace row after insert: %w", err)
+	}
+
+	return namespaceID, nil
+}
+
+func ensureAttachedSubtagID(ctx context.Context, tx *ImmediateTx, subtag string) (int64, error) {
+	row := tx.QueryRowContext(
+		ctx,
+		`SELECT subtag_id FROM external_master.subtags WHERE subtag = ?`,
+		subtag,
+	)
+
+	var subtagID int64
+	if err := row.Scan(&subtagID); err == nil {
+		return subtagID, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("query attached subtag row: %w", err)
+	}
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO external_master.subtags (subtag) VALUES (?)`,
+		subtag,
+	); err != nil {
+		return 0, fmt.Errorf("insert attached subtags row: %w", err)
+	}
+
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT subtag_id FROM external_master.subtags WHERE subtag = ?`,
+		subtag,
+	).Scan(&subtagID); err != nil {
+		return 0, fmt.Errorf("query attached subtag row after insert: %w", err)
+	}
+
+	return subtagID, nil
+}
+
+func ensureAttachedMasterTagID(ctx context.Context, tx *ImmediateTx, namespaceID int64, subtagID int64) (int64, error) {
+	row := tx.QueryRowContext(
+		ctx,
+		`SELECT tag_id FROM external_master.tags WHERE namespace_id = ? AND subtag_id = ?`,
+		namespaceID,
+		subtagID,
+	)
+
+	var tagID int64
+	if err := row.Scan(&tagID); err == nil {
+		return tagID, nil
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		return 0, fmt.Errorf("query attached tag row: %w", err)
+	}
+
+	if _, err := tx.ExecContext(
+		ctx,
+		`INSERT OR IGNORE INTO external_master.tags (namespace_id, subtag_id)
+		VALUES (?, ?)`,
+		namespaceID,
+		subtagID,
+	); err != nil {
+		return 0, fmt.Errorf("insert attached tags row: %w", err)
+	}
+
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT tag_id FROM external_master.tags WHERE namespace_id = ? AND subtag_id = ?`,
+		namespaceID,
+		subtagID,
+	).Scan(&tagID); err != nil {
+		return 0, fmt.Errorf("query attached tag row after insert: %w", err)
+	}
+
+	return tagID, nil
+}
+
 func (b *Bundle) withImmediateMasterTx(
 	ctx context.Context,
 	fn func(*ImmediateTx) error,
@@ -107,6 +292,10 @@ func (b *Bundle) withImmediateMasterTx(
 		return fmt.Errorf("open dedicated master sqlite connection: %w", err)
 	}
 	defer conn.Close()
+
+	if err := configureSQLiteConnection(ctx, conn); err != nil {
+		return err
+	}
 
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		return fmt.Errorf("begin immediate master transaction: %w", err)

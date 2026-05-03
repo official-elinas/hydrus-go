@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+
+	"github.com/official-elinas/hydrus-go/internal/db/hydrusdb"
 )
 
 func TestDecodeAccountResponse(t *testing.T) {
@@ -188,6 +190,140 @@ func TestClassifyUpdatePayload(t *testing.T) {
 			t.Fatalf("classifyUpdatePayload() error = %v, want unsupported type error", err)
 		}
 	})
+}
+
+func TestDecodeDefinitionsUpdatePayload(t *testing.T) {
+	body := hydrusNetworkBytes(t, []any{
+		hydrusSerialisableTypeDefinitionsUpdate,
+		1,
+		[]any{
+			[]any{hydrusDefinitionsTypeHashes, []any{[]any{int64(101), strings.Repeat("11", 32)}, []any{int64(102), strings.Repeat("22", 32)}}},
+			[]any{hydrusDefinitionsTypeTags, []any{[]any{int64(201), "creator:alice"}, []any{int64(202), "series:zeta"}}},
+		},
+	})
+
+	decoded, err := decodeDefinitionsUpdatePayload(body)
+	if err != nil {
+		t.Fatalf("decodeDefinitionsUpdatePayload() error = %v", err)
+	}
+
+	if got := decoded.ServiceHashIDsToHashes[101]; got != strings.Repeat("11", 32) {
+		t.Fatalf("ServiceHashIDsToHashes[101] = %q, want %q", got, strings.Repeat("11", 32))
+	}
+
+	if got := decoded.ServiceTagIDsToTags[202]; got != "series:zeta" {
+		t.Fatalf("ServiceTagIDsToTags[202] = %q, want %q", got, "series:zeta")
+	}
+}
+
+func TestDecodeMappingsUpdatePayload(t *testing.T) {
+	body := hydrusNetworkBytes(t, []any{
+		hydrusSerialisableTypeContentUpdate,
+		1,
+		[]any{
+			[]any{hydrusContentTypeMappings, []any{
+				[]any{hydrusContentUpdateAdd, []any{[]any{int64(201), []any{int64(101), int64(102)}}}},
+				[]any{hydrusContentUpdateDelete, []any{[]any{int64(202), []any{int64(103)}}}},
+			}},
+		},
+	})
+
+	decoded, err := decodeMappingsUpdatePayload(body)
+	if err != nil {
+		t.Fatalf("decodeMappingsUpdatePayload() error = %v", err)
+	}
+
+	if len(decoded.Adds) != 1 {
+		t.Fatalf("len(decoded.Adds) = %d, want 1", len(decoded.Adds))
+	}
+
+	if decoded.Adds[0].ServiceTagID != 201 {
+		t.Fatalf("decoded.Adds[0].ServiceTagID = %d, want 201", decoded.Adds[0].ServiceTagID)
+	}
+
+	if len(decoded.Adds[0].ServiceHashIDs) != 2 || decoded.Adds[0].ServiceHashIDs[1] != 102 {
+		t.Fatalf("decoded.Adds[0].ServiceHashIDs = %v, want [101 102]", decoded.Adds[0].ServiceHashIDs)
+	}
+
+	if len(decoded.Deletes) != 1 || decoded.Deletes[0].ServiceTagID != 202 {
+		t.Fatalf("decoded.Deletes = %+v, want one delete for tag 202", decoded.Deletes)
+	}
+}
+
+func TestEncodeClientToServerUpdateBody(t *testing.T) {
+	body, err := encodeClientToServerUpdateBody([]hydrusdb.PTRPendingMappingGroup{
+		{Tag: "creator:alice", Hashes: []string{strings.Repeat("11", 32), strings.Repeat("22", 32)}},
+		{Tag: "series:zeta", Hashes: []string{strings.Repeat("33", 32)}},
+	})
+	if err != nil {
+		t.Fatalf("encodeClientToServerUpdateBody() error = %v", err)
+	}
+
+	decoded, err := decodeHydrusNetworkBytes(body)
+	if err != nil {
+		t.Fatalf("decodeHydrusNetworkBytes() error = %v", err)
+	}
+
+	serialisableDict, ok := decoded.([]any)
+	if !ok || len(serialisableDict) != 3 {
+		t.Fatalf("decoded body type/shape = %T/%v, want serialisable dictionary tuple", decoded, decoded)
+	}
+
+	entries, ok := serialisableDict[2].([]any)
+	if !ok || len(entries) != 1 {
+		t.Fatalf("dictionary entries = %T/%v, want one entry", serialisableDict[2], serialisableDict[2])
+	}
+
+	pair := entries[0].([]any)
+	keyTuple := pair[0].([]any)
+	if keyTuple[1] != "client_to_server_update" {
+		t.Fatalf("dictionary key = %v, want client_to_server_update", keyTuple[1])
+	}
+
+	valueTuple := pair[1].([]any)
+	if got, err := anyToInt(valueTuple[0]); err != nil || got != hydrusMetaTypeHydrusSerializable {
+		t.Fatalf("meta type = %d, want %d", got, hydrusMetaTypeHydrusSerializable)
+	}
+
+	clientUpdate := valueTuple[1].([]any)
+	if got, err := anyToInt(clientUpdate[0]); err != nil || got != hydrusSerialisableTypeClientToServerUpdate {
+		t.Fatalf("client update type = %d, want %d", got, hydrusSerialisableTypeClientToServerUpdate)
+	}
+
+	actions := clientUpdate[2].([]any)
+	if len(actions) != 1 {
+		t.Fatalf("len(actions) = %d, want 1", len(actions))
+	}
+
+	actionTuple := actions[0].([]any)
+	if got, err := anyToInt(actionTuple[0]); err != nil || got != hydrusContentUpdatePend {
+		t.Fatalf("action = %d, want %d", got, hydrusContentUpdatePend)
+	}
+
+	contentsAndReasons := actionTuple[1].([]any)
+	if len(contentsAndReasons) != 2 {
+		t.Fatalf("len(contentsAndReasons) = %d, want 2", len(contentsAndReasons))
+	}
+
+	firstContentTuple := contentsAndReasons[0].([]any)[0].([]any)
+	if got, err := anyToInt(firstContentTuple[0]); err != nil || got != hydrusSerialisableTypeContent {
+		t.Fatalf("content serialisable type = %d, want %d", got, hydrusSerialisableTypeContent)
+	}
+
+	contentInfo := firstContentTuple[2].([]any)
+	if got, err := anyToInt(contentInfo[0]); err != nil || got != hydrusContentTypeMappings {
+		t.Fatalf("content type = %d, want %d", got, hydrusContentTypeMappings)
+	}
+
+	mappingData := contentInfo[1].([]any)
+	if mappingData[0] != "creator:alice" {
+		t.Fatalf("first mapping tag = %v, want creator:alice", mappingData[0])
+	}
+
+	hashValues := mappingData[1].([]any)
+	if len(hashValues) != 2 || hashValues[1] != strings.Repeat("22", 32) {
+		t.Fatalf("first mapping hashes = %v, want [%s %s]", hashValues, strings.Repeat("11", 32), strings.Repeat("22", 32))
+	}
 }
 
 type hydrusDictEntry struct {

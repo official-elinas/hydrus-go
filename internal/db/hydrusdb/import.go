@@ -751,6 +751,41 @@ func insertPreparedCurrentMembership(
 	return nil
 }
 
+func ensurePreparedCurrentMemberships(
+	ctx context.Context,
+	tx *ImmediateTx,
+	hashID int64,
+	plan preparedLocalImportPlan,
+	importedAtMS int64,
+) error {
+	for _, membership := range plan.currentMemberships {
+		var timestamp any
+		if membership.includeImportedAtMS {
+			timestamp = importedAtMS
+		}
+
+		insertQuery := fmt.Sprintf(
+			`INSERT OR IGNORE INTO main.%s (hash_id, timestamp_ms) VALUES (?, ?)`,
+			membership.tableName,
+		)
+		if _, err := tx.ExecContext(ctx, insertQuery, hashID, timestamp); err != nil {
+			return fmt.Errorf("ensure %s row: %w", membership.tableName, err)
+		}
+
+		if membership.includeImportedAtMS {
+			updateQuery := fmt.Sprintf(
+				`UPDATE main.%s SET timestamp_ms = ? WHERE hash_id = ? AND timestamp_ms IS NULL`,
+				membership.tableName,
+			)
+			if _, err := tx.ExecContext(ctx, updateQuery, importedAtMS, hashID); err != nil {
+				return fmt.Errorf("backfill %s timestamp: %w", membership.tableName, err)
+			}
+		}
+	}
+
+	return nil
+}
+
 func ensurePreparedAuxiliaryMetadata(
 	ctx context.Context,
 	tx *ImmediateTx,

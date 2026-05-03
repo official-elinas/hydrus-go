@@ -141,7 +141,10 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 	}
 	ptrStore = ptrManager
 
-	permissions := []httpapi.Permission{httpapi.PermissionSearchAndFetchFiles}
+	permissions := []httpapi.Permission{
+		httpapi.PermissionSearchAndFetchFiles,
+		httpapi.PermissionManageDatabase,
+	}
 	if importStore != nil || trashStore != nil {
 		permissions = append(permissions, httpapi.PermissionImportAndDeleteFiles)
 	}

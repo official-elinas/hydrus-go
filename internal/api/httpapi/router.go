@@ -68,6 +68,7 @@ func NewHandler(
 	mux.Handle("/session_key", server.get("/session_key", server.handleSessionKey))
 	mux.Handle("/get_services", server.get("/get_services", server.handleGetServices))
 	mux.Handle("/get_service", server.get("/get_service", server.handleGetService))
+	mux.Handle("/v1/tags/autocomplete", server.get("/v1/tags/autocomplete", server.handleGetTagAutocomplete))
 	mux.Handle(
 		"/get_files/file_metadata",
 		server.get("/get_files/file_metadata", server.handleGetFileMetadata),
@@ -78,6 +79,9 @@ func NewHandler(
 	mux.Handle("/v1/files/trash", server.post("/v1/files/trash", server.handleTrashFile))
 	mux.Handle("/v1/import/local_file", server.post("/v1/import/local_file", server.handleImportLocalFile))
 	mux.Handle("/v1/import/upload", server.post("/v1/import/upload", server.handleImportUpload))
+	mux.Handle("/add_tags/add_tags", server.post("/add_tags/add_tags", server.handlePostAddTags))
+	mux.Handle("/manage_database/integrity_check", server.post("/manage_database/integrity_check", server.handlePostDatabaseIntegrityCheck))
+	mux.Handle("/manage_services/commit_pending", server.post("/manage_services/commit_pending", server.handlePostCommitPending))
 	mux.Handle("/service/ptr/status", server.get("/service/ptr/status", server.handleGetPTRStatus))
 	mux.Handle("/service/ptr/sync", server.post("/service/ptr/sync", server.handlePostPTRSync))
 

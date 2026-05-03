@@ -3,7 +3,6 @@
 package fyneapp
 
 import (
-	"image"
 	"image/color"
 
 	"fyne.io/fyne/v2"
@@ -11,8 +10,6 @@ import (
 	"fyne.io/fyne/v2/container"
 	"fyne.io/fyne/v2/widget"
 )
-
-var tilePlaceholderImage = image.NewNRGBA(image.Rect(0, 0, 1, 1))
 
 type mediaTile struct {
 	widget.BaseWidget
@@ -25,6 +22,7 @@ type mediaTile struct {
 	title        *widget.Label
 	subtitle     *widget.Label
 	onTapped     func()
+	onDoubleTapped func()
 }
 
 func newMediaTile() *mediaTile {
@@ -32,7 +30,7 @@ func newMediaTile() *mediaTile {
 		background:   canvas.NewRectangle(color.NRGBA{R: 28, G: 28, B: 30, A: 255}),
 		previewBack:  canvas.NewRectangle(color.NRGBA{R: 18, G: 18, B: 20, A: 255}),
 		selectionBox: canvas.NewRectangle(color.Transparent),
-		preview:      canvas.NewImageFromImage(tilePlaceholderImage),
+		preview:      canvas.NewImageFromImage(nil),
 		overlay:      canvas.NewText("Loading", color.NRGBA{R: 170, G: 170, B: 170, A: 255}),
 		title:        widget.NewLabel(""),
 		subtitle:     widget.NewLabel(""),
@@ -44,8 +42,8 @@ func newMediaTile() *mediaTile {
 	tile.preview.FillMode = canvas.ImageFillContain
 	tile.preview.ScaleMode = canvas.ImageScaleSmooth
 	tile.overlay.Alignment = fyne.TextAlignCenter
-	tile.title.Wrapping = fyne.TextWrapWord
-	tile.subtitle.Wrapping = fyne.TextWrapWord
+	tile.title.Wrapping = fyne.TextTruncate
+	tile.subtitle.Wrapping = fyne.TextTruncate
 	tile.subtitle.TextStyle = fyne.TextStyle{Italic: true}
 
 	tile.ExtendBaseWidget(tile)
@@ -59,10 +57,12 @@ func (t *mediaTile) SetData(
 	overlay string,
 	selected bool,
 	onTapped func(),
+	onDoubleTapped func(),
 ) {
 	t.title.SetText(title)
 	t.subtitle.SetText(subtitle)
 	t.onTapped = onTapped
+	t.onDoubleTapped = onDoubleTapped
 
 	t.preview.Image = nil
 	t.preview.Resource = preview
@@ -83,6 +83,12 @@ func (t *mediaTile) SetData(
 func (t *mediaTile) Tapped(*fyne.PointEvent) {
 	if t.onTapped != nil {
 		t.onTapped()
+	}
+}
+
+func (t *mediaTile) DoubleTapped(*fyne.PointEvent) {
+	if t.onDoubleTapped != nil {
+		t.onDoubleTapped()
 	}
 }
 

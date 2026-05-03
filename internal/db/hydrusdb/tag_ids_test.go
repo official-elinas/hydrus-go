@@ -380,6 +380,70 @@ func TestBundleMetadata_AnonymousAndLegacyTagSchemas(t *testing.T) {
 	})
 }
 
+func TestBundleSuggestTags(t *testing.T) {
+	t.Run("split schema suggests canonical tags by prefix", func(t *testing.T) {
+		dir, _ := createTestBundle(t)
+
+		bundle, err := OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		for _, tag := range []string{"creator:alice", "creator:alina", "loose tag", "character:bob"} {
+			if _, err := bundle.EnsureTagID(context.Background(), tag); err != nil {
+				t.Fatalf("EnsureTagID(%q) error = %v", tag, err)
+			}
+		}
+
+		suggestions, err := bundle.SuggestTags(context.Background(), "creator:a", 10)
+		if err != nil {
+			t.Fatalf("SuggestTags() error = %v", err)
+		}
+
+		if !slices.Equal(suggestions, []string{"creator:alice", "creator:alina"}) {
+			t.Fatalf("suggestions = %v, want [creator:alice creator:alina]", suggestions)
+		}
+
+		suggestions, err = bundle.SuggestTags(context.Background(), "lo", 10)
+		if err != nil {
+			t.Fatalf("SuggestTags(lo) error = %v", err)
+		}
+
+		if !slices.Equal(suggestions, []string{"loose tag"}) {
+			t.Fatalf("suggestions = %v, want [loose tag]", suggestions)
+		}
+	})
+
+	t.Run("legacy flat schema suggestions still work", func(t *testing.T) {
+		dir, _ := createTestBundle(t)
+		convertMasterTagsToLegacyFlatSchema(t, dir)
+
+		bundle, err := Open(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("Open() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		suggestions, err := bundle.SuggestTags(context.Background(), "creator:a", 10)
+		if err != nil {
+			t.Fatalf("SuggestTags() error = %v", err)
+		}
+
+		if !slices.Equal(suggestions, []string{"creator:alice"}) {
+			t.Fatalf("suggestions = %v, want [creator:alice]", suggestions)
+		}
+	})
+}
+
 func convertMasterTagsToLegacyFlatSchema(t *testing.T, dir string) {
 	t.Helper()
 

@@ -4,12 +4,14 @@ package ptrsync
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -29,6 +31,9 @@ type Manager struct {
 	runnerCancel      context.CancelFunc
 	runMu             sync.Mutex
 	activeRun         *activeRun
+	retryWakeupMu     sync.Mutex
+	retryWakeupID     uint64
+	retryWakeupCancel context.CancelFunc
 }
 
 type activeRun struct {
@@ -41,6 +46,26 @@ type startedSync struct {
 	client          *Client
 	lease           hydrusdb.PTRSyncLease
 	replaceMetadata bool
+}
+
+type downloadedPTRUpdateBatchItem struct {
+	hashHex        string
+	preparedImport hydrusdb.PreparedLocalImport
+}
+
+const (
+	ptrSyncDownloadedUpdateBatchSize = 25
+	ptrSyncBusyPause                 = 10 * time.Minute
+	ptrSyncThrottleMaxDelay          = 2 * time.Minute
+	ptrSyncMaxBusyRetryAttempts      = 10
+)
+
+var ptrSyncInitialBusyRetryDelays = []time.Duration{
+	2 * time.Second,
+	3 * time.Second,
+	4 * time.Second,
+	5 * time.Second,
+	5 * time.Second,
 }
 
 // NewManager constructs the daemon PTR status manager, ensures persisted local
@@ -78,7 +103,8 @@ func NewManager(
 		return manager, nil
 	}
 
-	if _, err := writeBundle.RecoverPTRSyncFoundation(ctx, cfg); err != nil {
+	recoveredStatus, err := writeBundle.RecoverPTRSyncFoundation(ctx, cfg)
+	if err != nil {
 		if errors.Is(err, hydrusdb.ErrPTRServiceNameCollision) {
 			manager.unavailableReason = err.Error()
 			if logger != nil {
@@ -93,6 +119,10 @@ func NewManager(
 		}
 
 		return nil, fmt.Errorf("ensure PTR sync foundation: %w", err)
+	}
+
+	if recoveredStatus.Phase == coreptrsync.PhaseRetrying {
+		manager.schedulePTRRetryWakeup(recoveredStatus.RetryAtMS)
 	}
 
 	if logger != nil {
@@ -131,6 +161,10 @@ func (m *Manager) Trigger(ctx context.Context) (coreptrsync.Status, error) {
 		}
 
 		return status, err
+	}
+
+	if started.client == nil {
+		return status, nil
 	}
 
 	runCtx, cancel := context.WithCancel(m.runnerCtx)
@@ -173,6 +207,70 @@ func (m *Manager) Trigger(ctx context.Context) (coreptrsync.Status, error) {
 	return status, nil
 }
 
+// AddPendingMappings stages add-only pending PTR mappings for the daemon-owned
+// public tag repository.
+func (m *Manager) AddPendingMappings(
+	ctx context.Context,
+	request coreptrsync.PendingMappingsRequest,
+) (coreptrsync.PendingMappingsResult, error) {
+	if m == nil {
+		return coreptrsync.PendingMappingsResult{}, coreptrsync.ErrCommitPendingUnavailable
+	}
+
+	if !m.cfg.Enabled {
+		return coreptrsync.PendingMappingsResult{}, coreptrsync.ErrSyncDisabled
+	}
+
+	if m.unavailableReason != "" || m.writeBundle == nil {
+		return coreptrsync.PendingMappingsResult{}, coreptrsync.ErrCommitPendingUnavailable
+	}
+
+	return m.writeBundle.StagePTRPendingMappings(ctx, m.cfg, request)
+}
+
+// CommitPending uploads currently pending PTR add mappings and, on success,
+// applies the local pending->current transition.
+func (m *Manager) CommitPending(
+	ctx context.Context,
+	request coreptrsync.CommitPendingRequest,
+) (coreptrsync.CommitPendingResult, error) {
+	if m == nil {
+		return coreptrsync.CommitPendingResult{}, coreptrsync.ErrCommitPendingUnavailable
+	}
+
+	if !m.cfg.Enabled {
+		return coreptrsync.CommitPendingResult{}, coreptrsync.ErrSyncDisabled
+	}
+
+	if m.unavailableReason != "" || m.readBundle == nil || m.writeBundle == nil {
+		return coreptrsync.CommitPendingResult{}, coreptrsync.ErrCommitPendingUnavailable
+	}
+
+	groups, err := m.readBundle.ListPTRPendingMappingsForCommit(ctx, m.cfg, request.ServiceKey)
+	if err != nil {
+		return coreptrsync.CommitPendingResult{}, err
+	}
+	if len(groups) == 0 {
+		return coreptrsync.CommitPendingResult{ServiceKey: repositoryServiceKeyHex(request.ServiceKey)}, nil
+	}
+
+	client, err := NewClient(m.cfg)
+	if err != nil {
+		return coreptrsync.CommitPendingResult{}, fmt.Errorf("construct PTR client: %w", err)
+	}
+
+	if err := client.CommitPendingMappings(ctx, groups); err != nil {
+		return coreptrsync.CommitPendingResult{}, fmt.Errorf("commit PTR pending mappings: %w", err)
+	}
+
+	result, err := m.writeBundle.CommitPTRPendingMappingsSuccess(ctx, m.cfg, request.ServiceKey)
+	if err != nil {
+		return coreptrsync.CommitPendingResult{}, err
+	}
+
+	return result, nil
+}
+
 // Shutdown stops any in-flight daemon-owned background PTR sync and waits for it
 // to release its lease before returning.
 func (m *Manager) Shutdown(ctx context.Context) error {
@@ -183,6 +281,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	if m.runnerCancel != nil {
 		m.runnerCancel()
 	}
+	m.cancelPTRRetryWakeup()
 
 	m.runMu.Lock()
 	active := m.activeRun
@@ -212,6 +311,11 @@ func (m *Manager) SyncOnce(ctx context.Context) (status coreptrsync.Status, err 
 	if err != nil {
 		return status, err
 	}
+
+	if started.client == nil {
+		return status, nil
+	}
+	m.cancelPTRRetryWakeup()
 
 	return m.runStartedSync(ctx, started)
 }
@@ -326,6 +430,15 @@ func (m *Manager) beginSync(ctx context.Context) (startedSync, coreptrsync.Statu
 		return startedSync{}, status, fmt.Errorf("%w: %s", coreptrsync.ErrSyncUnavailable, status.UnavailableReason)
 	}
 
+	status, err := m.readBundle.GetPTRSyncStatus(ctx, m.cfg)
+	if err != nil {
+		return startedSync{}, coreptrsync.Status{}, fmt.Errorf("load PTR status before sync: %w", err)
+	}
+
+	if status.Phase == coreptrsync.PhaseRetrying && status.RetryAtMS > time.Now().UTC().UnixMilli() {
+		return startedSync{}, status, nil
+	}
+
 	client, err := NewClient(m.cfg)
 	if err != nil {
 		status, statusErr := m.readBundle.GetPTRSyncStatus(ctx, m.cfg)
@@ -360,7 +473,7 @@ func (m *Manager) beginSync(ctx context.Context) (startedSync, coreptrsync.Statu
 }
 
 func (m *Manager) runStartedSync(ctx context.Context, started startedSync) (status coreptrsync.Status, err error) {
-	finished := false
+	terminalStatePersisted := false
 	if m.logger != nil {
 		m.logger.Info(
 			"starting PTR sync run",
@@ -374,20 +487,63 @@ func (m *Manager) runStartedSync(ctx context.Context, started startedSync) (stat
 	}
 
 	defer func() {
-		if finished {
+		if terminalStatePersisted {
+			if m.logger != nil {
+				if status.Phase == coreptrsync.PhaseRetrying {
+					m.logger.Info(
+						"PTR sync run deferred after remote busy response",
+						"run_token",
+						started.lease.RunToken,
+						"retry_at_ms",
+						status.RetryAtMS,
+						"retry_attempt",
+						status.RetryAttempt,
+					)
+				} else {
+					m.logger.Info(
+						"PTR sync run completed successfully",
+						"run_token",
+						started.lease.RunToken,
+						"metadata_slice",
+						status.MetadataSlice,
+						"downloaded_updates",
+						status.DownloadedUpdateCount,
+						"processed_definitions",
+						status.ProcessedDefinitionCount,
+						"processed_content",
+						status.ProcessedContentCount,
+					)
+				}
+			}
+
+			return
+		}
+
+		if errors.Is(err, context.Canceled) {
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+
+			cancelledStatus, cancelErr := m.writeBundle.CancelPTRSync(
+				cleanupCtx,
+				m.cfg,
+				started.lease.RunToken,
+			)
+			if cancelErr != nil {
+				err = errors.Join(err, fmt.Errorf("clear PTR sync lease after cancellation: %w", cancelErr))
+				return
+			}
+
+			status = cancelledStatus
+			err = nil
 			if m.logger != nil {
 				m.logger.Info(
-					"PTR sync run completed successfully",
+					"PTR sync run cancelled",
 					"run_token",
 					started.lease.RunToken,
 					"metadata_slice",
-					status.MetadataSlice,
+					cancelledStatus.MetadataSlice,
 					"downloaded_updates",
-					status.DownloadedUpdateCount,
-					"processed_definitions",
-					status.ProcessedDefinitionCount,
-					"processed_content",
-					status.ProcessedContentCount,
+					cancelledStatus.DownloadedUpdateCount,
 				)
 			}
 
@@ -433,6 +589,13 @@ func (m *Manager) runStartedSync(ctx context.Context, started startedSync) (stat
 
 	remoteState, err := started.client.FetchRemoteState(ctx, started.lease.Status.MetadataSlice)
 	if err != nil {
+		if busyStatus, handled, handleErr := m.finishPTRSyncThrottled(ctx, started, status, err); handled {
+			status = busyStatus
+			err = handleErr
+			terminalStatePersisted = handleErr == nil
+			return status, err
+		}
+
 		err = fmt.Errorf("fetch PTR remote state: %w", err)
 		return status, err
 	}
@@ -478,74 +641,129 @@ func (m *Manager) runStartedSync(ctx context.Context, started startedSync) (stat
 			)
 		}
 
-		for index, pendingHash := range pendingHashes {
-			body, mimeEnum, fetchErr := started.client.FetchUpdate(ctx, pendingHash)
-			if fetchErr != nil {
-				err = fmt.Errorf("fetch PTR update %x: %w", pendingHash, fetchErr)
+		completedDownloads := 0
+		batch := make([]downloadedPTRUpdateBatchItem, 0, minInt(ptrSyncDownloadedUpdateBatchSize, len(pendingHashes)))
+		flushBatch := func() error {
+			if len(batch) == 0 {
+				return nil
+			}
+
+			batchItems := make([]hydrusdb.PTRDownloadedUpdateBatchItem, 0, len(batch))
+			for _, item := range batch {
+				batchItems = append(batchItems, hydrusdb.PTRDownloadedUpdateBatchItem{
+					HashHex:        item.hashHex,
+					PreparedImport: item.preparedImport,
+				})
+			}
+
+			updatedStatus, batchErr := m.writeBundle.FinalizePTRDownloadedUpdatesBatch(
+				ctx,
+				m.cfg,
+				started.lease.RunToken,
+				batchItems,
+			)
+			if batchErr != nil {
+				return batchErr
+			}
+
+			status = updatedStatus
+			completedDownloads += len(batch)
+			if m.logger != nil {
+				latestHash := batch[len(batch)-1].hashHex
+				m.logger.Info(
+					"PTR update download progress",
+					"run_token",
+					started.lease.RunToken,
+					"completed",
+					completedDownloads,
+					"total",
+					len(pendingHashes),
+					"latest_hash",
+					latestHash,
+					"downloaded_updates",
+					status.DownloadedUpdateCount,
+				)
+			}
+
+			batch = batch[:0]
+			return nil
+		}
+
+		for _, pendingHash := range pendingHashes {
+			body, mimeEnum, ok, artifactErr := loadStoredPTRUpdateArtifact(m.writeBundle, pendingHash)
+			if artifactErr != nil {
+				err = fmt.Errorf("load stored PTR update artifact %x: %w", pendingHash, artifactErr)
 				return status, err
+			}
+
+			if !ok {
+				var fetchErr error
+				body, mimeEnum, fetchErr = started.client.FetchUpdate(ctx, pendingHash)
+				if fetchErr != nil {
+					if flushErr := flushBatch(); flushErr != nil {
+						err = fmt.Errorf("flush PTR downloaded update batch: %w", flushErr)
+						return status, err
+					}
+
+					if busyStatus, handled, handleErr := m.finishPTRSyncThrottled(ctx, started, status, fetchErr); handled {
+						status = busyStatus
+						err = handleErr
+						terminalStatePersisted = handleErr == nil
+						return status, err
+					}
+
+					err = fmt.Errorf("fetch PTR update %x: %w", pendingHash, fetchErr)
+					return status, err
+				}
 			}
 
 			hashHex := hex.EncodeToString(pendingHash)
-			artifactPath, alreadyPresent, artifactErr := storePTRUpdateArtifact(
-				m.writeBundle,
-				hashHex,
-				body,
-			)
-			if artifactErr != nil {
-				err = fmt.Errorf("store PTR update artifact %x: %w", pendingHash, artifactErr)
-				return status, err
+			if !ok {
+				_, _, artifactErr = storePTRUpdateArtifact(
+					m.writeBundle,
+					hashHex,
+					body,
+				)
+				if artifactErr != nil {
+					err = fmt.Errorf("store PTR update artifact %x: %w", pendingHash, artifactErr)
+					return status, err
+				}
 			}
 
-			result, importErr := m.writeBundle.RecordPreparedLocalImport(
-				ctx,
-				hydrusdb.PreparedLocalImport{
+			batch = append(batch, downloadedPTRUpdateBatchItem{
+				hashHex: hashHex,
+				preparedImport: hydrusdb.PreparedLocalImport{
 					HashHex:             hashHex,
 					Size:                int64(len(body)),
 					Mime:                mimeEnum,
 					ImportedAtMS:        time.Now().UTC().UnixMilli(),
 					LocalFileServiceKey: repositoryUpdatesServiceKeyHex(),
 				},
-			)
-			if importErr != nil {
-				if !alreadyPresent {
-					if cleanupErr := os.Remove(artifactPath); cleanupErr != nil && !os.IsNotExist(cleanupErr) {
-						importErr = errors.Join(
-							importErr,
-							fmt.Errorf("remove PTR update artifact after failed DB registration: %w", cleanupErr),
-						)
-					}
+			})
+
+			if len(batch) >= ptrSyncDownloadedUpdateBatchSize {
+				if flushErr := flushBatch(); flushErr != nil {
+					err = fmt.Errorf("flush PTR downloaded update batch: %w", flushErr)
+					return status, err
 				}
-
-				err = fmt.Errorf("register PTR update %x: %w", pendingHash, importErr)
-				return status, err
-			}
-
-			if status, err = m.writeBundle.FinalizePTRDownloadedUpdate(
-				ctx,
-				m.cfg,
-				started.lease.RunToken,
-				hex.EncodeToString(pendingHash),
-			); err != nil {
-				err = fmt.Errorf("finalize PTR downloaded update %d: %w", result.FileID, err)
-				return status, err
-			}
-
-			if m.logger != nil && (index == 0 || (index+1)%25 == 0 || index == len(pendingHashes)-1) {
-				m.logger.Info(
-					"PTR update download progress",
-					"run_token",
-					started.lease.RunToken,
-					"completed",
-					index+1,
-					"total",
-					len(pendingHashes),
-					"latest_hash",
-					hashHex,
-					"downloaded_updates",
-					status.DownloadedUpdateCount,
-				)
 			}
 		}
+
+		if flushErr := flushBatch(); flushErr != nil {
+			err = fmt.Errorf("flush PTR downloaded update batch: %w", flushErr)
+			return status, err
+		}
+	}
+
+	if applyErr := m.applyDownloadedPTRUpdates(ctx, started.lease.RunToken); applyErr != nil {
+		err = fmt.Errorf("apply PTR downloaded updates: %w", applyErr)
+		return status, err
+	}
+
+	status, err = m.writeBundle.GetPTRSyncStatus(ctx, m.cfg)
+	if err != nil {
+		err = fmt.Errorf("reload PTR status after apply: %w", err)
+		return status, err
 	}
 
 	status, err = m.writeBundle.CompletePTRSyncSuccess(
@@ -558,8 +776,217 @@ func (m *Manager) runStartedSync(ctx context.Context, started startedSync) (stat
 		return status, err
 	}
 
-	finished = true
+	terminalStatePersisted = true
 	return status, nil
+}
+
+func (m *Manager) applyDownloadedPTRUpdates(ctx context.Context, runToken string) error {
+	processable, err := m.writeBundle.ListPTRProcessableUpdates(ctx, m.cfg, runToken)
+	if err != nil {
+		return err
+	}
+
+	for _, item := range processable {
+		if item.Processed {
+			continue
+		}
+
+		artifactPath, err := resolvePTRUpdateArtifactPath(m.writeBundle, item.HashHex)
+		if err != nil {
+			return err
+		}
+
+		body, err := os.ReadFile(artifactPath)
+		if err != nil {
+			return fmt.Errorf("read PTR update artifact %s: %w", item.HashHex, err)
+		}
+
+		switch item.ContentType {
+		case hydrusdb.PTRContentTypeDefinitions:
+			decoded, err := decodeDefinitionsUpdatePayload(body)
+			if err != nil {
+				return fmt.Errorf("decode PTR definitions update %s: %w", item.HashHex, err)
+			}
+
+			if err := m.writeBundle.ApplyPTRDefinitions(ctx, m.cfg, runToken, item.HashHex, decoded); err != nil {
+				return fmt.Errorf("apply PTR definitions update %s: %w", item.HashHex, err)
+			}
+		case hydrusdb.PTRContentTypeMappings:
+			decoded, err := decodeMappingsUpdatePayload(body)
+			if err != nil {
+				return fmt.Errorf("decode PTR mappings update %s: %w", item.HashHex, err)
+			}
+
+			if err := m.writeBundle.ApplyPTRMappings(ctx, m.cfg, runToken, item.HashHex, decoded); err != nil {
+				return fmt.Errorf("apply PTR mappings update %s: %w", item.HashHex, err)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (m *Manager) finishPTRSyncThrottled(
+	ctx context.Context,
+	started startedSync,
+	status coreptrsync.Status,
+	runErr error,
+) (coreptrsync.Status, bool, error) {
+	busyDelay, busy := ptrBusyRetryAfter(runErr)
+	if !busy {
+		return coreptrsync.Status{}, false, nil
+	}
+
+	retryAttempt := maxInt64(started.lease.Status.RetryAttempt, status.RetryAttempt) + 1
+	if retryAttempt > ptrSyncMaxBusyRetryAttempts {
+		failureReason := fmt.Sprintf(
+			"PTR server issue: remote stayed busy after %d retries; please try again later",
+			retryAttempt-1,
+		)
+		failedStatus, err := m.writeBundle.FinishPTRSyncFailure(
+			ctx,
+			m.cfg,
+			started.lease.RunToken,
+			failureReason,
+		)
+		if err != nil {
+			return coreptrsync.Status{}, true, fmt.Errorf("persist PTR server issue state: %w", err)
+		}
+
+		return failedStatus, true, fmt.Errorf(failureReason)
+	}
+
+	delay := ptrSyncBusyPause
+	if busyDelay > delay {
+		delay = busyDelay
+	}
+	retryAtMS := time.Now().UTC().Add(delay).UnixMilli()
+
+	retryingStatus, err := m.writeBundle.SetPTRSyncThrottled(
+		ctx,
+		m.cfg,
+		started.lease.RunToken,
+		retryAtMS,
+		retryAttempt,
+	)
+	if err != nil {
+		return coreptrsync.Status{}, true, fmt.Errorf("persist PTR sync retry state: %w", err)
+	}
+	m.schedulePTRRetryWakeup(retryingStatus.RetryAtMS)
+
+	return retryingStatus, true, nil
+}
+
+func (m *Manager) cancelPTRRetryWakeup() {
+	if m == nil {
+		return
+	}
+
+	m.retryWakeupMu.Lock()
+	defer m.retryWakeupMu.Unlock()
+
+	if m.retryWakeupCancel != nil {
+		m.retryWakeupCancel()
+		m.retryWakeupCancel = nil
+	}
+}
+
+func (m *Manager) schedulePTRRetryWakeup(retryAtMS int64) {
+	if m == nil || retryAtMS <= 0 {
+		return
+	}
+
+	m.retryWakeupMu.Lock()
+	if m.retryWakeupCancel != nil {
+		m.retryWakeupCancel()
+	}
+	ctx, cancel := context.WithCancel(m.runnerCtx)
+	m.retryWakeupID++
+	wakeupID := m.retryWakeupID
+	m.retryWakeupCancel = cancel
+	m.retryWakeupMu.Unlock()
+
+	go func(retryAtMS int64, wakeCtx context.Context, wakeupID uint64) {
+		defer func() {
+			m.retryWakeupMu.Lock()
+			if m.retryWakeupID == wakeupID {
+				m.retryWakeupCancel = nil
+			}
+			m.retryWakeupMu.Unlock()
+		}()
+
+		delay := time.Until(time.UnixMilli(retryAtMS).UTC())
+		if delay > 0 {
+			timer := time.NewTimer(delay)
+			defer timer.Stop()
+
+			select {
+			case <-wakeCtx.Done():
+				return
+			case <-timer.C:
+			}
+		} else {
+			select {
+			case <-wakeCtx.Done():
+				return
+			default:
+			}
+		}
+
+		status, err := m.Trigger(context.Background())
+		if err != nil {
+			if m.logger != nil {
+				m.logger.Warn("PTR retry wakeup trigger failed", "error", err)
+			}
+			return
+		}
+
+		if m.logger != nil {
+			m.logger.Info(
+				"PTR retry wakeup triggered sync",
+				"phase",
+				status.Phase,
+				"retry_at_ms",
+				retryAtMS,
+			)
+		}
+	}(retryAtMS, ctx, wakeupID)
+}
+
+func ptrSyncThrottleDelay(retryAttempt int64) time.Duration {
+	if retryAttempt < 1 {
+		retryAttempt = 1
+	}
+
+	if retryAttempt <= int64(len(ptrSyncInitialBusyRetryDelays)) {
+		return ptrSyncInitialBusyRetryDelays[retryAttempt-1]
+	}
+
+	delay := ptrSyncInitialBusyRetryDelays[len(ptrSyncInitialBusyRetryDelays)-1]
+	for step := int64(len(ptrSyncInitialBusyRetryDelays)); step < retryAttempt && delay < ptrSyncThrottleMaxDelay; step++ {
+		delay *= 2
+		if delay >= ptrSyncThrottleMaxDelay {
+			return ptrSyncThrottleMaxDelay
+		}
+	}
+
+	return delay
+}
+
+func minInt(left int, right int) int {
+	if left < right {
+		return left
+	}
+
+	return right
+}
+
+func maxInt64(left int64, right int64) int64 {
+	if left > right {
+		return left
+	}
+
+	return right
 }
 
 func repositoryUpdatesArtifactsRoot(bundle *hydrusdb.Bundle) string {
@@ -572,6 +999,15 @@ func repositoryUpdatesArtifactsRoot(bundle *hydrusdb.Bundle) string {
 
 func repositoryUpdatesServiceKeyHex() string {
 	return hex.EncodeToString([]byte("repository updates"))
+}
+
+func repositoryServiceKeyHex(serviceKey string) string {
+	normalized := strings.ToLower(strings.TrimSpace(serviceKey))
+	if normalized == "" {
+		return coreptrsync.DaemonServiceKeyHex()
+	}
+
+	return normalized
 }
 
 func resolvePTRUpdateArtifactPath(bundle *hydrusdb.Bundle, hashHex string) (string, error) {
@@ -647,4 +1083,41 @@ func storePTRUpdateArtifact(
 	}
 
 	return artifactPath, false, nil
+}
+
+func loadStoredPTRUpdateArtifact(bundle *hydrusdb.Bundle, updateHash []byte) ([]byte, int, bool, error) {
+	if bundle == nil {
+		return nil, 0, false, fmt.Errorf("hydrus bundle is required")
+	}
+
+	if len(updateHash) == 0 {
+		return nil, 0, false, fmt.Errorf("PTR update hash is required")
+	}
+
+	hashHex := hex.EncodeToString(updateHash)
+	artifactPath, err := resolvePTRUpdateArtifactPath(bundle, hashHex)
+	if err != nil {
+		return nil, 0, false, err
+	}
+
+	body, err := os.ReadFile(artifactPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, 0, false, nil
+		}
+
+		return nil, 0, false, fmt.Errorf("read artifact file: %w", err)
+	}
+
+	sum := sha256.Sum256(body)
+	if !equalBytes(sum[:], updateHash) {
+		return nil, 0, false, fmt.Errorf("artifact hash %x did not match expected %x", sum[:], updateHash)
+	}
+
+	mime, err := classifyUpdatePayload(body)
+	if err != nil {
+		return nil, 0, false, fmt.Errorf("classify stored update payload: %w", err)
+	}
+
+	return body, mime, true, nil
 }

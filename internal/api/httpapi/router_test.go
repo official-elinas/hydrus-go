@@ -299,6 +299,7 @@ func TestProtectedEndpoints(t *testing.T) {
 				Port:                     45871,
 				AccountMode:              coreptrsync.AccountModeSharedReadOnly,
 				Phase:                    coreptrsync.PhaseIdle,
+				IsComplete:               true,
 				MetadataSlice:            7,
 				DownloadedUpdateCount:    11,
 				ProcessedDefinitionCount: 5,
@@ -336,6 +337,10 @@ func TestProtectedEndpoints(t *testing.T) {
 
 		if ptr["phase"] != coreptrsync.PhaseIdle {
 			t.Fatalf("phase = %v, want %s", ptr["phase"], coreptrsync.PhaseIdle)
+		}
+
+		if ptr["is_complete"] != true {
+			t.Fatalf("is_complete = %v, want true", ptr["is_complete"])
 		}
 	})
 
@@ -476,6 +481,102 @@ func TestProtectedEndpoints(t *testing.T) {
 
 		if rr.Code != http.StatusForbidden {
 			t.Fatalf("status = %d, want %d", rr.Code, http.StatusForbidden)
+		}
+	})
+
+	t.Run("add tags stages pending mappings through PTR store", func(t *testing.T) {
+		var captured coreptrsync.PendingMappingsRequest
+
+		handler := newHandlerWithPTRStore(t, stubPTRStore{
+			addHandle: func(request coreptrsync.PendingMappingsRequest) (coreptrsync.PendingMappingsResult, error) {
+				captured = request
+				return coreptrsync.PendingMappingsResult{
+					ServiceKey:    coreptrsync.DaemonServiceKeyHex(),
+					AddedMappings: 3,
+				}, nil
+			},
+		})
+
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/add_tags/add_tags",
+			strings.NewReader(`{"hash":"`+strings.Repeat("AA", 32)+`","file_ids":[2],"service_keys_to_actions_to_tags":{"`+strings.ToUpper(coreptrsync.DaemonServiceKeyHex())+`":{"2":["creator:alice","series:zeta"]}}}`),
+		)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		if captured.ServiceKey != coreptrsync.DaemonServiceKeyHex() {
+			t.Fatalf("captured.ServiceKey = %q, want %q", captured.ServiceKey, coreptrsync.DaemonServiceKeyHex())
+		}
+
+		if len(captured.Hashes) != 1 || captured.Hashes[0] != strings.Repeat("aa", 32) {
+			t.Fatalf("captured.Hashes = %v, want [%s]", captured.Hashes, strings.Repeat("aa", 32))
+		}
+
+		if len(captured.FileIDs) != 1 || captured.FileIDs[0] != 2 {
+			t.Fatalf("captured.FileIDs = %v, want [2]", captured.FileIDs)
+		}
+
+		if strings.Join(captured.Tags, "|") != "creator:alice|series:zeta" {
+			t.Fatalf("captured.Tags = %v, want creator:alice|series:zeta", captured.Tags)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+		if payload["service_key"] != coreptrsync.DaemonServiceKeyHex() {
+			t.Fatalf("service_key = %v, want %s", payload["service_key"], coreptrsync.DaemonServiceKeyHex())
+		}
+		if payload["added_mappings"] != float64(3) {
+			t.Fatalf("added_mappings = %v, want 3", payload["added_mappings"])
+		}
+	})
+
+	t.Run("commit pending forwards request through PTR store", func(t *testing.T) {
+		var captured coreptrsync.CommitPendingRequest
+
+		handler := newHandlerWithPTRStore(t, stubPTRStore{
+			commitHandle: func(request coreptrsync.CommitPendingRequest) (coreptrsync.CommitPendingResult, error) {
+				captured = request
+				return coreptrsync.CommitPendingResult{
+					ServiceKey:        coreptrsync.DaemonServiceKeyHex(),
+					CommittedMappings: 4,
+				}, nil
+			},
+		})
+
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/manage_services/commit_pending",
+			strings.NewReader(`{"service_key":"`+strings.ToUpper(coreptrsync.DaemonServiceKeyHex())+`"}`),
+		)
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		if captured.ServiceKey != coreptrsync.DaemonServiceKeyHex() {
+			t.Fatalf("captured.ServiceKey = %q, want %q", captured.ServiceKey, coreptrsync.DaemonServiceKeyHex())
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+		if payload["service_key"] != coreptrsync.DaemonServiceKeyHex() {
+			t.Fatalf("service_key = %v, want %s", payload["service_key"], coreptrsync.DaemonServiceKeyHex())
+		}
+		if payload["committed_mappings"] != float64(4) {
+			t.Fatalf("committed_mappings = %v, want 4", payload["committed_mappings"])
 		}
 	})
 
@@ -654,6 +755,81 @@ func TestProtectedEndpoints(t *testing.T) {
 
 		if rr.Code != http.StatusForbidden {
 			t.Fatalf("status = %d, want %d", rr.Code, http.StatusForbidden)
+		}
+	})
+}
+
+func TestTagAutocompleteEndpoint(t *testing.T) {
+	provider := services.DefaultProvider()
+
+	t.Run("returns daemon-backed tag suggestions", func(t *testing.T) {
+		store := &fakeMetadataStore{
+			suggestTagsHandle: func(prefix string, limit int) ([]string, error) {
+				if prefix != "cre" {
+					t.Fatalf("prefix = %q, want cre", prefix)
+				}
+				if limit != 5 {
+					t.Fatalf("limit = %d, want 5", limit)
+				}
+
+				return []string{"creator:alice", "creator:alina"}, nil
+			},
+		}
+		handler := newHandlerWithDeps(t, provider, store, false)
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/tags/autocomplete?q=cre&limit=5", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+
+		if payload["query"] != "cre" {
+			t.Fatalf("query = %v, want cre", payload["query"])
+		}
+
+		suggestions, ok := payload["suggestions"].([]any)
+		if !ok {
+			t.Fatalf("suggestions type = %T, want []any", payload["suggestions"])
+		}
+
+		if len(suggestions) != 2 || suggestions[0] != "creator:alice" || suggestions[1] != "creator:alina" {
+			t.Fatalf("suggestions = %v, want [creator:alice creator:alina]", suggestions)
+		}
+	})
+
+	t.Run("rejects invalid limit", func(t *testing.T) {
+		store := &fakeMetadataStore{}
+		handler := newHandlerWithDeps(t, provider, store, false)
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/tags/autocomplete?q=cre&limit=bogus", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("returns not implemented without metadata store", func(t *testing.T) {
+		handler := newHandlerWithDeps(t, provider, nil, false)
+
+		req := httptest.NewRequest(http.MethodGet, "/v1/tags/autocomplete?q=cre", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotImplemented)
 		}
 	})
 }
@@ -2042,7 +2218,7 @@ func newHandlerWithDeps(
 	access, err := NewAccessControl(
 		strings.Repeat("b", 64),
 		"test-client",
-		[]Permission{PermissionSearchAndFetchFiles, PermissionImportAndDeleteFiles},
+		[]Permission{PermissionSearchAndFetchFiles, PermissionImportAndDeleteFiles, PermissionManageDatabase},
 	)
 	if err != nil {
 		t.Fatalf("NewAccessControl() error = %v", err)
@@ -2090,7 +2266,12 @@ func newHandlerWithPTRStore(t *testing.T, ptrStore coreptrsync.Store) http.Handl
 	access, err := NewAccessControl(
 		strings.Repeat("b", 64),
 		"test-client",
-		[]Permission{PermissionSearchAndFetchFiles, PermissionImportAndDeleteFiles},
+		[]Permission{
+			PermissionSearchAndFetchFiles,
+			PermissionImportAndDeleteFiles,
+			PermissionEditFileTags,
+			PermissionCommitPending,
+		},
 	)
 	if err != nil {
 		t.Fatalf("NewAccessControl() error = %v", err)
@@ -2110,11 +2291,105 @@ func newHandlerWithPTRStore(t *testing.T, ptrStore coreptrsync.Store) http.Handl
 	)
 }
 
+func TestDatabaseIntegrityEndpoint(t *testing.T) {
+	t.Run("returns not implemented without metadata store", func(t *testing.T) {
+		handler := newHandlerWithDeps(t, services.DefaultProvider(), nil, false)
+		req := httptest.NewRequest(http.MethodPost, "/manage_database/integrity_check", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusNotImplemented {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusNotImplemented)
+		}
+	})
+
+	t.Run("requires manage database permission", func(t *testing.T) {
+		access, err := NewAccessControl(
+			strings.Repeat("f", 64),
+			"test-client",
+			[]Permission{PermissionSearchAndFetchFiles},
+		)
+		if err != nil {
+			t.Fatalf("NewAccessControl() error = %v", err)
+		}
+
+		handler := NewHandler(
+			slog.New(slog.NewTextHandler(io.Discard, nil)),
+			access,
+			services.DefaultProvider(),
+			&fakeMetadataStore{},
+			nil,
+			nil,
+			nil,
+			nil,
+			nil,
+			false,
+		)
+
+		req := httptest.NewRequest(http.MethodPost, "/manage_database/integrity_check", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", access.AccessKey())
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusForbidden {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusForbidden)
+		}
+	})
+
+	t.Run("returns integrity payload on success", func(t *testing.T) {
+		store := &fakeMetadataStore{
+			integrityResult: filemetadata.IntegrityCheckResult{
+				Passed:  true,
+				Results: []string{"ok"},
+			},
+		}
+		handler := newHandlerWithDeps(t, services.DefaultProvider(), store, false)
+		req := httptest.NewRequest(http.MethodPost, "/manage_database/integrity_check", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		if rr.Header().Get("Allow") != http.MethodPost {
+			t.Fatalf("Allow = %q, want %q", rr.Header().Get("Allow"), http.MethodPost)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+		integrity, ok := payload["integrity"].(map[string]any)
+		if !ok {
+			t.Fatalf("integrity type = %T, want map[string]any", payload["integrity"])
+		}
+
+		if got, _ := integrity["passed"].(bool); !got {
+			t.Fatalf("integrity[passed] = %v, want true", integrity["passed"])
+		}
+
+		results, ok := integrity["results"].([]any)
+		if !ok || len(results) != 1 || results[0] != "ok" {
+			t.Fatalf("integrity[results] = %#v, want [ok]", integrity["results"])
+		}
+	})
+}
+
 type stubPTRStore struct {
 	status        coreptrsync.Status
 	err           error
 	triggerStatus coreptrsync.Status
 	triggerErr    error
+	addResult     coreptrsync.PendingMappingsResult
+	addErr        error
+	commitResult  coreptrsync.CommitPendingResult
+	commitErr     error
+	addHandle     func(coreptrsync.PendingMappingsRequest) (coreptrsync.PendingMappingsResult, error)
+	commitHandle  func(coreptrsync.CommitPendingRequest) (coreptrsync.CommitPendingResult, error)
 }
 
 func (s stubPTRStore) Status(context.Context) (coreptrsync.Status, error) {
@@ -2125,10 +2400,35 @@ func (s stubPTRStore) Trigger(context.Context) (coreptrsync.Status, error) {
 	return s.triggerStatus, s.triggerErr
 }
 
+func (s stubPTRStore) AddPendingMappings(
+	_ context.Context,
+	request coreptrsync.PendingMappingsRequest,
+) (coreptrsync.PendingMappingsResult, error) {
+	if s.addHandle != nil {
+		return s.addHandle(request)
+	}
+
+	return s.addResult, s.addErr
+}
+
+func (s stubPTRStore) CommitPending(
+	_ context.Context,
+	request coreptrsync.CommitPendingRequest,
+) (coreptrsync.CommitPendingResult, error) {
+	if s.commitHandle != nil {
+		return s.commitHandle(request)
+	}
+
+	return s.commitResult, s.commitErr
+}
+
 type fakeMetadataStore struct {
 	rows                   []filemetadata.Row
 	err                    error
+	integrityResult        filemetadata.IntegrityCheckResult
 	handle                 func(filemetadata.Request) ([]filemetadata.Row, error)
+	suggestTagsHandle      func(string, int) ([]string, error)
+	integrityHandle        func() (filemetadata.IntegrityCheckResult, error)
 	listRecentHandle       func(librarybrowse.Request) (librarybrowse.Page, error)
 	resolveContentHandle   func(int64) (fileassets.Descriptor, error)
 	resolveThumbnailHandle func(int64) (fileassets.Descriptor, error)
@@ -2148,6 +2448,28 @@ func (s *fakeMetadataStore) GetMetadata(
 		return s.handle(request)
 	}
 	return s.rows, s.err
+}
+
+func (s *fakeMetadataStore) SuggestTags(
+	_ context.Context,
+	prefix string,
+	limit int,
+) ([]string, error) {
+	if s.suggestTagsHandle != nil {
+		return s.suggestTagsHandle(prefix, limit)
+	}
+
+	return nil, s.err
+}
+
+func (s *fakeMetadataStore) CheckIntegrity(
+	_ context.Context,
+) (filemetadata.IntegrityCheckResult, error) {
+	if s.integrityHandle != nil {
+		return s.integrityHandle()
+	}
+
+	return s.integrityResult, s.err
 }
 
 func (s *fakeMetadataStore) ListRecent(

@@ -53,3 +53,33 @@ func (s metadataStoreRouter) GetMetadata(
 
 	return s.readStore.GetMetadata(ctx, request)
 }
+
+func (s metadataStoreRouter) SuggestTags(
+	ctx context.Context,
+	prefix string,
+	limit int,
+) ([]string, error) {
+	if s.readStore != nil {
+		return s.readStore.SuggestTags(ctx, prefix, limit)
+	}
+
+	if s.writeStore != nil {
+		return s.writeStore.SuggestTags(ctx, prefix, limit)
+	}
+
+	return []string{}, nil
+}
+
+func (s metadataStoreRouter) CheckIntegrity(
+	ctx context.Context,
+) (filemetadata.IntegrityCheckResult, error) {
+	if s.readStore != nil {
+		return s.readStore.CheckIntegrity(ctx)
+	}
+
+	if s.writeStore != nil {
+		return s.writeStore.CheckIntegrity(ctx)
+	}
+
+	return filemetadata.IntegrityCheckResult{}, nil
+}

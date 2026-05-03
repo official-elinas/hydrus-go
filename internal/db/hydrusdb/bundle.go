@@ -29,6 +29,7 @@ type openMode string
 const (
 	modeReadOnly  openMode = "ro"
 	modeReadWrite openMode = "rw"
+	sqliteBusyTimeoutMS     = 5000
 )
 
 // Bundle is a Hydrus client DB bundle opened on a single dedicated SQLite
@@ -94,6 +95,12 @@ func openBundle(ctx context.Context, dir string, mode openMode) (*Bundle, error)
 	if err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("open dedicated sqlite connection: %w", err)
+	}
+
+	if err := configureSQLiteConnection(ctx, conn); err != nil {
+		_ = conn.Close()
+		_ = db.Close()
+		return nil, err
 	}
 
 	attachments := []attachment{
@@ -394,6 +401,21 @@ func attachDatabase(
 	query := fmt.Sprintf("ATTACH DATABASE ? AS %s", attachment.alias)
 	if _, err := conn.ExecContext(ctx, query, sqliteModeURI(attachment.path, mode)); err != nil {
 		return fmt.Errorf("attach %s: %w", attachment.alias, err)
+	}
+
+	return nil
+}
+
+func configureSQLiteConnection(ctx context.Context, conn *sql.Conn) error {
+	if conn == nil {
+		return errors.New("sqlite connection is nil")
+	}
+
+	if _, err := conn.ExecContext(
+		ctx,
+		fmt.Sprintf("PRAGMA busy_timeout = %d", sqliteBusyTimeoutMS),
+	); err != nil {
+		return fmt.Errorf("set sqlite busy_timeout pragma: %w", err)
 	}
 
 	return nil

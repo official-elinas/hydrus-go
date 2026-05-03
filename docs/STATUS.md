@@ -1,6 +1,6 @@
 # hydrus-go status
 
-Last updated: 2026-04-21
+Last updated: 2026-04-22
 
 ## Completed
 
@@ -79,12 +79,15 @@ Last updated: 2026-04-21
 - added daemon-owned PTR download bookkeeping so persisted status reflects real locally registered update counts
 - added daemonclient PTR status/trigger support plus a Fyne-side PTR status/manual-sync popup under the desktop Network menu that stays daemon-first
 - added Fyne recent-grid incremental loading on top of the daemon's existing recent offset/limit API
+- added PTR-side remote-busy retry handling with a short retry ladder, capped exponential backoff, and an explicit server-issue failure after repeated busy responses
+- added batched local PTR downloaded-update registration/finalization so one sync pass does less repeated serialized DB bookkeeping per downloaded blob
+- improved the Fyne shell layout so the main client window resizes more sanely and the selected-preview empty state no longer collapses into vertical placeholder text
 - added a dedicated parity roadmap document covering the next backend, PTR, performance, and UI priorities
 - documented the daemon-first migration direction and current bootstrap limits
 
 ## In Progress
 
-- iterating on the Fyne prototype's preview, reconnect, and metadata UX after landing the first connect/browse/import/trash/original-preview loop, recent paging, and PTR status/manual sync
+- iterating on the Fyne prototype's preview caching, reconnect, metadata, and broader visual polish after landing the first connect/browse/import/trash/original-preview loop, incremental recent loading, PTR status/manual sync, and the first split-layout cleanup
 - preparing real Windows-over-LAN smoke testing against a live `hydrusd` instance, now without requiring a pre-existing Hydrus bundle for first-start setup
 - preparing thin-client-driven performance validation for SQLite and managed `client_files` behavior alongside the first PTR daemon work
 - converting the latest parity reconnaissance into a concrete implementation order in `docs/PARITY_ROADMAP.md`
@@ -132,8 +135,9 @@ See also: [`docs/PARITY_ROADMAP.md`](./PARITY_ROADMAP.md) for the prioritized pa
 - [x] connect a desktop client to the local daemon with the existing auth/bootstrap flow
 - [x] support basic import, browse, add, and trash workflows against daemon APIs
 - [x] preview selected JPEG/PNG/GIF originals through daemon APIs with bounded client-side safety limits
-- [x] add recent-page navigation to the prototype's browse grid
+- [x] add recent-page navigation / incremental loading to the prototype's browse grid
 - [x] surface daemon-owned PTR status and a manual sync trigger in the prototype
+- [x] fix the selected-preview empty state and first-pass shell resizing/layout problems in the prototype
 - [ ] validate the daemon/client contract with a simple multi-platform desktop UI before attempting Hydrus UI parity
 - [x] keep the first client closer to `comfyui-image-browser` scope than full Hydrus parity
 
@@ -151,6 +155,7 @@ See also: [`docs/PARITY_ROADMAP.md`](./PARITY_ROADMAP.md) for the prioritized pa
 - [x] add real anonymous PTR session/account/options/tag-filter/metadata fetch and durable snapshot persistence
 - [x] add a daemon-owned background trigger/lifecycle slice for anonymous PTR sync
 - [x] implement anonymous PTR `/update` download and local repository-updates registration
+- [x] add daemon-side busy-response retry/backoff handling and batch the local downloaded-update finalization hot path
 - [ ] process downloaded PTR definitions/content into local mappings and tag/query state
 - [ ] make imported files eligible for PTR-driven tag/update retrieval
 - [ ] verify end-to-end value from local import through PTR sync and tag acquisition
@@ -376,3 +381,12 @@ See also: [`docs/PARITY_ROADMAP.md`](./PARITY_ROADMAP.md) for the prioritized pa
 - updated PTR status persistence so `downloaded_update_count` reflects real daemon-owned local registration state rather than declared remote metadata only
 - intentionally left definitions/content processing and tag-application behavior for the next PTR slice
 - verified with targeted `./internal/ptrsync ./internal/db/hydrusdb ./internal/importing ./internal/storage/clientfiles` package tests plus live daemon + mock PTR server manual QA
+
+### 2026-04-22 — Milestone 24: PTR retrying UI, batch finalization, and shell cleanup
+
+- replaced the earlier short hidden PTR busy loop with a daemon-visible retry model using a `2s/3s/4s/5s/5s` ladder, capped follow-up backoff, and an explicit server-issue failure after repeated busy responses
+- batched local PTR downloaded-update registration/finalization work so one sync pass does less repeated serialized DB bookkeeping per downloaded blob
+- clarified the desktop PTR wording so downloaded counts refer to downloaded update files rather than implying applied mappings
+- fixed the desktop PTR polling loop so it no longer stops after about one minute and require a manual refresh to continue updating
+- cleaned up the first Fyne shell layout so the main split panes resize more sanely and the selected-preview empty state no longer renders vertical placeholder text
+- verified with targeted PTR/backend package tests, targeted `hydrusdb` PTR tests, Fyne tests, and rebuilt daemon/desktop binaries

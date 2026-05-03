@@ -218,6 +218,9 @@ func TestClientGetFileMetadata(t *testing.T) {
 						"is_local":   true,
 						"is_trashed": false,
 						"is_deleted": false,
+						"ratings": map[string]any{
+							"favorites-service": true,
+						},
 						"tags": map[string]any{
 							"74616773": map[string]any{
 								"name":        "my tags",
@@ -249,6 +252,10 @@ func TestClientGetFileMetadata(t *testing.T) {
 
 		if metadata.FileID != 42 || metadata.MIME != "image/png" || metadata.Size != 1234 {
 			t.Fatalf("metadata = %#v, want decoded file_id/mime/size", metadata)
+		}
+
+		if got, ok := metadata.Ratings["favorites-service"].(bool); !ok || !got {
+			t.Fatalf("metadata.Ratings[favorites-service] = %v (present=%t), want true", metadata.Ratings["favorites-service"], ok)
 		}
 
 		tagService, ok := metadata.Tags["74616773"]
@@ -290,6 +297,36 @@ func TestClientGetFileMetadata(t *testing.T) {
 			t.Fatalf("GetFileMetadata() error = %v, want no metadata error", err)
 		}
 	})
+}
+
+func TestClientSuggestTags(t *testing.T) {
+	client := newClientWithRoundTripper(
+		t,
+		"http://daemon.test",
+		strings.Repeat("a", 64),
+		roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			assertMethodAndPath(t, r, http.MethodGet, "/v1/tags/autocomplete")
+			assertHeader(t, r, "Hydrus-Client-API-Access-Key", "")
+			assertHeader(t, r, "Hydrus-Client-API-Session-Key", "session-tags")
+			assertQueryValue(t, r.URL, "q", "creator:a")
+			assertQueryValue(t, r.URL, "limit", "7")
+
+			return jsonResponse(t, r, http.StatusOK, map[string]any{
+				"query":       "creator:a",
+				"suggestions": []string{"creator:alice", "creator:alina"},
+			}), nil
+		}),
+	)
+	client.sessionKey = "session-tags"
+
+	suggestions, err := client.SuggestTags(context.Background(), "creator:a", 7)
+	if err != nil {
+		t.Fatalf("SuggestTags() error = %v", err)
+	}
+
+	if len(suggestions) != 2 || suggestions[0] != "creator:alice" || suggestions[1] != "creator:alina" {
+		t.Fatalf("suggestions = %v, want [creator:alice creator:alina]", suggestions)
+	}
 }
 
 func TestClientMutationRequests(t *testing.T) {
@@ -402,6 +439,87 @@ func TestClientMutationRequests(t *testing.T) {
 
 		if !result.Trashed || result.FileID != 73 {
 			t.Fatalf("result = %#v, want trashed file_id 73", result)
+		}
+	})
+
+	t.Run("stages pending mappings through session-backed JSON request", func(t *testing.T) {
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("8", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodPost, "/add_tags/add_tags")
+				assertHeader(t, r, "Hydrus-Client-API-Access-Key", "")
+				assertHeader(t, r, "Hydrus-Client-API-Session-Key", "session-tags")
+				assertHeader(t, r, "Content-Type", "application/json")
+
+				var payload map[string]any
+				decodeJSONBody(t, r, &payload)
+
+				if payload["file_id"] != float64(73) {
+					t.Fatalf("payload[file_id] = %v, want 73", payload["file_id"])
+				}
+
+				actionsByService := payload["service_keys_to_actions_to_tags"].(map[string]any)
+				actions := actionsByService[coreptrsync.DaemonServiceKeyHex()].(map[string]any)
+				tags := actions[hydrusContentUpdatePendAction].([]any)
+				if len(tags) != 2 || tags[0] != "creator:alice" || tags[1] != "series:zeta" {
+					t.Fatalf("payload tags = %v, want creator:alice and series:zeta", tags)
+				}
+
+				return jsonResponse(t, r, http.StatusOK, coreptrsync.PendingMappingsResult{
+					ServiceKey:    coreptrsync.DaemonServiceKeyHex(),
+					AddedMappings: 2,
+				}), nil
+			}),
+		)
+		client.sessionKey = "session-tags"
+
+		result, err := client.AddPendingMappings(context.Background(), coreptrsync.PendingMappingsRequest{
+			FileIDs: []int64{73},
+			Tags:    []string{"creator:alice", "series:zeta"},
+		})
+		if err != nil {
+			t.Fatalf("AddPendingMappings() error = %v", err)
+		}
+
+		if result.AddedMappings != 2 || result.ServiceKey != coreptrsync.DaemonServiceKeyHex() {
+			t.Fatalf("result = %#v, want added_mappings=2 and daemon service key", result)
+		}
+	})
+
+	t.Run("commits pending mappings through session-backed JSON request", func(t *testing.T) {
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("9", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodPost, "/manage_services/commit_pending")
+				assertHeader(t, r, "Hydrus-Client-API-Access-Key", "")
+				assertHeader(t, r, "Hydrus-Client-API-Session-Key", "session-commit")
+				assertHeader(t, r, "Content-Type", "application/json")
+
+				var payload map[string]any
+				decodeJSONBody(t, r, &payload)
+				if payload["service_key"] != coreptrsync.DaemonServiceKeyHex() {
+					t.Fatalf("payload[service_key] = %v, want daemon service key", payload["service_key"])
+				}
+
+				return jsonResponse(t, r, http.StatusOK, coreptrsync.CommitPendingResult{
+					ServiceKey:        coreptrsync.DaemonServiceKeyHex(),
+					CommittedMappings: 5,
+				}), nil
+			}),
+		)
+		client.sessionKey = "session-commit"
+
+		result, err := client.CommitPending(context.Background(), coreptrsync.CommitPendingRequest{ServiceKey: coreptrsync.DaemonServiceKeyHex()})
+		if err != nil {
+			t.Fatalf("CommitPending() error = %v", err)
+		}
+
+		if result.CommittedMappings != 5 || result.ServiceKey != coreptrsync.DaemonServiceKeyHex() {
+			t.Fatalf("result = %#v, want committed_mappings=5 and daemon service key", result)
 		}
 	})
 }
@@ -858,5 +976,39 @@ func TestPTRSync(t *testing.T) {
 	}
 	if res.PTR.Phase != "syncing" {
 		t.Errorf("Expected phase = syncing, got %q", res.PTR.Phase)
+	}
+}
+
+func TestDBIntegrityCheck(t *testing.T) {
+	client := newClientWithRoundTripper(
+		t,
+		"http://daemon.test",
+		strings.Repeat("f", 64),
+		roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			assertMethodAndPath(t, r, http.MethodPost, "/manage_database/integrity_check")
+			assertHeader(t, r, "Hydrus-Client-API-Session-Key", "session-db")
+
+			response := DBIntegrityResponse{
+				Integrity: DBIntegrityResult{
+					Passed:  true,
+					Results: []string{"ok"},
+				},
+			}
+			return jsonResponse(t, r, http.StatusOK, response), nil
+		}),
+	)
+	client.sessionKey = "session-db"
+
+	res, err := client.TriggerDBIntegrityCheck(context.Background())
+	if err != nil {
+		t.Fatalf("TriggerDBIntegrityCheck() error = %v", err)
+	}
+
+	if !res.Integrity.Passed {
+		t.Fatal("expected integrity check to pass")
+	}
+
+	if len(res.Integrity.Results) != 1 || res.Integrity.Results[0] != "ok" {
+		t.Fatalf("res.Integrity.Results = %v, want [ok]", res.Integrity.Results)
 	}
 }

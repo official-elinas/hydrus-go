@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
+	"github.com/official-elinas/hydrus-go/internal/db/hydrusdb"
 )
 
 const (
@@ -19,11 +20,20 @@ const (
 	hydrusMetaTypeHydrusSerializable = 2
 
 	hydrusSerialisableTypeDictionary        = 21
+	hydrusSerialisableTypeContent           = 23
 	hydrusSerialisableTypeList              = 26
 	hydrusSerialisableTypeContentUpdate     = 34
 	hydrusSerialisableTypeDefinitionsUpdate = 36
+	hydrusSerialisableTypeClientToServerUpdate = 40
 	hydrusSerialisableTypeMetadata          = 37
 	hydrusSerialisableTypeTagFilter         = 44
+
+	hydrusContentTypeMappings   = 0
+	hydrusContentUpdateAdd      = 0
+	hydrusContentUpdateDelete   = 1
+	hydrusContentUpdatePend     = 2
+	hydrusDefinitionsTypeHashes = 0
+	hydrusDefinitionsTypeTags   = 1
 )
 
 // Hydrus PTR endpoint bodies are zlib-compressed JSON whose top-level values
@@ -183,6 +193,231 @@ func classifyUpdatePayload(body []byte) (int, error) {
 	default:
 		return 0, fmt.Errorf("unsupported PTR update serialisable type %d", serialisableType)
 	}
+}
+
+func decodeDefinitionsUpdatePayload(body []byte) (hydrusdb.PTRDefinitionsUpdate, error) {
+	tuple, err := decodeHydrusSerialisableTuple(body)
+	if err != nil {
+		return hydrusdb.PTRDefinitionsUpdate{}, err
+	}
+
+	serialisableType, err := anyToInt(tuple[0])
+	if err != nil {
+		return hydrusdb.PTRDefinitionsUpdate{}, err
+	}
+	if serialisableType != hydrusSerialisableTypeDefinitionsUpdate {
+		return hydrusdb.PTRDefinitionsUpdate{}, fmt.Errorf(
+			"unsupported PTR definitions serialisable type %d",
+			serialisableType,
+		)
+	}
+
+	serialisableInfo := tuple[2]
+	if len(tuple) == 4 {
+		serialisableInfo = tuple[3]
+	}
+
+	definitions, ok := serialisableInfo.([]any)
+	if !ok {
+		return hydrusdb.PTRDefinitionsUpdate{}, fmt.Errorf("definitions payload had type %T", serialisableInfo)
+	}
+
+	decoded := hydrusdb.PTRDefinitionsUpdate{
+		ServiceHashIDsToHashes: map[int64]string{},
+		ServiceTagIDsToTags:    map[int64]string{},
+	}
+
+	for _, definitionValue := range definitions {
+		definitionTuple, ok := definitionValue.([]any)
+		if !ok || len(definitionTuple) != 2 {
+			return hydrusdb.PTRDefinitionsUpdate{}, fmt.Errorf("definition row had unexpected shape")
+		}
+
+		definitionType, err := anyToInt64(definitionTuple[0])
+		if err != nil {
+			return hydrusdb.PTRDefinitionsUpdate{}, fmt.Errorf("decode definition type: %w", err)
+		}
+
+		definitionRows, ok := definitionTuple[1].([]any)
+		if !ok {
+			return hydrusdb.PTRDefinitionsUpdate{}, fmt.Errorf("definition rows had type %T", definitionTuple[1])
+		}
+
+		switch definitionType {
+		case hydrusDefinitionsTypeHashes:
+			for _, rowValue := range definitionRows {
+				row, ok := rowValue.([]any)
+				if !ok || len(row) != 2 {
+					return hydrusdb.PTRDefinitionsUpdate{}, fmt.Errorf("hash definition row had unexpected shape")
+				}
+
+				serviceHashID, err := anyToInt64(row[0])
+				if err != nil {
+					return hydrusdb.PTRDefinitionsUpdate{}, fmt.Errorf("decode service hash id: %w", err)
+				}
+
+				hashHex, ok := row[1].(string)
+				if !ok {
+					return hydrusdb.PTRDefinitionsUpdate{}, fmt.Errorf("hash definition value had type %T", row[1])
+				}
+
+				decoded.ServiceHashIDsToHashes[serviceHashID] = strings.ToLower(strings.TrimSpace(hashHex))
+			}
+		case hydrusDefinitionsTypeTags:
+			for _, rowValue := range definitionRows {
+				row, ok := rowValue.([]any)
+				if !ok || len(row) != 2 {
+					return hydrusdb.PTRDefinitionsUpdate{}, fmt.Errorf("tag definition row had unexpected shape")
+				}
+
+				serviceTagID, err := anyToInt64(row[0])
+				if err != nil {
+					return hydrusdb.PTRDefinitionsUpdate{}, fmt.Errorf("decode service tag id: %w", err)
+				}
+
+				tag, ok := row[1].(string)
+				if !ok {
+					return hydrusdb.PTRDefinitionsUpdate{}, fmt.Errorf("tag definition value had type %T", row[1])
+				}
+
+				decoded.ServiceTagIDsToTags[serviceTagID] = tag
+			}
+		}
+	}
+
+	return decoded, nil
+}
+
+func decodeMappingsUpdatePayload(body []byte) (hydrusdb.PTRMappingsUpdate, error) {
+	tuple, err := decodeHydrusSerialisableTuple(body)
+	if err != nil {
+		return hydrusdb.PTRMappingsUpdate{}, err
+	}
+
+	serialisableType, err := anyToInt(tuple[0])
+	if err != nil {
+		return hydrusdb.PTRMappingsUpdate{}, err
+	}
+	if serialisableType != hydrusSerialisableTypeContentUpdate {
+		return hydrusdb.PTRMappingsUpdate{}, fmt.Errorf(
+			"unsupported PTR content serialisable type %d",
+			serialisableType,
+		)
+	}
+
+	serialisableInfo := tuple[2]
+	if len(tuple) == 4 {
+		serialisableInfo = tuple[3]
+	}
+
+	contentRows, ok := serialisableInfo.([]any)
+	if !ok {
+		return hydrusdb.PTRMappingsUpdate{}, fmt.Errorf("content update payload had type %T", serialisableInfo)
+	}
+
+	decoded := hydrusdb.PTRMappingsUpdate{}
+	for _, contentValue := range contentRows {
+		contentTuple, ok := contentValue.([]any)
+		if !ok || len(contentTuple) != 2 {
+			return hydrusdb.PTRMappingsUpdate{}, fmt.Errorf("content update row had unexpected shape")
+		}
+
+		contentType, err := anyToInt64(contentTuple[0])
+		if err != nil {
+			return hydrusdb.PTRMappingsUpdate{}, fmt.Errorf("decode content type: %w", err)
+		}
+		if contentType != hydrusContentTypeMappings {
+			continue
+		}
+
+		actionsToData, ok := contentTuple[1].([]any)
+		if !ok {
+			return hydrusdb.PTRMappingsUpdate{}, fmt.Errorf("mappings actions payload had type %T", contentTuple[1])
+		}
+
+		for _, actionValue := range actionsToData {
+			actionTuple, ok := actionValue.([]any)
+			if !ok || len(actionTuple) != 2 {
+				return hydrusdb.PTRMappingsUpdate{}, fmt.Errorf("mappings action row had unexpected shape")
+			}
+
+			action, err := anyToInt64(actionTuple[0])
+			if err != nil {
+				return hydrusdb.PTRMappingsUpdate{}, fmt.Errorf("decode mappings action: %w", err)
+			}
+
+			rows, ok := actionTuple[1].([]any)
+			if !ok {
+				return hydrusdb.PTRMappingsUpdate{}, fmt.Errorf("mappings action rows had type %T", actionTuple[1])
+			}
+
+			for _, rowValue := range rows {
+				row, err := decodePTRMappingUpdateRow(rowValue)
+				if err != nil {
+					return hydrusdb.PTRMappingsUpdate{}, err
+				}
+
+				switch action {
+				case hydrusContentUpdateAdd:
+					decoded.Adds = append(decoded.Adds, row)
+				case hydrusContentUpdateDelete:
+					decoded.Deletes = append(decoded.Deletes, row)
+				}
+			}
+		}
+	}
+
+	return decoded, nil
+}
+
+func decodeHydrusSerialisableTuple(body []byte) ([]any, error) {
+	decoded, err := decodeHydrusNetworkBytes(body)
+	if err != nil {
+		return nil, err
+	}
+
+	tuple, ok := decoded.([]any)
+	if !ok {
+		return nil, fmt.Errorf("expected serialisable tuple, got %T", decoded)
+	}
+
+	if len(tuple) != 3 && len(tuple) != 4 {
+		return nil, fmt.Errorf("serialisable tuple had %d elements", len(tuple))
+	}
+
+	return tuple, nil
+}
+
+func decodePTRMappingUpdateRow(value any) (hydrusdb.PTRMappingUpdateRow, error) {
+	row, ok := value.([]any)
+	if !ok || len(row) != 2 {
+		return hydrusdb.PTRMappingUpdateRow{}, fmt.Errorf("mapping update row had unexpected shape")
+	}
+
+	serviceTagID, err := anyToInt64(row[0])
+	if err != nil {
+		return hydrusdb.PTRMappingUpdateRow{}, fmt.Errorf("decode mapping service tag id: %w", err)
+	}
+
+	serviceHashIDValues, ok := row[1].([]any)
+	if !ok {
+		return hydrusdb.PTRMappingUpdateRow{}, fmt.Errorf("mapping service hash ids had type %T", row[1])
+	}
+
+	serviceHashIDs := make([]int64, 0, len(serviceHashIDValues))
+	for _, hashIDValue := range serviceHashIDValues {
+		serviceHashID, err := anyToInt64(hashIDValue)
+		if err != nil {
+			return hydrusdb.PTRMappingUpdateRow{}, fmt.Errorf("decode mapping service hash id: %w", err)
+		}
+
+		serviceHashIDs = append(serviceHashIDs, serviceHashID)
+	}
+
+	return hydrusdb.PTRMappingUpdateRow{
+		ServiceTagID:   serviceTagID,
+		ServiceHashIDs: serviceHashIDs,
+	}, nil
 }
 
 func decodeHydrusArgsBytes(body []byte) (map[string]any, error) {
@@ -694,4 +929,101 @@ func anyToOptionalInt64(value any) (*int64, error) {
 
 func int64Ptr(value int64) *int64 {
 	return &value
+}
+
+func encodeClientToServerUpdateBody(groups []hydrusdb.PTRPendingMappingGroup) ([]byte, error) {
+	if len(groups) == 0 {
+		return nil, fmt.Errorf("at least one PTR pending mappings group is required")
+	}
+
+	serialisableContentsAndReasons := make([]any, 0, len(groups))
+	for _, group := range groups {
+		tag := strings.TrimSpace(group.Tag)
+		if tag == "" {
+			return nil, fmt.Errorf("PTR pending mappings group tag is required")
+		}
+
+		hashValues := make([]any, 0, len(group.Hashes))
+		for _, hashHex := range group.Hashes {
+			normalizedHash := strings.ToLower(strings.TrimSpace(hashHex))
+			if normalizedHash == "" {
+				return nil, fmt.Errorf("PTR pending mappings group hash is required")
+			}
+
+			if _, err := hex.DecodeString(normalizedHash); err != nil {
+				return nil, fmt.Errorf("decode PTR pending mappings hash %q: %w", hashHex, err)
+			}
+
+			hashValues = append(hashValues, normalizedHash)
+		}
+		if len(hashValues) == 0 {
+			return nil, fmt.Errorf("PTR pending mappings group %q must include at least one hash", tag)
+		}
+
+		contentTuple := []any{
+			hydrusSerialisableTypeContent,
+			1,
+			[]any{hydrusContentTypeMappings, []any{tag, hashValues}},
+		}
+
+		serialisableContentsAndReasons = append(serialisableContentsAndReasons, []any{contentTuple, ""})
+	}
+
+	clientToServerUpdateTuple := []any{
+		hydrusSerialisableTypeClientToServerUpdate,
+		1,
+		[]any{
+			[]any{hydrusContentUpdatePend, serialisableContentsAndReasons},
+		},
+	}
+
+	return encodeHydrusArgsBytes(ptrHydrusDictEntry{
+		key:       "client_to_server_update",
+		metaValue: ptrMetaHydrus(clientToServerUpdateTuple),
+	})
+}
+
+func encodeHydrusArgsBytes(entries ...ptrHydrusDictEntry) ([]byte, error) {
+	return encodeHydrusNetworkBytes(ptrSerialisableDictionary(entries...))
+}
+
+func encodeHydrusNetworkBytes(serialisable any) ([]byte, error) {
+	payload, err := json.Marshal(serialisable)
+	if err != nil {
+		return nil, fmt.Errorf("marshal Hydrus serialisable payload: %w", err)
+	}
+
+	var compressed bytes.Buffer
+	writer := zlib.NewWriter(&compressed)
+	if _, err := writer.Write(payload); err != nil {
+		return nil, fmt.Errorf("compress Hydrus serialisable payload: %w", err)
+	}
+
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("finalize Hydrus serialisable compression: %w", err)
+	}
+
+	return compressed.Bytes(), nil
+}
+
+type ptrHydrusDictEntry struct {
+	key       string
+	metaValue any
+}
+
+func ptrSerialisableDictionary(entries ...ptrHydrusDictEntry) any {
+	pairs := make([]any, 0, len(entries))
+	for _, entry := range entries {
+		pairs = append(pairs, []any{ptrMetaJSON(entry.key), entry.metaValue})
+	}
+
+	return []any{hydrusSerialisableTypeDictionary, 2, pairs}
+}
+
+func ptrMetaJSON(value any) any {
+	return []any{hydrusMetaTypeJSONOK, value}
+}
+
+func ptrMetaHydrus(value any) any {
+	return []any{hydrusMetaTypeHydrusSerializable, value}
 }

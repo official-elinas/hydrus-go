@@ -19,6 +19,8 @@ import (
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
 )
 
+const hydrusContentUpdatePendAction = "2"
+
 const userAgent = "hydrus-desktop-prototype/0.1"
 
 // Client talks to hydrusd over HTTP.
@@ -69,6 +71,7 @@ type FileMetadata struct {
 	IsLocal   bool                              `json:"is_local"`
 	IsTrashed bool                              `json:"is_trashed"`
 	IsDeleted bool                              `json:"is_deleted"`
+	Ratings   map[string]any                    `json:"ratings,omitempty"`
 	Tags      map[string]FileMetadataTagService `json:"tags,omitempty"`
 }
 
@@ -100,6 +103,22 @@ type TrashResult struct {
 
 type metadataResponse struct {
 	Metadata []FileMetadata `json:"metadata"`
+}
+
+type tagSuggestionsResponse struct {
+	Suggestions []string `json:"suggestions"`
+}
+
+type addTagsRequest struct {
+	Hash                       string                         `json:"hash,omitempty"`
+	Hashes                     []string                       `json:"hashes,omitempty"`
+	FileID                     *int64                         `json:"file_id,omitempty"`
+	FileIDs                    []int64                        `json:"file_ids,omitempty"`
+	ServiceKeysToActionsToTags map[string]map[string][]string `json:"service_keys_to_actions_to_tags"`
+}
+
+type commitPendingRequest struct {
+	ServiceKey string `json:"service_key,omitempty"`
 }
 
 type sessionResponse struct {
@@ -190,6 +209,30 @@ func (c *Client) GetFileMetadata(ctx context.Context, fileID int64) (FileMetadat
 	}
 
 	return response.Metadata[0], nil
+}
+
+// SuggestTags loads daemon-backed tag suggestions for one normalized prefix.
+func (c *Client) SuggestTags(
+	ctx context.Context,
+	prefix string,
+	limit int,
+) ([]string, error) {
+	normalizedPrefix := strings.TrimSpace(prefix)
+	if normalizedPrefix == "" {
+		return []string{}, nil
+	}
+
+	path := "/v1/tags/autocomplete?q=" + url.QueryEscape(normalizedPrefix)
+	if limit > 0 {
+		path += "&limit=" + strconv.Itoa(limit)
+	}
+
+	var response tagSuggestionsResponse
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, true, &response); err != nil {
+		return nil, err
+	}
+
+	return response.Suggestions, nil
 }
 
 // ImportLocalFile sends one local path to hydrusd for import.
@@ -286,9 +329,76 @@ func (c *Client) TrashFile(ctx context.Context, fileID int64) (TrashResult, erro
 	return response, nil
 }
 
+// AddPendingMappings stages add-only pending PTR tag mappings through hydrusd.
+func (c *Client) AddPendingMappings(
+	ctx context.Context,
+	request coreptrsync.PendingMappingsRequest,
+) (coreptrsync.PendingMappingsResult, error) {
+	serviceKey := strings.ToLower(strings.TrimSpace(request.ServiceKey))
+	if serviceKey == "" {
+		serviceKey = coreptrsync.DaemonServiceKeyHex()
+	}
+
+	body := addTagsRequest{
+		Hashes:  append([]string(nil), request.Hashes...),
+		FileIDs: append([]int64(nil), request.FileIDs...),
+		ServiceKeysToActionsToTags: map[string]map[string][]string{
+			serviceKey: {
+				hydrusContentUpdatePendAction: append([]string(nil), request.Tags...),
+			},
+		},
+	}
+
+	if len(body.Hashes) == 1 {
+		body.Hash = body.Hashes[0]
+		body.Hashes = nil
+	}
+
+	if len(body.FileIDs) == 1 {
+		fileID := body.FileIDs[0]
+		body.FileID = &fileID
+		body.FileIDs = nil
+	}
+
+	var response coreptrsync.PendingMappingsResult
+	if err := c.doJSON(ctx, http.MethodPost, "/add_tags/add_tags", body, true, &response); err != nil {
+		return coreptrsync.PendingMappingsResult{}, err
+	}
+
+	return response, nil
+}
+
+// CommitPending commits staged PTR pending mappings through hydrusd.
+func (c *Client) CommitPending(
+	ctx context.Context,
+	request coreptrsync.CommitPendingRequest,
+) (coreptrsync.CommitPendingResult, error) {
+	body := commitPendingRequest{
+		ServiceKey: strings.ToLower(strings.TrimSpace(request.ServiceKey)),
+	}
+
+	var response coreptrsync.CommitPendingResult
+	if err := c.doJSON(ctx, http.MethodPost, "/manage_services/commit_pending", body, true, &response); err != nil {
+		return coreptrsync.CommitPendingResult{}, err
+	}
+
+	return response, nil
+}
+
 // PTRStatusResponse wraps the daemon PTR status API payload.
 type PTRStatusResponse struct {
 	PTR coreptrsync.Status `json:"ptr"`
+}
+
+// DBIntegrityResult is the daemon-served SQLite integrity-check payload.
+type DBIntegrityResult struct {
+	Passed  bool     `json:"passed"`
+	Results []string `json:"results"`
+}
+
+// DBIntegrityResponse wraps the daemon database integrity-check API payload.
+type DBIntegrityResponse struct {
+	Integrity DBIntegrityResult `json:"integrity"`
 }
 
 // GetPTRStatus retrieves the daemon-side PTR sync status.
@@ -302,6 +412,13 @@ func (c *Client) GetPTRStatus(ctx context.Context) (PTRStatusResponse, error) {
 func (c *Client) TriggerPTRSync(ctx context.Context) (PTRStatusResponse, error) {
 	var out PTRStatusResponse
 	err := c.doJSON(ctx, http.MethodPost, "/service/ptr/sync", nil, true, &out)
+	return out, err
+}
+
+// TriggerDBIntegrityCheck runs a manual SQLite integrity check through hydrusd.
+func (c *Client) TriggerDBIntegrityCheck(ctx context.Context) (DBIntegrityResponse, error) {
+	var out DBIntegrityResponse
+	err := c.doJSON(ctx, http.MethodPost, "/manage_database/integrity_check", nil, true, &out)
 	return out, err
 }
 

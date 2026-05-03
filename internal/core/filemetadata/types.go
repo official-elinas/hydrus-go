@@ -22,9 +22,17 @@ type Request struct {
 // Row is a single file metadata response row.
 type Row map[string]any
 
+// IntegrityCheckResult is the daemon-facing SQLite integrity-check payload.
+type IntegrityCheckResult struct {
+	Passed  bool     `json:"passed"`
+	Results []string `json:"results"`
+}
+
 // Store loads file metadata rows.
 type Store interface {
 	GetMetadata(context.Context, Request) ([]Row, error)
+	SuggestTags(context.Context, string, int) ([]string, error)
+	CheckIntegrity(context.Context) (IntegrityCheckResult, error)
 }
 
 // MissingHashRow builds the Hydrus-compatible row shape for unknown hashes.
