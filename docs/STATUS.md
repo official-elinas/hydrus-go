@@ -1,6 +1,6 @@
 # hydrus-go status
 
-Last updated: 2026-04-22
+Last updated: 2026-05-03
 
 ## Completed
 
@@ -62,10 +62,10 @@ Last updated: 2026-04-22
 - added a first Fyne desktop prototype scaffold for `hydrusd`
 - added focused daemonclient contract tests for the desktop client's auth, browse, mutation, thumbnail, and content-fetch HTTP paths
 - added a real `hydrusd --listen host:port` runtime override for temporary LAN testing without extra environment setup
-- added explicit Linux and Windows desktop build targets, plus a Windows GUI-subsystem build so Explorer launches do not spawn an extra terminal
-- added selected-file original preview in the Fyne client for JPEG/PNG/GIF files through `/v1/files/content`
+- added explicit Linux and Windows desktop build targets, plus a Windows GUI-subsystem build so Explorer launches do not spawn an extra terminal window
+- added selected-file original preview and in-memory caching in the Fyne client for JPEG/PNG/GIF files through `/v1/files/content`
 - bounded selected-file preview work to keep the thin client responsive (16 MiB payload, 8192px maximum dimension, 16,000,000 decoded pixels)
-- added an opt-in native-Go fresh client bundle bootstrap for empty or missing `HYDRUS_GO_DB_DIR` targets
+- added a native-Go fresh client bundle bootstrap for empty or missing `HYDRUS_GO_DB_DIR` targets; plain `hydrusd` now defaults to seeding `./db` unless bootstrap is explicitly disabled
 - added runtime bootstrap timeout and bundle-state safety checks for first-start initialization
 - removed the obsolete Python-interpreter / Hydrus-root bootstrap knobs from the active config and CLI surface
 - expanded the native first-start seed with `client.temp.db`, default managed-storage metadata/root, a seeded `version` row, and hidden built-in services needed for closer Hydrus bootstrap shape
@@ -84,13 +84,27 @@ Last updated: 2026-04-22
 - improved the Fyne shell layout so the main client window resizes more sanely and the selected-preview empty state no longer collapses into vertical placeholder text
 - added a dedicated parity roadmap document covering the next backend, PTR, performance, and UI priorities
 - documented the daemon-first migration direction and current bootstrap limits
+- added daemon-backed tag autocomplete, manual DB integrity checks, and narrow PTR pending-add / commit flows across the daemon + desktop prototype
+- added PTR definition/content apply into local mappings/tag state with processed counters and durable completion semantics
+- added `GET /v1/library/search` plus matching daemonclient support for daemon-backed AND-tag local-file search over existing current-file and current-mapping tables, including PTR-applied tags
+- added an app-level PTR restart smoke test for completed-sync persistence across daemon restart
+- wired the Fyne search bar/grid to daemon-backed local-library tag search for explicit/exact tag queries and later removed the loaded-grid fallback so unsupported terms no longer apply client-local filtering
+- added a direct PTR smoke test that proves PTR-applied mappings remain searchable through the library search path after reopen/restart
+- verified the resizable still-image watcher path for arrow-key and mouse-wheel previous/next navigation while keeping the selected gallery tile visibly highlighted, and added regression coverage for watcher navigation and tile-selection styling
+- added daemon-side search support for `system:` predicates (`size`, `width`, `height`, `favorite`, `resolution`) and server-side sort controls (`import_oldest`, `size_desc`, `size_asc`)
+- wired the desktop search path to daemon-backed predicates (`size`, `width`, `height`, `favorite`, `resolution`) and sort modes; unsupported desktop search terms are now ignored rather than applied as UI-local fallback filtering
+- added end-to-end PTR pending-state visibility including DB counts, manager/store/API layers, daemonclient, and Fyne pending-count labeling
+- added a minimal PTR completion-and-effect proof surface by persisting verified current mapping counts and exposing them through DB status, API payloads, daemonclient decoding, and desktop PTR status/completion text
+- updated the live daemon bootstrap auth principal to include permissions for local PTR pending count, staging, and commit flows
+- verified fresh first-start bootstrap end-to-end against a real fresh DB directory through live smoke testing
+- expanded the `GET /manage_services/pending_counts` endpoint for real-time repository pending-state visibility
 
 ## In Progress
 
-- iterating on the Fyne prototype's preview caching, reconnect, metadata, and broader visual polish after landing the first connect/browse/import/trash/original-preview loop, incremental recent loading, PTR status/manual sync, and the first split-layout cleanup
-- preparing real Windows-over-LAN smoke testing against a live `hydrusd` instance, now without requiring a pre-existing Hydrus bundle for first-start setup
+- iterating on the Fyne prototype's preview caching, reconnect, metadata, and broader visual polish after landing the latest search and PTR slices
 - preparing thin-client-driven performance validation for SQLite and managed `client_files` behavior alongside the first PTR daemon work
 - converting the latest parity reconnaissance into a concrete implementation order in `docs/PARITY_ROADMAP.md`
+- broadening daemon-side search beyond the current predicate slice into more complex Hydrus-like search terms and union/negation logic
 
 ### Active reconnaissance notes
 
@@ -100,6 +114,7 @@ Last updated: 2026-04-22
 - the current daemon runtime now splits reads and writes across separate bundle connections so public local-path imports do not share a connection with browse/read handlers
 - the packaged Linux Hydrus release exposes `hydrus_client -d/--db_dir`, and a headless first-start probe created the canonical client DB bundle plus `client_files` in a fresh directory
 - the daemon now has a fully native first-start bundle path, but upstream bootstrap parity remains intentionally partial
+- on this machine, the broad `go test ./internal/db/hydrusdb` suite still exceeds Go's default 10-minute package timeout even when the new search/PTR reopen tests are skipped; targeted changed-path tests are passing and remain the current reliable verification gate for this slice
 
 ## Next
 
@@ -148,7 +163,7 @@ See also: [`docs/PARITY_ROADMAP.md`](./PARITY_ROADMAP.md) for the prioritized pa
 - [ ] validate managed `client_files` correctness and throughput as PTR work expands
 - [ ] address bottlenecks discovered during end-to-end client/daemon testing
 
-### Phase 7: PTR Integration
+### Phase 7: PTR Integration (Sync-in logic for definitions/content now completed)
 
 - [x] define PTR service configuration defaults, shared read-only anonymous auth, and local daemon status/state requirements
 - [x] add daemon-side PTR service/mapping-table/state foundations and a pollable status endpoint
@@ -156,17 +171,20 @@ See also: [`docs/PARITY_ROADMAP.md`](./PARITY_ROADMAP.md) for the prioritized pa
 - [x] add a daemon-owned background trigger/lifecycle slice for anonymous PTR sync
 - [x] implement anonymous PTR `/update` download and local repository-updates registration
 - [x] add daemon-side busy-response retry/backoff handling and batch the local downloaded-update finalization hot path
-- [ ] process downloaded PTR definitions/content into local mappings and tag/query state
-- [ ] make imported files eligible for PTR-driven tag/update retrieval
+- [x] process downloaded PTR definitions/content into local mappings and tag/query state
+- [x] prove PTR-applied mappings remain queryable through the daemon search path after restart/reopen
 - [ ] verify end-to-end value from local import through PTR sync and tag acquisition
-- [ ] add PTR pending/upload state foundations for eventual sync-out parity
-- [ ] implement PTR sync-out/upload for locally pending mappings and petitions
+- [x] add PTR pending-add staging and commit foundations for eventual sync-out parity
+- [ ] broaden PTR sync-out/upload beyond the current pending-add commit slice into fuller mapping/petition parity
+- [x] add real-time pending-count visibility to the daemon and thin client
 
 ### Phase 8: Read/Query Expansion After Import + PTR
 
 - [ ] continue `GET /get_files/file_metadata` toward broader parity for detailed URLs, exact thumbnail sizing, and remaining edge-case payload semantics
-- [ ] begin DB-backed search and tagging read paths on top of imported and PTR-synced data
-- [ ] add daemon-side search/query endpoints that can drive a real Hydrus-like search page
+- [x] begin DB-backed tag-search read paths on top of imported and PTR-synced data
+- [x] add a first daemon-side local tag-search endpoint for AND-tag browse over local files plus current mappings
+- [x] wire the desktop search bar to the daemon-backed tag-search slice for explicit/exact tag queries without applying local fallback for unsupported non-tag/system filtering
+- [x] broaden daemon-side search/query into Hydrus-like search terms, system predicates, and server-side sorting that can drive a real search page
 - [ ] add daemon-side tag mutation and pending-state APIs as a prerequisite for PTR sync-out and UI parity
 - [ ] refine service/media-result behavior for common client workflows
 
@@ -186,6 +204,39 @@ See also: [`docs/PARITY_ROADMAP.md`](./PARITY_ROADMAP.md) for the prioritized pa
 - LAN support needs deliberate auth/security controls as the daemon surface grows
 
 ## Milestone Log
+
+### 2026-04-28 — Milestone: search slice expansion, pending-count visibility, and bootstrap verification
+
+- verified fresh hydrusd bootstrap end-to-end against a real fresh DB directory
+- expanded daemon-side search to support `system:` predicates (`size`, `width`, `height`, `favorite`, `resolution`) and server-side sort modes
+- wired the Fyne search grid to use daemon-backed predicates (`size`, `width`, `height`, `favorite`, `resolution`) and sorting; unsupported terms now leave the daemon-backed result set unchanged instead of applying UI-local fallback filtering
+- added end-to-end PTR pending-state visibility including DB counts, manager/store/API, daemonclient, and Fyne UI labels
+- added persisted verified-current-mapping PTR status reporting across the DB, API, daemonclient, and Fyne desktop status text
+- updated the live daemon bootstrap auth principal to include required permissions for local PTR pending count, staging, and commit flows
+- verified with live smoke testing and `make check-desktop`
+
+### 2026-05-03 — Milestone: PTR continuity, bundle semantics, and observability hardening
+
+- added bundle-local PTR opt-in persistence through a simple `ptrsync` marker beside `client.db`, so a user-triggered sync survives daemon restart on the same Hydrus bundle
+- changed transient PTR `/update` transport failures such as EOF / connection reset to persist `phase=retrying` and auto-resume instead of falling back to terminal idle failure
+- taught the existing-DB continuation path to reuse SQLite-stored repository update bodies before attempting `/update` again, so partial bundles with large backlogs no longer act like fresh queues after a retry or restart
+- matched upstream Hydrus repository compatibility for invalid definition tags that clean to empty by mapping those repository-local tag ids to the sentinel `invalid repository tag` instead of aborting the whole definitions update
+- clarified PTR status semantics to separate:
+  - local backlog completion (`is_complete`)
+  - future-remote-schedule freshness (`is_up_to_date`)
+  - pending download bundles
+  - pending process bundles
+  - effective end-to-end progress pacing versus raw network fetch timing
+- updated the desktop PTR popup to present repository update **bundles** and done/total bundle progress rather than implying ordinary imported media-file downloads
+- refreshed README/docs to match the live API surface, current PTR behavior, and added a machine-readable `openapi.json` for Swagger/OpenAPI tooling
+
+### 2026-04-26 — Milestone: still-image watcher navigation and highlight verification
+
+- confirmed the in-app still-image watcher remains a resizable Fyne window rather than a fullscreen/OS handoff
+- verified watcher navigation now follows gallery order through arrow keys and mouse wheel while preserving selected-tile highlight state in the grid
+- fixed a missing `//go:build fyne` guard on `internal/desktop/fyneapp/watcher.go`
+- verified with `go test -tags fyne ./internal/desktop/fyneapp -count=1` and `make check-desktop`
+
 
 ### 2026-04-16 — Milestone 1: headless bootstrap
 
@@ -390,3 +441,27 @@ See also: [`docs/PARITY_ROADMAP.md`](./PARITY_ROADMAP.md) for the prioritized pa
 - fixed the desktop PTR polling loop so it no longer stops after about one minute and require a manual refresh to continue updating
 - cleaned up the first Fyne shell layout so the main split panes resize more sanely and the selected-preview empty state no longer renders vertical placeholder text
 - verified with targeted PTR/backend package tests, targeted `hydrusdb` PTR tests, Fyne tests, and rebuilt daemon/desktop binaries
+
+### 2026-04-26 — Milestone 25: current branch checkpoint for near-parity search + PTR
+
+- the live branch now applies PTR definitions and mappings into local tag/query state rather than stopping at downloaded update blobs
+- the live branch now exposes `GET /v1/library/search` and matching daemonclient support for AND-tag local-file search over existing browse + mapping tables, so PTR-applied site tags have a daemon search surface
+- the app test suite now includes `TestRun_PersistsCompletePTRSyncAcrossAppRestart`; the next direct hardening step after this checkpoint was a restart/reopen assertion that PTR-applied mappings stay query-visible
+
+### 2026-04-26 — Milestone 26: desktop daemon-backed tag search + PTR reopen searchability proof
+
+- wired the Fyne search bar/grid to the daemon-backed local-library search path for explicit/exact tag queries while keeping loaded-grid fallback for non-tag text and `system:` predicates
+- added direct `hydrusdb` coverage for AND-tag paging semantics in the new local-library search path
+- added direct PTR reopen coverage that applies PTR mappings, completes sync, reopens the bundle, and proves the PTR-applied tag remains searchable through `SearchByTags`
+- verified with targeted `hydrusdb`, `httpapi`, `daemonclient`, `app`, and tagged Fyne desktop tests, plus `make check-desktop`
+
+### 2026-05-02 — Milestone 27: PTR SQLite throughput cleanup and preview placeholder fix
+
+- traced the PTR slowdown after raw update-body storage moved into SQLite and found the main new stall on the flush/apply side rather than the raw network fetch side
+- fixed the worst per-block regression by making the processable-update query return only `processed = 0` rows, so each 25-update flush no longer drags already-processed SQLite BLOB rows back through the apply pass
+- removed the redundant per-small-chunk PTR download metrics write transaction inside the fetch loop and left the flush-driven metrics/status updates in place
+- trimmed unnecessary in-memory body copies in the PTR fetch/flush path while preserving the same daemon-owned retry/apply behavior
+- cautiously bumped PTR update fetch concurrency from `2` to `3` after the DB-side hot path cleanup, keeping the public-PTR safety posture well below the earlier `8`-goroutine experiment
+- fixed the Fyne selected-preview empty-state layout so the top-right placeholder/help text stays horizontal instead of collapsing into a vertical column in a narrow centered label container
+- confirmed that SQLite `*.db-wal` and `*.db-shm` files are now expected runtime sidecars for writable bundle opens because `hydrusd` enables WAL on the writable main and attached DBs; they are not extra logical Hydrus databases
+- verified with targeted `internal/db/hydrusdb`, `internal/ptrsync`, `internal/app`, and tagged Fyne desktop tests, plus rebuilt daemon/desktop binaries and manual QA that showed a seeded `600 processed / 25 unprocessed` PTR dataset now returns only the 25 remaining processable rows
