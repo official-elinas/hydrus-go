@@ -224,10 +224,7 @@ func TestBundleServices(t *testing.T) {
 
 func TestBundleByName_PrefersExactMatchBeforeCaseInsensitiveFallback(t *testing.T) {
 	dir, fixture := createTestBundle(t)
-	mainDB, err := sql.Open("sqlite", filepath.Join(dir, "client.db"))
-	if err != nil {
-		t.Fatalf("sql.Open() error = %v", err)
-	}
+	mainDB := openSQLiteForTest(t, filepath.Join(dir, "client.db"))
 	defer mainDB.Close()
 
 	exactCaseKey := []byte("client-api-exact")
@@ -2481,6 +2478,11 @@ func openSQLiteForTest(t *testing.T, path string) *sql.DB {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatalf("sql.Open(%q) error = %v", path, err)
+	}
+
+	if _, err := db.Exec(`PRAGMA synchronous = OFF;`); err != nil {
+		_ = db.Close()
+		t.Fatalf("Exec(PRAGMA synchronous = OFF) error = %v", err)
 	}
 
 	return db
