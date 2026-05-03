@@ -1,6 +1,6 @@
 # hydrus-go parity roadmap
 
-Last updated: 2026-04-21
+Last updated: 2026-04-28
 
 ## Goal
 
@@ -21,91 +21,71 @@ The following are now confirmed working or intentionally present:
 - DB-backed `GET /get_files/file_metadata` with a meaningful first full/default slice
 - serialized writable DB transactions via `BEGIN IMMEDIATE`
 - managed `client_files` placement for daemon-owned imports
-- public thin-client recent browse, content, thumbnail, import, and trash APIs
-- Fyne desktop prototype for connect/browse/import/trash/selected-image preview
-- desktop recent-page navigation using daemon paging
-- daemon-owned anonymous PTR status and manual sync trigger
-- real anonymous PTR snapshot fetch and `/update` download with local `repository updates` registration
+- public thin-client recent browse, search, content, thumbnail, import, trash, and tag-mutation APIs
+- Fyne desktop prototype for connect/browse/search/import/trash/selected-image preview
+- desktop search and sorting using daemon-backed predicates and sort modes
+- daemon-owned anonymous PTR status, manual sync trigger, and definition/content application
+- real anonymous PTR sync-out/upload flow for pending mappings, with real-time pending-count visibility
 
 The following are explicitly **not** at parity yet:
 
-- downloaded PTR definitions/content are not applied into local mappings/query-visible tag state
-- no daemon-side search engine comparable to Hydrus `search_files`
-- no daemon-side tag mutation / pending / petition / commit flow
-- no PTR sync-out/upload flow for pending mappings
-- desktop still lacks Hydrus-style search/tagging/review-services workflows
+- no complex daemon-side search logic (unions, negations, complex groupings)
+- no broader repository mutation flows (petitions, review-services, advanced metadata)
+- desktop still lacks downloader/subscription/parsing workflows
+- no native in-app video playback
 
 ## Highest-priority parity gaps
 
-### 1. PTR definition/content application
+### 1. PTR definition/content application (DONE)
+
+- the daemon now parses downloaded definitions/content updates and applies them into the local DB
+- imported/local files correctly acquire PTR-derived tags during metadata and search reads
+- sync status accurately reflects applied vs registered update counts
+
+### 2. Complex search/query expansion
 
 Current state:
 
-- PTR status, metadata fetch, and update-file download exist
-- update blobs are verified, stored extensionlessly, and registered in `repository updates`
+- there is a daemon-side search foundation supporting AND-tags, `system:` predicates (`size`, `width`, `height`, `favorite`, `resolution`), and server-side sorting
 
 Missing parity:
 
-- parse downloaded definitions/content updates
-- write parsed mappings into the local DB in a Hydrus-compatible shape
-- make imported/local files benefit from downloaded PTR tags during metadata and future search reads
-- track what has been applied vs merely downloaded
+- complex union and negation logic in queries
+- broader Hydrus-style search terms and groupings
+- service-aware tag filters beyond the current current-mapping slice
 
-Why this is first:
-
-- the current PTR slice proves transport, but not value
-- until downloaded updates affect local tag/query state, PTR sync does not change the user's real browse/search experience
-
-### 2. Search/query foundation
-
-Current state:
-
-- there is recent-file browsing, but no real query engine
-
-Missing parity:
-
-- daemon-side equivalent of Hydrus file search primitives
-- service-aware tag filters
-- inbox/archive/local/trash constraints in queries
-- basic sort and pagination semantics for search-driven browsing
-
-Why this is essential:
+Why this is next:
 
 - Hydrus is fundamentally a local search/tag workstation
-- UI parity is mostly blocked until the daemon can answer real search questions
+- full UI parity is blocked until the daemon can answer more complex search questions
 
-### 3. Tag mutation and pending repository flow
+### 3. Broadened tag mutation and repository workflows
 
 Current state:
 
-- metadata can be read, but tags cannot yet be changed through daemon APIs
+- tag mutation, pending staging, and commit upload exist and are wired end-to-end
 
 Missing parity:
 
-- local tag add/delete flows
-- PTR pending mapping creation
 - petition flow for repository-backed removals
-- pending-count and review state endpoints
-- commit/forget pending operations
+- review-services pages for managing broader repository state
+- advanced metadata mutation (notes, ratings, etc.) beyond current read slices
 
 Why this matters:
 
-- PTR sync-out cannot exist without pending-tag state
-- a Hydrus-like UI needs tag actions long before full workstation polish
+- true PTR parity is broad; the current slice covers the most frequent add-mapping workflow
+- workstation users need a full set of tag actions
 
 ### 4. PTR sync-out/upload parity
 
 Current state:
 
-- daemon only supports anonymous read/sync-in behavior
+- daemon supports anonymous read/sync-in, pending-add staging, commit upload, and real-time pending-count visibility
 
 Missing parity:
 
-- discover which local files and mappings are eligible for PTR upload
-- serialize pending mappings into Hydrus-compatible upload payloads
-- upload pending content/metadata to the PTR
-- reflect out-of-sync / upload-blocked conditions in daemon status
-- surface pending counts and last upload results to clients
+- discover which local files and mappings are eligible for PTR upload beyond the current manual pending-add workflow
+- broader sync-out parity for mapping/petition updates
 
 Why this matters:
 
@@ -152,16 +132,14 @@ These are ranked by how much real Hydrus usage they unlock.
 
 ## Recommended implementation order
 
-1. **Apply downloaded PTR definitions/content into local mappings/tag state**
-   - unlocks actual value from the current PTR transport work
-2. **Add a first daemon-side search API foundation**
-   - enough for tag + file-domain querying and paged result IDs
-3. **Add daemon-side tag mutation + pending-state APIs**
-   - local tag actions and PTR-bound pending creation
-4. **Add PTR sync-out/upload flow**
-   - push pending mappings to the repository and expose progress/status
-5. **Move the desktop from recent-browse shell toward a real search workspace**
-   - only after the daemon can support it cleanly
+1. **Broaden daemon-side search logic**
+   - add support for union, negation, and complex groupings
+2. **Add repository petition flows**
+   - support for removing/petitioning tags through the PTR
+3. **Add native in-app video playback**
+   - resolve the biggest remaining media-viewer gap
+4. **Iterate on UI density and workstation workflows**
+   - moving the desktop closer to full Hydrus workstation parity
 
 ## Concrete module map for the next phase
 
@@ -212,7 +190,7 @@ This is the practical starting map for implementation, based on the current code
   - serialized `BEGIN IMMEDIATE` write gate for all future mutation flows
   - must remain the only mutation path for tag writes, pending writes, petitions, and sync-out bookkeeping
 - `internal/api/httpapi/router.go`
-  - currently confirms there are no public mutation endpoints for tags, pending counts, petitions, or commits
+  - currently confirms there are public mutation endpoints for `add_tags`, `pending_counts`, and `commit_pending`, but broader petition and review-services management are still missing
 
 ### File lifecycle parity follow-ups
 
@@ -236,10 +214,10 @@ The current router confirms the daemon exposes:
 
 It does **not** yet expose public endpoints for:
 
-- search / `search_files`
-- add/delete/petition tags
-- pending counts / review-services-style repository state
-- commit pending / forget pending
+- complex search semantics (unions, negations, groupings) and `search_files` parity
+- delete/petition tags
+- review-services-style repository management pages (pending counts/commit exists; broader management missing)
+- forget pending
 - archive / inbox / undelete / permanent delete
 - file relationships
 
@@ -295,37 +273,36 @@ Performance work should be measured, not guessed.
 
 The next milestone should be considered successful when all of the following are true:
 
-- downloaded PTR update content is applied into local tag/mapping state
-- imported files can acquire PTR-derived tags after sync
-- the daemon exposes a first real search/query API
-- the desktop can browse results through search rather than recent-only pagination
-- the roadmap for pending-tag creation and PTR sync-out is reduced from planning to concrete implementation slices
+- the daemon supports complex search expansion (unions, negations, groupings)
+- the daemon supports the full set of `system:` predicates and server-side sort modes
+- broader repository petition and review-services management land in the daemon and desktop
+- the roadmap for workstation workflow parity (archive/inbox/undelete) is reduced to concrete implementation slices
 
-## First concrete coding slice to execute next
+## Next meaningful coding slice
 
-The next implementation pass should stay narrow and focus on **PTR apply foundation**, not full sync-out yet.
+The next implementation pass should focus on **Complex Search Expansion** and **Broader Repository Management**.
 
 ### Atomic deliverables
 
-1. add durable bookkeeping for which downloaded PTR update files have been applied vs merely registered
-2. add a parser/loader path for downloaded PTR definitions/content files
-3. write parsed definitions/content into local tag/mapping tables through `WithImmediateTx(...)`
-4. update PTR status counters so `processed_definition_count` and `processed_content_count` reflect real applied work
-5. add tests proving one imported/local file can acquire PTR-derived tag visibility after apply
+1. add support for union, negation, and complex groupings in daemon search
+2. add support for remaining `system:` predicates (`local`, `trashed`, `deleted`) and name-based sorting
+3. add repository petition staging and commit foundations
+4. add basic review-services pages for managing broader repository state
+5. add tests proving complex search queries return correct results across local and PTR tags
 
 ### Files most likely to change first
 
-- `internal/ptrsync/manager.go`
+- `internal/db/hydrusdb/browse.go`
+- `internal/api/httpapi/thin_client.go`
 - `internal/db/hydrusdb/ptrsync.go`
 - `internal/core/ptrsync/types.go`
+- `internal/api/httpapi/ptr_pending.go`
 - `internal/db/hydrusdb/metadata_tags.go`
-- `internal/db/hydrusdb/ptrsync_test.go`
-- `internal/ptrsync/manager_test.go`
 
 ### Explicit non-goals for that slice
 
 - no desktop redesign
-- no public search endpoint yet
+- no replacement of the existing `/v1/library/search` endpoint shape yet
 - no PTR sync-out/upload yet
 - no broad tag mutation API yet
 

@@ -109,13 +109,13 @@ The current daemon startup flow for bundle-backed mode is:
 
 1. load config and runtime overrides
 2. inspect `HYDRUS_GO_DB_DIR`
-3. if fresh bootstrap is enabled and the target directory is missing, create it
+3. if bootstrap is not explicitly disabled and no DB dir is configured, default the target to `./db`; if the target directory is missing, create it
 4. classify the bundle state as one of:
    - `ready`
    - `empty`
    - `partial`
    - `non-empty without bundle`
-5. only the `empty` state is eligible for fresh bootstrap
+5. the `empty` state is eligible for fresh bootstrap, and a missing target is created before that inspection
 6. if bootstrap runs, seed a native Go empty bundle with the canonical DB files,
    `client.temp.db`, default managed-storage metadata, and the current built-in
    service seed required by hydrus-go
