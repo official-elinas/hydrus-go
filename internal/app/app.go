@@ -144,6 +144,8 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 	permissions := []httpapi.Permission{
 		httpapi.PermissionSearchAndFetchFiles,
 		httpapi.PermissionManageDatabase,
+		httpapi.PermissionEditFileTags,
+		httpapi.PermissionCommitPending,
 	}
 	if importStore != nil || trashStore != nil {
 		permissions = append(permissions, httpapi.PermissionImportAndDeleteFiles)

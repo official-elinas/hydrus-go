@@ -2,10 +2,14 @@ package app
 
 import (
 	"bytes"
+	"compress/zlib"
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -19,9 +23,11 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/official-elinas/hydrus-go/internal/api/httpapi"
 	"github.com/official-elinas/hydrus-go/internal/bootstrap"
 	"github.com/official-elinas/hydrus-go/internal/config"
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
@@ -198,6 +204,210 @@ func TestRun_ShutsDownActivePTRTriggerWithoutStuckLease(t *testing.T) {
 	}
 }
 
+func TestRun_PersistsCompletePTRSyncAcrossAppRestart(t *testing.T) {
+	dbDir := createThinClientBundle(t)
+
+	var (
+		sessionKeyRequests atomic.Int32
+		accountRequests    atomic.Int32
+		optionsRequests    atomic.Int32
+		tagFilterRequests  atomic.Int32
+		metadataRequests   atomic.Int32
+		updateRequests     atomic.Int32
+	)
+
+	updateBody := hydrusNetworkBytes(t, []any{hydrusSerialisableTypeDefinitionsUpdate, 1, []any{}})
+	updateHash := sha256Hex(updateBody)
+	nextUpdateDue := time.Now().Add(time.Hour).Unix()
+
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/session_key":
+			sessionKeyRequests.Add(1)
+			http.SetCookie(w, &http.Cookie{Name: "session_key", Value: "app-session", Path: "/"})
+			w.WriteHeader(http.StatusOK)
+		case "/account":
+			accountRequests.Add(1)
+			_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{
+				key: "account",
+				metaValue: metaJSON([]any{
+					strings.Repeat("aa", 32),
+					unsupportedSerialisable(102),
+					int64(1699990000),
+					nil,
+					serialisableDictionaryString(t,
+						hydrusDictEntry{key: "banned_info", metaValue: metaJSON(nil)},
+						hydrusDictEntry{key: "bandwidth_tracker", metaValue: metaHydrus(unsupportedSerialisable(39))},
+						hydrusDictEntry{key: "message", metaValue: metaJSON("shared read-only")},
+						hydrusDictEntry{key: "message_created", metaValue: metaJSON(int64(1699990100))},
+					),
+				}),
+			}))
+		case "/options":
+			optionsRequests.Add(1)
+			_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{
+				key:       "service_options",
+				metaValue: metaHydrus(serialisableDictionary(hydrusDictEntry{key: "update_period", metaValue: metaJSON(int64(3600))}, hydrusDictEntry{key: "nullification_period", metaValue: metaJSON(int64(86400))})),
+			}))
+		case "/tag_filter":
+			tagFilterRequests.Add(1)
+			_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{
+				key:       "tag_filter",
+				metaValue: metaHydrus(serialisableTagFilter(map[string]int{":": 1})),
+			}))
+		case "/metadata":
+			metadataRequests.Add(1)
+			_, _ = w.Write(hydrusArgsBytes(t, hydrusDictEntry{
+				key:       "metadata_slice",
+				metaValue: metaHydrus(serialisableMetadata(nextUpdateDue, metadataRow{updateIndex: 0, updateHashes: []string{updateHash}, begin: 10, end: 20})),
+			}))
+		case "/update":
+			updateRequests.Add(1)
+			if got := r.URL.Query().Get("update_hash"); got != updateHash {
+				t.Fatalf("update_hash = %q, want %q", got, updateHash)
+			}
+			_, _ = w.Write(updateBody)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ptrConfig := testAppPTRConfigFromServer(t, server.URL, coreptrsync.DefaultSharedAccessKey)
+	ptrConfig.Enabled = true
+
+	cfg := config.Config{
+		ListenAddr:               "127.0.0.1:0",
+		DBDir:                    dbDir,
+		PTR:                      ptrConfig,
+		AccessKey:                strings.Repeat("a", 64),
+		AccessName:               "test-client",
+		LogLevel:                 "error",
+		ShutdownTimeout:          5 * time.Second,
+		AllowNonLocalConnections: false,
+		EnableCORS:               false,
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	app1, err := New(context.Background(), cfg, logger)
+	if err != nil {
+		t.Fatalf("New(first) error = %v", err)
+	}
+
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	errCh1 := make(chan error, 1)
+	go func() {
+		errCh1 <- app1.Run(ctx1)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	triggerReq := httptest.NewRequest(http.MethodPost, "/service/ptr/sync", nil)
+	triggerReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	triggerRR := httptest.NewRecorder()
+
+	app1.server.Handler.ServeHTTP(triggerRR, triggerReq)
+
+	if triggerRR.Code != http.StatusOK {
+		t.Fatalf("ptr trigger status = %d, want %d", triggerRR.Code, http.StatusOK)
+	}
+
+	firstStatus := waitForAppPTRStatus(t, app1.server.Handler, cfg.AccessKey, func(status coreptrsync.Status) bool {
+		return status.Phase == coreptrsync.PhaseIdle &&
+			status.IsComplete &&
+			!status.IsRunning &&
+			status.MetadataSlice == 1 &&
+			status.DownloadedUpdateCount == 1 &&
+			status.ProcessedDefinitionCount == 1 &&
+			status.ProcessedContentCount == 0
+	})
+
+	if firstStatus.LastError != "" {
+		t.Fatalf("firstStatus.LastError = %q, want empty", firstStatus.LastError)
+	}
+
+	cancel1()
+	if err := waitForAppRunStop(errCh1); err != nil {
+		t.Fatal(err)
+	}
+
+	app2, err := New(context.Background(), cfg, logger)
+	if err != nil {
+		t.Fatalf("New(second) error = %v", err)
+	}
+
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	errCh2 := make(chan error, 1)
+	go func() {
+		errCh2 <- app2.Run(ctx2)
+	}()
+
+	time.Sleep(100 * time.Millisecond)
+
+	secondStatus := mustAppPTRStatus(t, app2.server.Handler, cfg.AccessKey)
+	if secondStatus.Phase != coreptrsync.PhaseIdle {
+		t.Fatalf("secondStatus.Phase = %q, want %q", secondStatus.Phase, coreptrsync.PhaseIdle)
+	}
+
+	if !secondStatus.IsComplete {
+		t.Fatal("secondStatus.IsComplete = false, want true")
+	}
+
+	if secondStatus.IsRunning {
+		t.Fatal("secondStatus.IsRunning = true, want false")
+	}
+
+	if secondStatus.MetadataSlice != 1 {
+		t.Fatalf("secondStatus.MetadataSlice = %d, want 1", secondStatus.MetadataSlice)
+	}
+
+	if secondStatus.DownloadedUpdateCount != 1 {
+		t.Fatalf("secondStatus.DownloadedUpdateCount = %d, want 1", secondStatus.DownloadedUpdateCount)
+	}
+
+	if secondStatus.ProcessedDefinitionCount != 1 {
+		t.Fatalf("secondStatus.ProcessedDefinitionCount = %d, want 1", secondStatus.ProcessedDefinitionCount)
+	}
+
+	if secondStatus.ProcessedContentCount != 0 {
+		t.Fatalf("secondStatus.ProcessedContentCount = %d, want 0", secondStatus.ProcessedContentCount)
+	}
+
+	if secondStatus.LastError != "" {
+		t.Fatalf("secondStatus.LastError = %q, want empty", secondStatus.LastError)
+	}
+
+	cancel2()
+	if err := waitForAppRunStop(errCh2); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := sessionKeyRequests.Load(); got != 1 {
+		t.Fatalf("session_key requests = %d, want 1", got)
+	}
+
+	if got := accountRequests.Load(); got != 1 {
+		t.Fatalf("account requests = %d, want 1", got)
+	}
+
+	if got := optionsRequests.Load(); got != 1 {
+		t.Fatalf("options requests = %d, want 1", got)
+	}
+
+	if got := tagFilterRequests.Load(); got != 1 {
+		t.Fatalf("tag_filter requests = %d, want 1", got)
+	}
+
+	if got := metadataRequests.Load(); got != 1 {
+		t.Fatalf("metadata requests = %d, want 1", got)
+	}
+
+	if got := updateRequests.Load(); got != 1 {
+		t.Fatalf("update requests = %d, want 1", got)
+	}
+}
+
 func TestNew_OpensConfiguredDBBundle(t *testing.T) {
 	dbDir := t.TempDir()
 	createEmptySQLiteDB(t, filepath.Join(dbDir, "client.db"))
@@ -354,6 +564,96 @@ func TestNew_PTRStatusIsDisabledWithoutDBWhenSyncDisabled(t *testing.T) {
 	}
 }
 
+func TestNew_GrantsPTRMutationPermissionsThroughBootstrapAuth(t *testing.T) {
+	cfg := config.Config{
+		ListenAddr:               "127.0.0.1:0",
+		AccessKey:                strings.Repeat("a", 64),
+		AccessName:               "test-client",
+		LogLevel:                 "error",
+		ShutdownTimeout:          time.Second,
+		AllowNonLocalConnections: false,
+		EnableCORS:               false,
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	application, err := New(context.Background(), cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer application.closeResources()
+
+	verifyReq := httptest.NewRequest(http.MethodGet, "/verify_access_key", nil)
+	verifyReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	verifyRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(verifyRR, verifyReq)
+
+	if verifyRR.Code != http.StatusOK {
+		t.Fatalf("verify_access_key status = %d, want %d", verifyRR.Code, http.StatusOK)
+	}
+
+	var verifyPayload struct {
+		BasicPermissions []httpapi.Permission `json:"basic_permissions"`
+	}
+	decodeAppJSON(t, verifyRR.Body.Bytes(), &verifyPayload)
+
+	if !containsAppPermission(verifyPayload.BasicPermissions, httpapi.PermissionEditFileTags) {
+		t.Fatalf("basic_permissions = %v, want %d", verifyPayload.BasicPermissions, httpapi.PermissionEditFileTags)
+	}
+
+	if !containsAppPermission(verifyPayload.BasicPermissions, httpapi.PermissionCommitPending) {
+		t.Fatalf("basic_permissions = %v, want %d", verifyPayload.BasicPermissions, httpapi.PermissionCommitPending)
+	}
+
+	tests := []struct {
+		name       string
+		method     string
+		path       string
+		body       string
+		wantStatus int
+	}{
+		{
+			name:       "pending counts falls through auth",
+			method:     http.MethodGet,
+			path:       "/manage_services/pending_counts",
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name:       "commit pending falls through auth",
+			method:     http.MethodPost,
+			path:       "/manage_services/commit_pending",
+			body:       `{"service_key":"` + strings.Repeat("b", 64) + `"}`,
+			wantStatus: http.StatusServiceUnavailable,
+		},
+		{
+			name:       "add tags falls through auth",
+			method:     http.MethodPost,
+			path:       "/add_tags/add_tags",
+			body:       `{"hash":"` + strings.Repeat("c", 64) + `","service_keys_to_actions_to_tags":{"` + strings.Repeat("d", 64) + `":{"2":["test tag"]}}}`,
+			wantStatus: http.StatusServiceUnavailable,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, strings.NewReader(tt.body))
+			req.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+			rr := httptest.NewRecorder()
+
+			application.server.Handler.ServeHTTP(rr, req)
+
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("%s status = %d, want %d", tt.path, rr.Code, tt.wantStatus)
+			}
+
+			if rr.Code == http.StatusForbidden {
+				t.Fatalf("%s unexpectedly returned 403 forbidden", tt.path)
+			}
+		})
+	}
+}
+
 func TestNew_PTRStatusIgnoresPersistedFoundationWhenSyncDisabled(t *testing.T) {
 	dbDir := createThinClientBundle(t)
 	enabledPTR := coreptrsync.DefaultConfig()
@@ -417,10 +717,7 @@ func TestNew_PTRStatusIgnoresPersistedFoundationWhenSyncDisabled(t *testing.T) {
 
 func TestNew_PTRNameCollisionDoesNotAbortStartup(t *testing.T) {
 	dbDir := createThinClientBundle(t)
-	mainDB, err := sql.Open("sqlite", filepath.Join(dbDir, "client.db"))
-	if err != nil {
-		t.Fatalf("sql.Open(main) error = %v", err)
-	}
+	mainDB := openSQLiteForAppTest(t, filepath.Join(dbDir, "client.db"))
 	defer mainDB.Close()
 
 	mustExecApp(
@@ -849,6 +1146,87 @@ func TestApp_NativeBootstrapImportRoundTripEndpoints(t *testing.T) {
 	runImportRoundTripEndpointsTest(t, cfg, sourcePath, true)
 }
 
+func TestApp_DBBackedImportURLRoundTrip(t *testing.T) {
+	dbDir := createThinClientBundle(t)
+	sourcePath := writeAppPNGSourceFile(t, t.TempDir(), "app-url-import.png", 16, 24)
+	sourceBytes, err := os.ReadFile(sourcePath)
+	if err != nil {
+		t.Fatalf("ReadFile(sourcePath) error = %v", err)
+	}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/redirect":
+			http.Redirect(w, r, "/image.png", http.StatusFound)
+		case "/image.png":
+			w.Header().Set("Content-Type", "image/png")
+			_, _ = w.Write(sourceBytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	cfg := config.Config{
+		ListenAddr:               "127.0.0.1:0",
+		DBDir:                    dbDir,
+		AccessKey:                strings.Repeat("c", 64),
+		AccessName:               "test-client",
+		LogLevel:                 "error",
+		ShutdownTimeout:          time.Second,
+		AllowNonLocalConnections: false,
+		EnableCORS:               false,
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	application, err := New(context.Background(), cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer application.closeResources()
+
+	requestBody := fmt.Sprintf(`{"url":%q}`, server.URL+"/redirect")
+	importReq := httptest.NewRequest(http.MethodPost, "/v1/import/url", strings.NewReader(requestBody))
+	importReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	importRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(importRR, importReq)
+
+	if importRR.Code != http.StatusOK {
+		t.Fatalf("import status = %d, want %d", importRR.Code, http.StatusOK)
+	}
+
+	var importPayload map[string]any
+	decodeAppJSON(t, importRR.Body.Bytes(), &importPayload)
+	fileID := int64(importPayload["file_id"].(float64))
+
+	metadataReq := httptest.NewRequest(
+		http.MethodGet,
+		"/get_files/file_metadata?file_id="+strconv.FormatInt(fileID, 10)+"&detailed_url_information=true",
+		nil,
+	)
+	metadataReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	metadataRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(metadataRR, metadataReq)
+
+	if metadataRR.Code != http.StatusOK {
+		t.Fatalf("metadata status = %d, want %d", metadataRR.Code, http.StatusOK)
+	}
+
+	var metadataPayload map[string]any
+	decodeAppJSON(t, metadataRR.Body.Bytes(), &metadataPayload)
+	metadataRows := metadataPayload["metadata"].([]any)
+	metadataRow := metadataRows[0].(map[string]any)
+	knownURLs := metadataRow["known_urls"].([]any)
+	if len(knownURLs) != 2 {
+		t.Fatalf("len(known_urls) = %d, want 2", len(knownURLs))
+	}
+	if knownURLs[0] != server.URL+"/image.png" || knownURLs[1] != server.URL+"/redirect" {
+		t.Fatalf("known_urls = %v, want redirected and requested URLs", knownURLs)
+	}
+}
+
 func runImportRoundTripEndpointsTest(
 	t *testing.T,
 	cfg config.Config,
@@ -1044,7 +1422,7 @@ func runImportRoundTripEndpointsTest(
 		t.Fatalf("ReadFile(sourcePath) error = %v", err)
 	}
 
-	if string(contentRR.Body.Bytes()) != string(sourceBytes) {
+	if !bytes.Equal(contentRR.Body.Bytes(), sourceBytes) {
 		t.Fatal("content body does not match imported source bytes")
 	}
 
@@ -1108,15 +1486,28 @@ func runImportRoundTripEndpointsTest(
 func createEmptySQLiteDB(t *testing.T, path string) {
 	t.Helper()
 
-	db, err := sql.Open("sqlite", path)
-	if err != nil {
-		t.Fatalf("sql.Open(%q) error = %v", path, err)
-	}
+	db := openSQLiteForAppTest(t, path)
 	defer db.Close()
 
 	if _, err := db.Exec(`PRAGMA user_version = 0;`); err != nil {
 		t.Fatalf("Exec(PRAGMA user_version) error = %v", err)
 	}
+}
+
+func openSQLiteForAppTest(t *testing.T, path string) *sql.DB {
+	t.Helper()
+
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatalf("sql.Open(%q) error = %v", path, err)
+	}
+
+	if _, err := db.Exec(`PRAGMA synchronous = OFF;`); err != nil {
+		_ = db.Close()
+		t.Fatalf("Exec(PRAGMA synchronous = OFF) error = %v", err)
+	}
+
+	return db
 }
 
 func createThinClientBundle(t *testing.T) string {
@@ -1128,10 +1519,7 @@ func createThinClientBundle(t *testing.T) string {
 	cachesPath := filepath.Join(dir, "client.caches.db")
 	mappingsPath := filepath.Join(dir, "client.mappings.db")
 
-	mainDB, err := sql.Open("sqlite", mainPath)
-	if err != nil {
-		t.Fatalf("sql.Open(main) error = %v", err)
-	}
+	mainDB := openSQLiteForAppTest(t, mainPath)
 	defer mainDB.Close()
 
 	mustExecApp(t, mainDB, `
@@ -1195,10 +1583,7 @@ func createThinClientBundle(t *testing.T) string {
 		9, []byte("client api"), 18, "client api", "{}",
 	)
 
-	masterDB, err := sql.Open("sqlite", masterPath)
-	if err != nil {
-		t.Fatalf("sql.Open(master) error = %v", err)
-	}
+	masterDB := openSQLiteForAppTest(t, masterPath)
 	defer masterDB.Close()
 
 	mustExecApp(t, masterDB, `CREATE TABLE hashes (hash_id INTEGER PRIMARY KEY, hash BLOB UNIQUE);`)
@@ -1274,8 +1659,8 @@ func writeAppPNGSourceFile(
 	defer file.Close()
 
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
+	for y := range height {
+		for x := range width {
 			img.Set(x, y, color.RGBA{R: 100, G: 120, B: 140, A: 255})
 		}
 	}
@@ -1303,6 +1688,166 @@ func decodeAppJSON(t *testing.T, raw []byte, target any) {
 	}
 }
 
+func containsAppPermission(permissions []httpapi.Permission, want httpapi.Permission) bool {
+	for _, permission := range permissions {
+		if permission == want {
+			return true
+		}
+	}
+
+	return false
+}
+
+func waitForAppPTRStatus(
+	t *testing.T,
+	handler http.Handler,
+	accessKey string,
+	want func(coreptrsync.Status) bool,
+) coreptrsync.Status {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	var lastStatus coreptrsync.Status
+	for {
+		lastStatus = mustAppPTRStatus(t, handler, accessKey)
+		if want(lastStatus) {
+			return lastStatus
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for PTR status, last status = %+v", lastStatus)
+		}
+
+		time.Sleep(25 * time.Millisecond)
+	}
+}
+
+func mustAppPTRStatus(t *testing.T, handler http.Handler, accessKey string) coreptrsync.Status {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, "/service/ptr/status", nil)
+	req.Header.Set("Hydrus-Client-API-Access-Key", accessKey)
+	rr := httptest.NewRecorder()
+
+	handler.ServeHTTP(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("/service/ptr/status status = %d, want %d", rr.Code, http.StatusOK)
+	}
+
+	var payload struct {
+		PTR coreptrsync.Status `json:"ptr"`
+	}
+	decodeAppJSON(t, rr.Body.Bytes(), &payload)
+
+	return payload.PTR
+}
+
+func waitForAppRunStop(errCh <-chan error) error {
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			return fmt.Errorf("Run() error = %v, want context.Canceled", err)
+		}
+		return nil
+	case <-time.After(5 * time.Second):
+		return errors.New("timed out waiting for App.Run to stop")
+	}
+}
+
+type hydrusDictEntry struct {
+	key       string
+	metaValue any
+}
+
+type metadataRow struct {
+	updateIndex  int64
+	updateHashes []string
+	begin        int64
+	end          int64
+}
+
+func hydrusArgsBytes(t *testing.T, entries ...hydrusDictEntry) []byte {
+	t.Helper()
+	return hydrusNetworkBytes(t, serialisableDictionary(entries...))
+}
+
+func hydrusNetworkBytes(t *testing.T, serialisable any) []byte {
+	t.Helper()
+
+	payload, err := json.Marshal(serialisable)
+	if err != nil {
+		t.Fatalf("json.Marshal(serialisable) error = %v", err)
+	}
+
+	var compressed bytes.Buffer
+	writer := zlib.NewWriter(&compressed)
+	if _, err := writer.Write(payload); err != nil {
+		t.Fatalf("writer.Write() error = %v", err)
+	}
+
+	if err := writer.Close(); err != nil {
+		t.Fatalf("writer.Close() error = %v", err)
+	}
+
+	return compressed.Bytes()
+}
+
+func serialisableDictionary(entries ...hydrusDictEntry) any {
+	pairs := make([]any, 0, len(entries))
+	for _, entry := range entries {
+		pairs = append(pairs, []any{metaJSON(entry.key), entry.metaValue})
+	}
+
+	return []any{hydrusSerialisableTypeDictionary, 2, pairs}
+}
+
+func serialisableDictionaryString(t *testing.T, entries ...hydrusDictEntry) string {
+	t.Helper()
+
+	payload, err := json.Marshal(serialisableDictionary(entries...))
+	if err != nil {
+		t.Fatalf("json.Marshal(serialisableDictionary) error = %v", err)
+	}
+
+	return string(payload)
+}
+
+func serialisableTagFilter(rules map[string]int) any {
+	items := make([]any, 0, len(rules))
+	for key, rule := range rules {
+		items = append(items, []any{key, rule})
+	}
+
+	return []any{hydrusSerialisableTypeTagFilter, 1, items}
+}
+
+func serialisableMetadata(nextUpdateDue int64, rows ...metadataRow) any {
+	serialisableRows := make([]any, 0, len(rows))
+	for _, row := range rows {
+		serialisableRows = append(serialisableRows, []any{row.updateIndex, row.updateHashes, row.begin, row.end})
+	}
+
+	return []any{hydrusSerialisableTypeMetadata, 1, []any{serialisableRows, nextUpdateDue}}
+}
+
+func unsupportedSerialisable(serialisableType int) any {
+	return []any{serialisableType, 1, []any{}}
+}
+
+func metaJSON(value any) any {
+	return []any{hydrusMetaTypeJSONOK, value}
+}
+
+func metaHydrus(value any) any {
+	return []any{hydrusMetaTypeHydrusSerializable, value}
+}
+
+func sha256Hex(body []byte) string {
+	sum := sha256.Sum256(body)
+	return hex.EncodeToString(sum[:])
+}
+
 func testAppPTRConfigFromServer(t *testing.T, rawURL string, accessKey string) coreptrsync.Config {
 	t.Helper()
 
@@ -1324,6 +1869,16 @@ func testAppPTRConfigFromServer(t *testing.T, rawURL string, accessKey string) c
 		ServiceName: coreptrsync.DefaultServiceName,
 	}
 }
+
+const (
+	hydrusMetaTypeJSONOK             = 0
+	hydrusMetaTypeHydrusSerializable = 2
+
+	hydrusSerialisableTypeDictionary        = 21
+	hydrusSerialisableTypeDefinitionsUpdate = 36
+	hydrusSerialisableTypeMetadata          = 37
+	hydrusSerialisableTypeTagFilter         = 44
+)
 
 func newAppMultipartUploadRequest(t *testing.T, target string, sourcePath string) *http.Request {
 	t.Helper()
