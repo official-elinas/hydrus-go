@@ -90,6 +90,112 @@ func TestBundleListRecent(t *testing.T) {
 	}
 }
 
+func TestBundleSearchByTags(t *testing.T) {
+	dir, fixture := createTestBundle(t)
+
+	mainDB := openSQLiteForTest(t, filepath.Join(dir, "client.db"))
+	defer mainDB.Close()
+
+	mustExec(
+		t,
+		mainDB,
+		`INSERT INTO current_files_4 (hash_id, timestamp_ms) VALUES (?, ?)`,
+		2,
+		700127,
+	)
+
+	writeManagedThumbnailForTest(t, dir, fixture.hash1Hex, []byte("thumb-1"))
+	writeManagedThumbnailForTest(t, dir, fixture.hash2Hex, []byte("thumb-2"))
+
+	bundle, err := Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer func() {
+		if err := bundle.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	t.Run("supports paging over one matching tag", func(t *testing.T) {
+		page, err := bundle.SearchByTags(context.Background(), librarybrowse.SearchRequest{
+			Request: librarybrowse.Request{Offset: 0, Limit: 1},
+			Tags:    []string{"series:zeta"},
+		})
+		if err != nil {
+			t.Fatalf("SearchByTags(series:zeta) error = %v", err)
+		}
+
+		if !page.HasMore {
+			t.Fatal("page.HasMore = false, want true")
+		}
+
+		if len(page.Items) != 1 {
+			t.Fatalf("len(page.Items) = %d, want 1", len(page.Items))
+		}
+
+		if page.Items[0].FileID != 2 {
+			t.Fatalf("page.Items[0].FileID = %d, want 2", page.Items[0].FileID)
+		}
+
+		if !page.Items[0].HasThumbnail {
+			t.Fatal("page.Items[0].HasThumbnail = false, want true")
+		}
+
+		nextPage, err := bundle.SearchByTags(context.Background(), librarybrowse.SearchRequest{
+			Request: librarybrowse.Request{Offset: 1, Limit: 5},
+			Tags:    []string{"series:zeta"},
+		})
+		if err != nil {
+			t.Fatalf("SearchByTags(series:zeta, offset=1) error = %v", err)
+		}
+
+		if len(nextPage.Items) != 1 || nextPage.Items[0].FileID != 1 {
+			t.Fatalf("nextPage.Items = %+v, want only file_id 1", nextPage.Items)
+		}
+
+		if nextPage.HasMore {
+			t.Fatal("nextPage.HasMore = true, want false")
+		}
+	})
+
+	t.Run("requires all requested tags with AND semantics", func(t *testing.T) {
+		page, err := bundle.SearchByTags(context.Background(), librarybrowse.SearchRequest{
+			Request: librarybrowse.Request{Offset: 0, Limit: 10},
+			Tags:    []string{"character:bob", "series:zeta"},
+		})
+		if err != nil {
+			t.Fatalf("SearchByTags(AND) error = %v", err)
+		}
+
+		if len(page.Items) != 1 {
+			t.Fatalf("len(page.Items) = %d, want 1", len(page.Items))
+		}
+
+		if page.Items[0].FileID != 1 {
+			t.Fatalf("page.Items[0].FileID = %d, want 1", page.Items[0].FileID)
+		}
+	})
+
+	t.Run("returns an empty page when no requested tag exists", func(t *testing.T) {
+		page, err := bundle.SearchByTags(context.Background(), librarybrowse.SearchRequest{
+			Request: librarybrowse.Request{Offset: 0, Limit: 10},
+			Tags:    []string{"missing:tag"},
+		})
+		if err != nil {
+			t.Fatalf("SearchByTags(missing) error = %v", err)
+		}
+
+		if len(page.Items) != 0 {
+			t.Fatalf("page.Items = %+v, want empty slice", page.Items)
+		}
+
+		if page.HasMore {
+			t.Fatal("page.HasMore = true, want false")
+		}
+	})
+}
+
 func TestBundleResolveFileContent(t *testing.T) {
 	dir, fixture := createTestBundle(t)
 
@@ -430,6 +536,236 @@ func TestBundleTrashFile_RemovesFileFromRecentBrowse(t *testing.T) {
 	if second.RemovedFromRecent {
 		t.Fatal("second.RemovedFromRecent = true, want false for already trashed file")
 	}
+}
+
+func TestBundleSearchByTagsSortAndPredicates(t *testing.T) {
+	dir, fixture := createTestBundle(t)
+
+	mainDB := openSQLiteForTest(t, filepath.Join(dir, "client.db"))
+	defer mainDB.Close()
+
+	mustExec(
+		t,
+		mainDB,
+		`INSERT INTO current_files_4 (hash_id, timestamp_ms) VALUES (?, ?)`,
+		2,
+		700127,
+	)
+
+	writeManagedThumbnailForTest(t, dir, fixture.hash1Hex, []byte("thumb-1"))
+	writeManagedThumbnailForTest(t, dir, fixture.hash2Hex, []byte("thumb-2"))
+
+	bundle, err := Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer func() {
+		if err := bundle.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+	}()
+
+	t.Run("sort by size desc returns larger file first", func(t *testing.T) {
+		page, err := bundle.SearchByTags(context.Background(), librarybrowse.SearchRequest{
+			Request: librarybrowse.Request{Offset: 0, Limit: 10},
+			SortBy:  librarybrowse.SortBySizeDesc,
+		})
+		if err != nil {
+			t.Fatalf("SearchByTags(sort=size_desc) error = %v", err)
+		}
+
+		if len(page.Items) != 2 {
+			t.Fatalf("len(page.Items) = %d, want 2", len(page.Items))
+		}
+
+		if page.Items[0].FileID != 2 {
+			t.Fatalf("page.Items[0].FileID = %d, want 2 (size=222)", page.Items[0].FileID)
+		}
+
+		if page.Items[1].FileID != 1 {
+			t.Fatalf("page.Items[1].FileID = %d, want 1 (size=111)", page.Items[1].FileID)
+		}
+	})
+
+	t.Run("sort by size asc returns smaller file first", func(t *testing.T) {
+		page, err := bundle.SearchByTags(context.Background(), librarybrowse.SearchRequest{
+			Request: librarybrowse.Request{Offset: 0, Limit: 10},
+			SortBy:  librarybrowse.SortBySizeAsc,
+		})
+		if err != nil {
+			t.Fatalf("SearchByTags(sort=size_asc) error = %v", err)
+		}
+
+		if len(page.Items) != 2 {
+			t.Fatalf("len(page.Items) = %d, want 2", len(page.Items))
+		}
+
+		if page.Items[0].FileID != 1 {
+			t.Fatalf("page.Items[0].FileID = %d, want 1 (size=111)", page.Items[0].FileID)
+		}
+
+		if page.Items[1].FileID != 2 {
+			t.Fatalf("page.Items[1].FileID = %d, want 2 (size=222)", page.Items[1].FileID)
+		}
+	})
+
+	t.Run("sort by import oldest returns earliest imported file first", func(t *testing.T) {
+		page, err := bundle.SearchByTags(context.Background(), librarybrowse.SearchRequest{
+			Request: librarybrowse.Request{Offset: 0, Limit: 10},
+			SortBy:  librarybrowse.SortByImportOldest,
+		})
+		if err != nil {
+			t.Fatalf("SearchByTags(sort=import_oldest) error = %v", err)
+		}
+
+		if len(page.Items) != 2 {
+			t.Fatalf("len(page.Items) = %d, want 2", len(page.Items))
+		}
+
+		if page.Items[0].FileID != 1 {
+			t.Fatalf("page.Items[0].FileID = %d, want 1 (timestamp=500327)", page.Items[0].FileID)
+		}
+
+		if page.Items[1].FileID != 2 {
+			t.Fatalf("page.Items[1].FileID = %d, want 2 (timestamp=700127)", page.Items[1].FileID)
+		}
+	})
+
+	t.Run("predicate size >= 200 returns only large file", func(t *testing.T) {
+		page, err := bundle.SearchByTags(context.Background(), librarybrowse.SearchRequest{
+			Request: librarybrowse.Request{Offset: 0, Limit: 10},
+			SystemPredicates: []librarybrowse.SystemPredicate{
+				{Field: librarybrowse.PredicateFieldSize, Op: librarybrowse.PredicateOpGTE, Value: 200},
+			},
+		})
+		if err != nil {
+			t.Fatalf("SearchByTags(size>=200) error = %v", err)
+		}
+
+		if len(page.Items) != 1 {
+			t.Fatalf("len(page.Items) = %d, want 1", len(page.Items))
+		}
+
+		if page.Items[0].FileID != 2 {
+			t.Fatalf("page.Items[0].FileID = %d, want 2", page.Items[0].FileID)
+		}
+	})
+
+	t.Run("predicate height < 300 returns only short file", func(t *testing.T) {
+		page, err := bundle.SearchByTags(context.Background(), librarybrowse.SearchRequest{
+			Request: librarybrowse.Request{Offset: 0, Limit: 10},
+			SystemPredicates: []librarybrowse.SystemPredicate{
+				{Field: librarybrowse.PredicateFieldHeight, Op: librarybrowse.PredicateOpLT, Value: 300},
+			},
+		})
+		if err != nil {
+			t.Fatalf("SearchByTags(height<300) error = %v", err)
+		}
+
+		if len(page.Items) != 1 {
+			t.Fatalf("len(page.Items) = %d, want 1", len(page.Items))
+		}
+
+		if page.Items[0].FileID != 2 {
+			t.Fatalf("page.Items[0].FileID = %d, want 2 (height=200)", page.Items[0].FileID)
+		}
+	})
+
+	t.Run("favorite filter true returns only favorited files", func(t *testing.T) {
+		favorite := true
+		page, err := bundle.SearchByTags(context.Background(), librarybrowse.SearchRequest{
+			Request:        librarybrowse.Request{Offset: 0, Limit: 10},
+			FavoriteFilter: &favorite,
+		})
+		if err != nil {
+			t.Fatalf("SearchByTags(favorite=true) error = %v", err)
+		}
+
+		if len(page.Items) != 1 {
+			t.Fatalf("len(page.Items) = %d, want 1", len(page.Items))
+		}
+
+		if page.Items[0].FileID != 1 {
+			t.Fatalf("page.Items[0].FileID = %d, want 1 (favourite rating=1.0)", page.Items[0].FileID)
+		}
+	})
+
+	t.Run("favorite filter false returns only non-favorited files", func(t *testing.T) {
+		favorite := false
+		page, err := bundle.SearchByTags(context.Background(), librarybrowse.SearchRequest{
+			Request:        librarybrowse.Request{Offset: 0, Limit: 10},
+			FavoriteFilter: &favorite,
+		})
+		if err != nil {
+			t.Fatalf("SearchByTags(favorite=false) error = %v", err)
+		}
+
+		if len(page.Items) != 1 {
+			t.Fatalf("len(page.Items) = %d, want 1", len(page.Items))
+		}
+
+		if page.Items[0].FileID != 2 {
+			t.Fatalf("page.Items[0].FileID = %d, want 2 (favourite rating=0.0)", page.Items[0].FileID)
+		}
+	})
+
+	t.Run("width and height predicates combine as a resolution target", func(t *testing.T) {
+		page, err := bundle.SearchByTags(context.Background(), librarybrowse.SearchRequest{
+			Request: librarybrowse.Request{Offset: 0, Limit: 10},
+			SystemPredicates: []librarybrowse.SystemPredicate{
+				{Field: librarybrowse.PredicateFieldWidth, Op: librarybrowse.PredicateOpEQ, Value: 640},
+				{Field: librarybrowse.PredicateFieldHeight, Op: librarybrowse.PredicateOpEQ, Value: 480},
+			},
+		})
+		if err != nil {
+			t.Fatalf("SearchByTags(width+height) error = %v", err)
+		}
+
+		if len(page.Items) != 1 {
+			t.Fatalf("len(page.Items) = %d, want 1", len(page.Items))
+		}
+
+		if page.Items[0].FileID != 1 {
+			t.Fatalf("page.Items[0].FileID = %d, want 1 (640x480)", page.Items[0].FileID)
+		}
+	})
+
+	t.Run("tag and predicate combined narrows results", func(t *testing.T) {
+		page, err := bundle.SearchByTags(context.Background(), librarybrowse.SearchRequest{
+			Request: librarybrowse.Request{Offset: 0, Limit: 10},
+			Tags:    []string{"series:zeta"},
+			SystemPredicates: []librarybrowse.SystemPredicate{
+				{Field: librarybrowse.PredicateFieldWidth, Op: librarybrowse.PredicateOpGT, Value: 500},
+			},
+		})
+		if err != nil {
+			t.Fatalf("SearchByTags(tag+predicate) error = %v", err)
+		}
+
+		if len(page.Items) != 1 {
+			t.Fatalf("len(page.Items) = %d, want 1", len(page.Items))
+		}
+
+		if page.Items[0].FileID != 1 {
+			t.Fatalf("page.Items[0].FileID = %d, want 1 (series:zeta AND width>500)", page.Items[0].FileID)
+		}
+	})
+
+	t.Run("unknown predicate field is silently ignored", func(t *testing.T) {
+		page, err := bundle.SearchByTags(context.Background(), librarybrowse.SearchRequest{
+			Request: librarybrowse.Request{Offset: 0, Limit: 10},
+			SystemPredicates: []librarybrowse.SystemPredicate{
+				{Field: "unknown_field", Op: librarybrowse.PredicateOpEQ, Value: 1},
+			},
+		})
+		if err != nil {
+			t.Fatalf("SearchByTags(unknown field) error = %v", err)
+		}
+
+		if len(page.Items) != 2 {
+			t.Fatalf("len(page.Items) = %d, want 2 (unknown predicate ignored)", len(page.Items))
+		}
+	})
 }
 
 func writeManagedFileForTest(
