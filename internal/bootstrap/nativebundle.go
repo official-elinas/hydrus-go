@@ -53,12 +53,6 @@ func defaultCreateFreshClientBundle(ctx context.Context, dbDir string) error {
 	stagingPaths := bundleFilePaths(stagingDir)
 	targetPaths := bundleFilePaths(dbDir)
 	thumbnailRoot := clientfiles.DefaultThumbnailRoot(dbDir)
-	thumbnailRootExisted := true
-	if _, err := os.Stat(thumbnailRoot); os.IsNotExist(err) {
-		thumbnailRootExisted = false
-	} else if err != nil {
-		return fmt.Errorf("stat managed thumbnails root %q: %w", thumbnailRoot, err)
-	}
 
 	if err := createMainBootstrapDB(
 		ctx,
@@ -91,17 +85,6 @@ func defaultCreateFreshClientBundle(ctx context.Context, dbDir string) error {
 
 	if err := moveBootstrappedPathsIntoPlace(stagingPaths, targetPaths); err != nil {
 		return err
-	}
-
-	if err := os.MkdirAll(thumbnailRoot, 0o755); err != nil {
-		return fmt.Errorf("create managed thumbnails root: %w", err)
-	}
-
-	if !thumbnailRootExisted {
-		markerPath := filepath.Join(dbDir, bootstrapCreatedThumbnailMarker)
-		if err := os.WriteFile(markerPath, nil, 0o644); err != nil {
-			return fmt.Errorf("record managed thumbnails bootstrap marker: %w", err)
-		}
 	}
 
 	return nil
@@ -959,12 +942,12 @@ func verifySeededBootstrapStorage(ctx context.Context, dbDir string, mainPath st
 	}
 
 	thumbnailInfo, err := os.Stat(thumbnailRoot)
-	if err != nil {
+	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("stat seeded thumbnails root: %w", err)
 	}
 
-	if !thumbnailInfo.IsDir() {
-		return fmt.Errorf("seeded thumbnails root %q must be a directory", thumbnailRoot)
+	if err == nil && !thumbnailInfo.IsDir() {
+		return fmt.Errorf("seeded thumbnails root %q must be a directory when present", thumbnailRoot)
 	}
 
 	if tempInfo, err := os.Stat(filepath.Join(dbDir, "client.temp.db")); err != nil {

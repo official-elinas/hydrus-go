@@ -23,6 +23,14 @@ func TestLoadRuntimeConfig(t *testing.T) {
 		if cfg.AllowNonLocalConnections {
 			t.Fatal("cfg.AllowNonLocalConnections = true, want false")
 		}
+
+		if !cfg.EnableFreshClientBootstrap {
+			t.Fatal("cfg.EnableFreshClientBootstrap = false, want true")
+		}
+
+		if cfg.DBDir != defaultBootstrapDBDir {
+			t.Fatalf("cfg.DBDir = %q, want %q", cfg.DBDir, defaultBootstrapDBDir)
+		}
 	})
 
 	t.Run("listen flag overrides env and permits non-local bind", func(t *testing.T) {
@@ -44,7 +52,8 @@ func TestLoadRuntimeConfig(t *testing.T) {
 
 	t.Run("bootstrap flags override env", func(t *testing.T) {
 		clearDaemonEnv(t)
-		t.Setenv("HYDRUS_GO_DB_DIR", t.TempDir()+"/fresh-bundle")
+		expectedDBDir := t.TempDir() + "/fresh-bundle"
+		t.Setenv("HYDRUS_GO_DB_DIR", expectedDBDir)
 		t.Setenv("HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP", "false")
 		t.Setenv("HYDRUS_GO_BOOTSTRAP_TIMEOUT", "30s")
 
@@ -63,8 +72,84 @@ func TestLoadRuntimeConfig(t *testing.T) {
 			t.Fatal("cfg.EnableFreshClientBootstrap = false, want true")
 		}
 
+		if cfg.DBDir != expectedDBDir {
+			t.Fatalf("cfg.DBDir = %q, want explicit env DB dir to win", cfg.DBDir)
+		}
+
 		if cfg.BootstrapTimeout != 90*time.Second {
 			t.Fatalf("cfg.BootstrapTimeout = %v, want %v", cfg.BootstrapTimeout, 90*time.Second)
+		}
+	})
+
+	t.Run("bootstrap defaults db dir to local db folder when enabled without override", func(t *testing.T) {
+		clearDaemonEnv(t)
+
+		cfg, err := loadRuntimeConfig([]string{"--bootstrap-fresh-client"}, io.Discard)
+		if err != nil {
+			t.Fatalf("loadRuntimeConfig() error = %v", err)
+		}
+
+		if !cfg.EnableFreshClientBootstrap {
+			t.Fatal("cfg.EnableFreshClientBootstrap = false, want true")
+		}
+
+		if cfg.DBDir != defaultBootstrapDBDir {
+			t.Fatalf("cfg.DBDir = %q, want %q", cfg.DBDir, defaultBootstrapDBDir)
+		}
+	})
+
+	t.Run("env enabled bootstrap also defaults db dir to local db folder when unset", func(t *testing.T) {
+		clearDaemonEnv(t)
+		t.Setenv("HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP", "true")
+
+		cfg, err := loadRuntimeConfig(nil, io.Discard)
+		if err != nil {
+			t.Fatalf("loadRuntimeConfig() error = %v", err)
+		}
+
+		if !cfg.EnableFreshClientBootstrap {
+			t.Fatal("cfg.EnableFreshClientBootstrap = false, want true")
+		}
+
+		if cfg.DBDir != defaultBootstrapDBDir {
+			t.Fatalf("cfg.DBDir = %q, want %q", cfg.DBDir, defaultBootstrapDBDir)
+		}
+	})
+
+	t.Run("explicit env false disables default bootstrap", func(t *testing.T) {
+		clearDaemonEnv(t)
+		t.Setenv("HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP", "false")
+
+		cfg, err := loadRuntimeConfig(nil, io.Discard)
+		if err != nil {
+			t.Fatalf("loadRuntimeConfig() error = %v", err)
+		}
+
+		if cfg.EnableFreshClientBootstrap {
+			t.Fatal("cfg.EnableFreshClientBootstrap = true, want false")
+		}
+
+		if cfg.DBDir != "" {
+			t.Fatalf("cfg.DBDir = %q, want empty when bootstrap explicitly disabled", cfg.DBDir)
+		}
+	})
+
+	t.Run("explicit db dir without bootstrap setting still boots there by default", func(t *testing.T) {
+		clearDaemonEnv(t)
+		expectedDBDir := t.TempDir() + "/fresh-bundle"
+		t.Setenv("HYDRUS_GO_DB_DIR", expectedDBDir)
+
+		cfg, err := loadRuntimeConfig(nil, io.Discard)
+		if err != nil {
+			t.Fatalf("loadRuntimeConfig() error = %v", err)
+		}
+
+		if !cfg.EnableFreshClientBootstrap {
+			t.Fatal("cfg.EnableFreshClientBootstrap = false, want true")
+		}
+
+		if cfg.DBDir != expectedDBDir {
+			t.Fatalf("cfg.DBDir = %q, want %q", cfg.DBDir, expectedDBDir)
 		}
 	})
 
