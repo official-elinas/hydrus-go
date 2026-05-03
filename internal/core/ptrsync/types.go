@@ -75,26 +75,37 @@ func DaemonServiceKeyHex() string {
 
 // Status is the daemon-visible PTR sync status payload for API/UI polling.
 type Status struct {
-	Enabled                  bool   `json:"enabled"`
-	Configured               bool   `json:"configured"`
-	ServiceName              string `json:"service_name,omitempty"`
-	ServiceKey               string `json:"service_key,omitempty"`
-	Host                     string `json:"host,omitempty"`
-	Port                     int    `json:"port,omitempty"`
-	AccountMode              string `json:"account_mode,omitempty"`
-	Phase                    string `json:"phase"`
-	IsRunning                bool   `json:"is_running"`
-	IsComplete               bool   `json:"is_complete"`
-	MetadataSlice            int64  `json:"metadata_slice"`
-	DownloadedUpdateCount    int64  `json:"downloaded_update_count"`
-	ProcessedDefinitionCount int64  `json:"processed_definition_count"`
-	ProcessedContentCount    int64  `json:"processed_content_count"`
-	LastSyncMappingCount     *int64 `json:"last_sync_mapping_count,omitempty"`
-	RetryAtMS                int64  `json:"retry_at_ms,omitempty"`
-	RetryAttempt             int64  `json:"retry_attempt,omitempty"`
-	LastError                string `json:"last_error,omitempty"`
-	UnavailableReason        string `json:"unavailable_reason,omitempty"`
-	UpdatedAtMS              int64  `json:"updated_at_ms,omitempty"`
+	Enabled                         bool   `json:"enabled"`
+	Configured                      bool   `json:"configured"`
+	ServiceName                     string `json:"service_name,omitempty"`
+	ServiceKey                      string `json:"service_key,omitempty"`
+	Host                            string `json:"host,omitempty"`
+	Port                            int    `json:"port,omitempty"`
+	AccountMode                     string `json:"account_mode,omitempty"`
+	Phase                           string `json:"phase"`
+	IsRunning                       bool   `json:"is_running"`
+	IsComplete                      bool   `json:"is_complete"`
+	IsUpToDate                      bool   `json:"is_up_to_date"`
+	MetadataSlice                   int64  `json:"metadata_slice"`
+	DownloadedUpdateCount           int64  `json:"downloaded_update_count"`
+	DownloadedUpdateBytes           int64  `json:"downloaded_update_bytes"`
+	CurrentRunDownloadedBytes       int64  `json:"current_run_downloaded_bytes"`
+	CurrentRunDownloadMS            int64  `json:"current_run_download_ms"`
+	CurrentRunBytesPerSecond        int64  `json:"current_run_bytes_per_second"`
+	CurrentRunNetworkFetchedBytes   int64  `json:"current_run_network_fetched_bytes,omitempty"`
+	CurrentRunNetworkFetchMS        int64  `json:"current_run_network_fetch_ms,omitempty"`
+	CurrentRunNetworkBytesPerSecond int64  `json:"current_run_network_bytes_per_second,omitempty"`
+	ProcessedDefinitionCount        int64  `json:"processed_definition_count"`
+	ProcessedContentCount           int64  `json:"processed_content_count"`
+	PendingDownloadCount            int64  `json:"pending_download_count"`
+	PendingProcessCount             int64  `json:"pending_process_count"`
+	NextUpdateDue                   int64  `json:"next_update_due,omitempty"`
+	LastSyncMappingCount            *int64 `json:"last_sync_mapping_count,omitempty"`
+	RetryAtMS                       int64  `json:"retry_at_ms,omitempty"`
+	RetryAttempt                    int64  `json:"retry_attempt,omitempty"`
+	LastError                       string `json:"last_error,omitempty"`
+	UnavailableReason               string `json:"unavailable_reason,omitempty"`
+	UpdatedAtMS                     int64  `json:"updated_at_ms,omitempty"`
 }
 
 // AccountSnapshot is the daemon-owned subset of remote Hydrus account state we
@@ -185,8 +196,8 @@ type PendingCountRequest struct {
 // PendingInfo reports the locally staged pending mapping count for one PTR
 // service.
 type PendingInfo struct {
-	ServiceKey    string `json:"service_key"`
-	PendingCount  int64  `json:"pending_count"`
+	ServiceKey   string `json:"service_key"`
+	PendingCount int64  `json:"pending_count"`
 }
 
 // Store exposes daemon-owned PTR status and trigger operations for HTTP/UI
