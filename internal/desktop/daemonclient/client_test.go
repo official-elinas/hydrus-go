@@ -1,9 +1,13 @@
 package daemonclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"net/http"
 	"net/url"
@@ -12,6 +16,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
 )
 
@@ -362,6 +367,44 @@ func TestClientMutationRequests(t *testing.T) {
 		}
 	})
 
+	t.Run("imports direct URL through session-backed JSON request", func(t *testing.T) {
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("f", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodPost, "/v1/import/url")
+				assertHeader(t, r, "Hydrus-Client-API-Access-Key", "")
+				assertHeader(t, r, "Hydrus-Client-API-Session-Key", "session-url-import")
+				assertHeader(t, r, "Content-Type", "application/json")
+
+				var payload map[string]string
+				decodeJSONBody(t, r, &payload)
+				if payload["url"] != "https://example.com/image.png" {
+					t.Fatalf("payload[url] = %q, want https://example.com/image.png", payload["url"])
+				}
+				if payload["referral_url"] != "https://example.com/post/123" {
+					t.Fatalf("payload[referral_url] = %q, want https://example.com/post/123", payload["referral_url"])
+				}
+
+				return jsonResponse(t, r, http.StatusOK, ImportResult{FileID: 12, Hash: strings.Repeat("e", 64)}), nil
+			}),
+		)
+		client.sessionKey = "session-url-import"
+
+		result, err := client.ImportURL(context.Background(), fileimport.URLRequest{
+			URL:         "https://example.com/image.png",
+			ReferralURL: "https://example.com/post/123",
+		})
+		if err != nil {
+			t.Fatalf("ImportURL() error = %v", err)
+		}
+
+		if result.FileID != 12 {
+			t.Fatalf("result.FileID = %d, want 12", result.FileID)
+		}
+	})
+
 	t.Run("uploads file through session-backed multipart request", func(t *testing.T) {
 		sourcePath := filepath.Join(t.TempDir(), "upload.png")
 		if err := os.WriteFile(sourcePath, []byte("png-bytes"), 0o644); err != nil {
@@ -524,76 +567,91 @@ func TestClientMutationRequests(t *testing.T) {
 	})
 }
 
-func TestClientFetchGridImage(t *testing.T) {
-	t.Run("rejects items without thumbnails before making a request", func(t *testing.T) {
-		client := New()
-		_, err := client.FetchGridImage(context.Background(), RecentItem{FileID: 5, HasThumbnail: false})
-		if err == nil {
-			t.Fatal("FetchGridImage() error = nil, want error")
+func TestClientGenerateGridThumbnail(t *testing.T) {
+	encodePNG := func(t *testing.T, size int) []byte {
+		t.Helper()
+
+		img := image.NewNRGBA(image.Rect(0, 0, size, size))
+		for y := 0; y < size; y++ {
+			for x := 0; x < size; x++ {
+				img.Set(x, y, color.NRGBA{R: uint8(40 + x), G: uint8(80 + y), B: 120, A: 255})
+			}
 		}
 
-		if !strings.Contains(err.Error(), "no thumbnail is available") {
-			t.Fatalf("FetchGridImage() error = %v, want no thumbnail error", err)
+		var buf bytes.Buffer
+		if err := png.Encode(&buf, img); err != nil {
+			t.Fatalf("png.Encode() error = %v", err)
+		}
+
+		return buf.Bytes()
+	}
+
+	t.Run("rejects items without content URLs", func(t *testing.T) {
+		client := New()
+		_, err := client.GenerateGridThumbnail(context.Background(), RecentItem{FileID: 5}, 64)
+		if err == nil {
+			t.Fatal("GenerateGridThumbnail() error = nil, want error")
+		}
+
+		if !strings.Contains(err.Error(), "no content URL is available") {
+			t.Fatalf("GenerateGridThumbnail() error = %v, want missing content URL error", err)
 		}
 	})
 
-	t.Run("returns bytes for available thumbnails", func(t *testing.T) {
-		thumbnailBytes := []byte{0x89, 'P', 'N', 'G'}
+	t.Run("returns scaled png bytes for a valid original", func(t *testing.T) {
+		originalBytes := encodePNG(t, 4)
 
 		client := newClientWithRoundTripper(
 			t,
 			"http://daemon.test",
 			strings.Repeat("9", 64),
 			roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				assertMethodAndPath(t, r, http.MethodGet, "/v1/files/thumbnail")
+				assertMethodAndPath(t, r, http.MethodGet, "/v1/files/content")
 				assertHeader(t, r, "Hydrus-Client-API-Access-Key", "")
 				assertHeader(t, r, "Hydrus-Client-API-Session-Key", "thumb-session")
 				assertQueryValue(t, r.URL, "file_id", "91")
-				return bytesResponse(r, http.StatusOK, thumbnailBytes), nil
+				return bytesResponse(r, http.StatusOK, originalBytes), nil
 			}),
 		)
 		client.sessionKey = "thumb-session"
 
-		payload, err := client.FetchGridImage(context.Background(), RecentItem{
-			FileID:       91,
-			HasThumbnail: true,
-			ThumbnailURL: "/v1/files/thumbnail?file_id=91",
-		})
+		payload, err := client.GenerateGridThumbnail(context.Background(), RecentItem{
+			FileID:     91,
+			ContentURL: "/v1/files/content?file_id=91",
+		}, 2)
 		if err != nil {
-			t.Fatalf("FetchGridImage() error = %v", err)
+			t.Fatalf("GenerateGridThumbnail() error = %v", err)
 		}
 
-		if string(payload) != string(thumbnailBytes) {
-			t.Fatalf("FetchGridImage() bytes = %v, want %v", payload, thumbnailBytes)
+		decoded, _, err := image.Decode(bytes.NewReader(payload))
+		if err != nil {
+			t.Fatalf("image.Decode() error = %v", err)
+		}
+
+		if decoded.Bounds().Dx() != 2 || decoded.Bounds().Dy() != 2 {
+			t.Fatalf("generated thumbnail size = %dx%d, want 2x2", decoded.Bounds().Dx(), decoded.Bounds().Dy())
 		}
 	})
 
-	t.Run("rejects empty thumbnail payloads", func(t *testing.T) {
+	t.Run("returns error when daemon request fails", func(t *testing.T) {
 		client := newClientWithRoundTripper(
 			t,
 			"http://daemon.test",
 			strings.Repeat("1", 64),
 			roundTripFunc(func(r *http.Request) (*http.Response, error) {
-				assertMethodAndPath(t, r, http.MethodGet, "/v1/files/thumbnail")
-				assertHeader(t, r, "Hydrus-Client-API-Access-Key", "")
-				assertHeader(t, r, "Hydrus-Client-API-Session-Key", "thumb-session")
+				assertMethodAndPath(t, r, http.MethodGet, "/v1/files/content")
 				assertQueryValue(t, r.URL, "file_id", "92")
-				return bytesResponse(r, http.StatusOK, nil), nil
+				return bytesResponse(r, http.StatusInternalServerError, []byte("boom")), nil
 			}),
 		)
 		client.sessionKey = "thumb-session"
 
-		_, err := client.FetchGridImage(context.Background(), RecentItem{
-			FileID:       92,
-			HasThumbnail: true,
-			ThumbnailURL: "/v1/files/thumbnail?file_id=92",
-		})
+		_, err := client.GenerateGridThumbnail(context.Background(), RecentItem{
+			FileID:     92,
+			ContentURL: "/v1/files/content?file_id=92",
+		}, 64)
 		if err == nil {
-			t.Fatal("FetchGridImage() error = nil, want error")
-		}
-
-		if !strings.Contains(err.Error(), "empty thumbnail") {
-			t.Fatalf("FetchGridImage() error = %v, want empty thumbnail error", err)
+			t.Fatal("GenerateGridThumbnail() error = nil, want error")
 		}
 	})
 }
@@ -912,71 +970,412 @@ func decodeMultipartBody(t *testing.T, r *http.Request) (map[string]string, stri
 }
 
 func TestPTRStatus(t *testing.T) {
-	client := newClientWithRoundTripper(
-		t,
-		"http://daemon.test",
-		strings.Repeat("f", 64),
-		roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			assertMethodAndPath(t, r, http.MethodGet, "/service/ptr/status")
-			assertHeader(t, r, "Hydrus-Client-API-Session-Key", "session-ptr")
+	t.Run("parses verified mapping count and running state", func(t *testing.T) {
+		mappingCount := int64(99)
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("f", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodGet, "/service/ptr/status")
+				assertHeader(t, r, "Hydrus-Client-API-Session-Key", "session-ptr")
 
-			status := PTRStatusResponse{
-				PTR: coreptrsync.Status{
-					Enabled: true,
-					Phase:   "idle",
-				},
-			}
-			return jsonResponse(t, r, http.StatusOK, status), nil
-		}),
-	)
-	client.sessionKey = "session-ptr"
+				status := PTRStatusResponse{
+					PTR: coreptrsync.Status{
+						Enabled:                         true,
+						Phase:                           "idle",
+						IsRunning:                       true,
+						IsUpToDate:                      true,
+						DownloadedUpdateBytes:           4096,
+						CurrentRunDownloadedBytes:       1024,
+						CurrentRunDownloadMS:            250,
+						CurrentRunBytesPerSecond:        4096,
+						CurrentRunNetworkFetchedBytes:   1024,
+						CurrentRunNetworkFetchMS:        125,
+						CurrentRunNetworkBytesPerSecond: 8192,
+						PendingDownloadCount:            2,
+						PendingProcessCount:             3,
+						NextUpdateDue:                   1700003600,
+						LastSyncMappingCount:            &mappingCount,
+					},
+				}
+				return jsonResponse(t, r, http.StatusOK, status), nil
+			}),
+		)
+		client.sessionKey = "session-ptr"
 
-	ctx := context.Background()
-	res, err := client.GetPTRStatus(ctx)
-	if err != nil {
-		t.Fatalf("GetPTRStatus() error = %v", err)
-	}
+		res, err := client.GetPTRStatus(context.Background())
+		if err != nil {
+			t.Fatalf("GetPTRStatus() error = %v", err)
+		}
 
-	if !res.PTR.Enabled {
-		t.Errorf("Expected enabled = true")
-	}
-	if res.PTR.Phase != "idle" {
-		t.Errorf("Expected phase = idle, got %q", res.PTR.Phase)
-	}
+		if !res.PTR.Enabled {
+			t.Error("Expected enabled = true")
+		}
+		if res.PTR.Phase != "idle" {
+			t.Errorf("Expected phase = idle, got %q", res.PTR.Phase)
+		}
+		if !res.PTR.IsRunning {
+			t.Error("Expected is_running = true")
+		}
+		if res.PTR.LastSyncMappingCount == nil || *res.PTR.LastSyncMappingCount != 99 {
+			t.Fatalf("LastSyncMappingCount = %v, want 99", res.PTR.LastSyncMappingCount)
+		}
+		if res.PTR.DownloadedUpdateBytes != 4096 {
+			t.Fatalf("DownloadedUpdateBytes = %d, want 4096", res.PTR.DownloadedUpdateBytes)
+		}
+		if res.PTR.CurrentRunBytesPerSecond != 4096 {
+			t.Fatalf("CurrentRunBytesPerSecond = %d, want 4096", res.PTR.CurrentRunBytesPerSecond)
+		}
+		if res.PTR.CurrentRunNetworkBytesPerSecond != 8192 {
+			t.Fatalf("CurrentRunNetworkBytesPerSecond = %d, want 8192", res.PTR.CurrentRunNetworkBytesPerSecond)
+		}
+		if res.PTR.PendingDownloadCount != 2 {
+			t.Fatalf("PendingDownloadCount = %d, want 2", res.PTR.PendingDownloadCount)
+		}
+		if !res.PTR.IsUpToDate {
+			t.Fatal("Expected is_up_to_date = true")
+		}
+	})
+
+	t.Run("returns error on non-200 response", func(t *testing.T) {
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("f", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodGet, "/service/ptr/status")
+				return bytesResponse(r, http.StatusInternalServerError, []byte("boom")), nil
+			}),
+		)
+		client.sessionKey = "session-ptr"
+
+		_, err := client.GetPTRStatus(context.Background())
+		if err == nil {
+			t.Fatal("GetPTRStatus() error = nil, want error")
+		}
+	})
 }
 
 func TestPTRSync(t *testing.T) {
-	client := newClientWithRoundTripper(
-		t,
-		"http://daemon.test",
-		strings.Repeat("f", 64),
-		roundTripFunc(func(r *http.Request) (*http.Response, error) {
-			assertMethodAndPath(t, r, http.MethodPost, "/service/ptr/sync")
-			assertHeader(t, r, "Hydrus-Client-API-Session-Key", "session-ptr")
+	t.Run("parses running trigger response", func(t *testing.T) {
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("f", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodPost, "/service/ptr/sync")
+				assertHeader(t, r, "Hydrus-Client-API-Session-Key", "session-ptr")
 
-			status := PTRStatusResponse{
-				PTR: coreptrsync.Status{
-					Enabled: true,
-					Phase:   "syncing",
-				},
-			}
-			return jsonResponse(t, r, http.StatusOK, status), nil
-		}),
-	)
-	client.sessionKey = "session-ptr"
+				status := PTRStatusResponse{
+					PTR: coreptrsync.Status{
+						Enabled:   true,
+						Phase:     "syncing",
+						IsRunning: true,
+					},
+				}
+				return jsonResponse(t, r, http.StatusOK, status), nil
+			}),
+		)
+		client.sessionKey = "session-ptr"
 
-	ctx := context.Background()
-	res, err := client.TriggerPTRSync(ctx)
-	if err != nil {
-		t.Fatalf("TriggerPTRSync() error = %v", err)
-	}
+		res, err := client.TriggerPTRSync(context.Background())
+		if err != nil {
+			t.Fatalf("TriggerPTRSync() error = %v", err)
+		}
 
-	if !res.PTR.Enabled {
-		t.Errorf("Expected enabled = true")
-	}
-	if res.PTR.Phase != "syncing" {
-		t.Errorf("Expected phase = syncing, got %q", res.PTR.Phase)
-	}
+		if !res.PTR.Enabled {
+			t.Error("Expected enabled = true")
+		}
+		if res.PTR.Phase != "syncing" {
+			t.Errorf("Expected phase = syncing, got %q", res.PTR.Phase)
+		}
+		if !res.PTR.IsRunning {
+			t.Error("Expected is_running = true")
+		}
+	})
+
+	t.Run("returns error on non-200 response", func(t *testing.T) {
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("f", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodPost, "/service/ptr/sync")
+				return bytesResponse(r, http.StatusBadRequest, []byte("disabled")), nil
+			}),
+		)
+		client.sessionKey = "session-ptr"
+
+		_, err := client.TriggerPTRSync(context.Background())
+		if err == nil {
+			t.Fatal("TriggerPTRSync() error = nil, want error")
+		}
+	})
+}
+
+func TestClientSearchByTags(t *testing.T) {
+	t.Run("encodes tags and pagination as query params", func(t *testing.T) {
+		sessionKey := "session-search"
+
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("e", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodGet, "/v1/library/search")
+				assertHeader(t, r, "Hydrus-Client-API-Session-Key", sessionKey)
+
+				q := r.URL.Query()
+				tags := q["tags"]
+				if len(tags) != 2 {
+					return nil, fmt.Errorf("expected 2 tags, got %v", tags)
+				}
+				if tags[0] != "character:samus" || tags[1] != "series:metroid" {
+					return nil, fmt.Errorf("unexpected tags %v", tags)
+				}
+				assertQueryValue(t, r.URL, "offset", "0")
+				assertQueryValue(t, r.URL, "limit", "10")
+
+				return jsonResponse(t, r, http.StatusOK, RecentPage{
+					Offset:  0,
+					Limit:   10,
+					HasMore: false,
+					Items: []RecentItem{{
+						FileID:       99,
+						Hash:         strings.Repeat("f", 64),
+						MIME:         "image/jpeg",
+						HasThumbnail: true,
+						ThumbnailURL: "/v1/files/thumbnail?file_id=99",
+						ContentURL:   "/v1/files/content?file_id=99",
+					}},
+				}), nil
+			}),
+		)
+		client.sessionKey = sessionKey
+
+		page, err := client.SearchByTags(context.Background(), []string{"character:samus", "series:metroid"}, 0, 10)
+		if err != nil {
+			t.Fatalf("SearchByTags() error = %v", err)
+		}
+
+		if len(page.Items) != 1 || page.Items[0].FileID != 99 {
+			t.Fatalf("page.Items = %#v, want one item with file_id 99", page.Items)
+		}
+
+		if page.HasMore {
+			t.Fatal("page.HasMore = true, want false")
+		}
+	})
+
+	t.Run("empty tags slice sends no tags param", func(t *testing.T) {
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("e", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodGet, "/v1/library/search")
+
+				if got := r.URL.Query()["tags"]; len(got) != 0 {
+					return nil, fmt.Errorf("expected no tags param, got %v", got)
+				}
+
+				return jsonResponse(t, r, http.StatusOK, RecentPage{}), nil
+			}),
+		)
+		client.sessionKey = "session-empty"
+
+		_, err := client.SearchByTags(context.Background(), nil, 0, 20)
+		if err != nil {
+			t.Fatalf("SearchByTags() error = %v", err)
+		}
+	})
+
+	t.Run("encodes sort_by and system_predicates when set", func(t *testing.T) {
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("e", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodGet, "/v1/library/search")
+				assertHeader(t, r, "Hydrus-Client-API-Session-Key", "session-opts")
+
+				q := r.URL.Query()
+				assertQueryValue(t, r.URL, "sort_by", "size_desc")
+
+				preds := q["system_predicates[]"]
+				if len(preds) != 2 {
+					return nil, fmt.Errorf("expected 2 system_predicates[], got %v", preds)
+				}
+				if preds[0] != "size>=2048" || preds[1] != "width<800" {
+					return nil, fmt.Errorf("unexpected system_predicates[] %v", preds)
+				}
+
+				return jsonResponse(t, r, http.StatusOK, RecentPage{
+					Items: []RecentItem{{FileID: 55}},
+				}), nil
+			}),
+		)
+		client.sessionKey = "session-opts"
+
+		page, err := client.SearchByTags(
+			context.Background(),
+			[]string{"creator:alice"},
+			0, 10,
+			SearchOptions{
+				SortBy:           "size_desc",
+				SystemPredicates: []string{"size>=2048", "width<800"},
+			},
+		)
+		if err != nil {
+			t.Fatalf("SearchByTags() error = %v", err)
+		}
+
+		if len(page.Items) != 1 || page.Items[0].FileID != 55 {
+			t.Fatalf("page.Items = %#v, want one item with file_id 55", page.Items)
+		}
+	})
+
+	t.Run("omits sort_by and system_predicates when not set", func(t *testing.T) {
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("e", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodGet, "/v1/library/search")
+
+				q := r.URL.Query()
+				if got := q.Get("sort_by"); got != "" {
+					return nil, fmt.Errorf("expected no sort_by param, got %q", got)
+				}
+
+				if got := q["system_predicates[]"]; len(got) != 0 {
+					return nil, fmt.Errorf("expected no system_predicates[], got %v", got)
+				}
+
+				return jsonResponse(t, r, http.StatusOK, RecentPage{}), nil
+			}),
+		)
+		client.sessionKey = "session-omit-opts"
+
+		_, err := client.SearchByTags(context.Background(), []string{"creator:alice"}, 0, 10)
+		if err != nil {
+			t.Fatalf("SearchByTags() error = %v", err)
+		}
+	})
+}
+
+func TestClientGetPendingCount(t *testing.T) {
+	t.Run("fetches pending count with service key using session auth", func(t *testing.T) {
+		serviceKey := coreptrsync.DaemonServiceKeyHex()
+
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("a", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodGet, "/manage_services/pending_counts")
+				assertHeader(t, r, "Hydrus-Client-API-Access-Key", "")
+				assertHeader(t, r, "Hydrus-Client-API-Session-Key", "session-pending")
+				assertQueryValue(t, r.URL, "service_key", serviceKey)
+
+				return jsonResponse(t, r, http.StatusOK, coreptrsync.PendingInfo{
+					ServiceKey:   serviceKey,
+					PendingCount: 17,
+				}), nil
+			}),
+		)
+		client.sessionKey = "session-pending"
+
+		info, err := client.GetPendingCount(context.Background(), serviceKey)
+		if err != nil {
+			t.Fatalf("GetPendingCount() error = %v", err)
+		}
+
+		if info.ServiceKey != serviceKey {
+			t.Fatalf("info.ServiceKey = %q, want %q", info.ServiceKey, serviceKey)
+		}
+
+		if info.PendingCount != 17 {
+			t.Fatalf("info.PendingCount = %d, want 17", info.PendingCount)
+		}
+	})
+
+	t.Run("omits service_key query param when blank", func(t *testing.T) {
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("b", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodGet, "/manage_services/pending_counts")
+				assertHeader(t, r, "Hydrus-Client-API-Session-Key", "session-pending-blank")
+
+				if got := r.URL.Query().Get("service_key"); got != "" {
+					return nil, fmt.Errorf("expected no service_key param, got %q", got)
+				}
+
+				return jsonResponse(t, r, http.StatusOK, coreptrsync.PendingInfo{
+					ServiceKey:   "server-default",
+					PendingCount: 3,
+				}), nil
+			}),
+		)
+		client.sessionKey = "session-pending-blank"
+
+		info, err := client.GetPendingCount(context.Background(), "")
+		if err != nil {
+			t.Fatalf("GetPendingCount() error = %v", err)
+		}
+
+		if info.PendingCount != 3 {
+			t.Fatalf("info.PendingCount = %d, want 3", info.PendingCount)
+		}
+	})
+
+	t.Run("omits service_key for whitespace-only input", func(t *testing.T) {
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("c", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodGet, "/manage_services/pending_counts")
+
+				if got := r.URL.Query().Get("service_key"); got != "" {
+					return nil, fmt.Errorf("expected no service_key param, got %q", got)
+				}
+
+				return jsonResponse(t, r, http.StatusOK, coreptrsync.PendingInfo{PendingCount: 0}), nil
+			}),
+		)
+		client.sessionKey = "session-pending-ws"
+
+		_, err := client.GetPendingCount(context.Background(), "   ")
+		if err != nil {
+			t.Fatalf("GetPendingCount() error = %v", err)
+		}
+	})
+
+	t.Run("surfaces daemon error on non-2xx response", func(t *testing.T) {
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("d", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodGet, "/manage_services/pending_counts")
+				return textResponse(r, http.StatusNotFound, "service not found"), nil
+			}),
+		)
+		client.sessionKey = "session-pending-err"
+
+		_, err := client.GetPendingCount(context.Background(), "nonexistent")
+		if err == nil {
+			t.Fatal("GetPendingCount() error = nil, want error")
+		}
+
+		if !strings.Contains(err.Error(), "daemon returned HTTP 404") {
+			t.Fatalf("GetPendingCount() error = %v, want HTTP 404 error", err)
+		}
+	})
 }
 
 func TestDBIntegrityCheck(t *testing.T) {

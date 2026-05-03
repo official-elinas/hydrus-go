@@ -6,6 +6,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	"image/png"
 	"io"
 	"mime/multipart"
 	"net/http"
@@ -17,11 +21,18 @@ import (
 	"time"
 
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
+	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
+	xdraw "golang.org/x/image/draw"
 )
 
 const hydrusContentUpdatePendAction = "2"
 
 const userAgent = "hydrus-desktop-prototype/0.1"
+
+const (
+	defaultGridThumbnailMaxDimension = 256
+	gridThumbnailSourceByteLimit     = 4 << 20
+)
 
 // Client talks to hydrusd over HTTP.
 type Client struct {
@@ -181,6 +192,56 @@ func (c *Client) CreateSession(ctx context.Context) (string, error) {
 	return c.sessionKey, nil
 }
 
+// SearchOptions controls optional query parameters for a SearchByTags call.
+type SearchOptions struct {
+	// SortBy is the server-side sort order. Accepted values: import_newest,
+	// import_oldest, size_desc, size_asc. Omitted when empty.
+	SortBy string
+	// SystemPredicates is a list of raw system predicate strings without the
+	// "system:" prefix (e.g. "size>=2048", "width<800"). Encoded as repeated
+	// system_predicates[] query parameters. Omitted when empty.
+	SystemPredicates []string
+}
+
+// SearchByTags loads one page of local files that have all of the given tags.
+// Callers may pass an optional SearchOptions value to supply sort order and
+// system predicates; those parameters are omitted from the request when empty.
+func (c *Client) SearchByTags(
+	ctx context.Context,
+	tags []string,
+	offset int,
+	limit int,
+	opts ...SearchOptions,
+) (RecentPage, error) {
+	params := url.Values{}
+	params.Set("offset", strconv.Itoa(offset))
+	params.Set("limit", strconv.Itoa(limit))
+	for _, t := range tags {
+		params.Add("tags", t)
+	}
+
+	var options SearchOptions
+	if len(opts) > 0 {
+		options = opts[0]
+	}
+
+	if options.SortBy != "" {
+		params.Set("sort_by", options.SortBy)
+	}
+
+	for _, sp := range options.SystemPredicates {
+		params.Add("system_predicates[]", sp)
+	}
+
+	path := "/v1/library/search?" + params.Encode()
+	var page RecentPage
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, true, &page); err != nil {
+		return RecentPage{}, err
+	}
+
+	return page, nil
+}
+
 // ListRecent loads one recent-files browse page.
 func (c *Client) ListRecent(
 	ctx context.Context,
@@ -240,6 +301,26 @@ func (c *Client) ImportLocalFile(ctx context.Context, path string) (ImportResult
 	var response ImportResult
 	body := map[string]string{"path": strings.TrimSpace(path)}
 	if err := c.doJSON(ctx, http.MethodPost, "/v1/import/local_file", body, true, &response); err != nil {
+		return ImportResult{}, err
+	}
+
+	return response, nil
+}
+
+// ImportURL asks hydrusd to download and import one direct file URL.
+func (c *Client) ImportURL(ctx context.Context, request fileimport.URLRequest) (ImportResult, error) {
+	var response ImportResult
+	body := map[string]string{
+		"url": strings.TrimSpace(request.URL),
+	}
+	if strings.TrimSpace(request.ReferralURL) != "" {
+		body["referral_url"] = strings.TrimSpace(request.ReferralURL)
+	}
+	if strings.TrimSpace(request.LocalFileServiceKey) != "" {
+		body["local_file_service_key"] = strings.TrimSpace(request.LocalFileServiceKey)
+	}
+
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/import/url", body, true, &response); err != nil {
 		return ImportResult{}, err
 	}
 
@@ -385,6 +466,26 @@ func (c *Client) CommitPending(
 	return response, nil
 }
 
+// GetPendingCount fetches the locally staged pending mapping count for the
+// given PTR service. If serviceKey is blank the server default is used.
+func (c *Client) GetPendingCount(
+	ctx context.Context,
+	serviceKey string,
+) (coreptrsync.PendingInfo, error) {
+	path := "/manage_services/pending_counts"
+	normalizedKey := strings.ToLower(strings.TrimSpace(serviceKey))
+	if normalizedKey != "" {
+		path += "?service_key=" + url.QueryEscape(normalizedKey)
+	}
+
+	var info coreptrsync.PendingInfo
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, true, &info); err != nil {
+		return coreptrsync.PendingInfo{}, err
+	}
+
+	return info, nil
+}
+
 // PTRStatusResponse wraps the daemon PTR status API payload.
 type PTRStatusResponse struct {
 	PTR coreptrsync.Status `json:"ptr"`
@@ -422,22 +523,38 @@ func (c *Client) TriggerDBIntegrityCheck(ctx context.Context) (DBIntegrityRespon
 	return out, err
 }
 
-// FetchGridImage returns the bytes for a grid-preview image.
-func (c *Client) FetchGridImage(ctx context.Context, item RecentItem) ([]byte, error) {
-	if !item.HasThumbnail {
-		return nil, fmt.Errorf("no thumbnail is available for file_id %d", item.FileID)
+// GenerateGridThumbnail fetches a bounded original payload from hydrusd and
+// generates a client-local grid thumbnail.
+func (c *Client) GenerateGridThumbnail(ctx context.Context, item RecentItem, maxDimension int) ([]byte, error) {
+	if strings.TrimSpace(item.ContentURL) == "" {
+		return nil, fmt.Errorf("no content URL is available for file_id %d", item.FileID)
 	}
 
-	payload, err := c.doBytes(ctx, http.MethodGet, item.ThumbnailURL, true)
+	if maxDimension <= 0 {
+		maxDimension = defaultGridThumbnailMaxDimension
+	}
+
+	payload, err := c.doBytesLimited(ctx, http.MethodGet, item.ContentURL, true, gridThumbnailSourceByteLimit)
 	if err != nil {
 		return nil, err
 	}
 
 	if len(payload) == 0 {
-		return nil, fmt.Errorf("daemon returned an empty thumbnail for file_id %d", item.FileID)
+		return nil, fmt.Errorf("daemon returned an empty original for file_id %d", item.FileID)
 	}
 
-	return payload, nil
+	source, _, err := image.Decode(bytes.NewReader(payload))
+	if err != nil {
+		return nil, fmt.Errorf("decode original for grid thumbnail: %w", err)
+	}
+
+	thumbnail := resizeImageToFit(source, maxDimension)
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, thumbnail); err != nil {
+		return nil, fmt.Errorf("encode grid thumbnail: %w", err)
+	}
+
+	return buf.Bytes(), nil
 }
 
 // FetchFileContent returns the bytes for one daemon-served managed original.
@@ -503,15 +620,6 @@ func (c *Client) doJSON(
 	return nil
 }
 
-func (c *Client) doBytes(
-	ctx context.Context,
-	method string,
-	path string,
-	preferSession bool,
-) ([]byte, error) {
-	return c.doBytesLimited(ctx, method, path, preferSession, 0)
-}
-
 func (c *Client) doBytesLimited(
 	ctx context.Context,
 	method string,
@@ -549,6 +657,35 @@ func (c *Client) doBytesLimited(
 	}
 
 	return payload, nil
+}
+
+func resizeImageToFit(source image.Image, maxDimension int) image.Image {
+	bounds := source.Bounds()
+	sourceWidth := bounds.Dx()
+	sourceHeight := bounds.Dy()
+	if sourceWidth <= 0 || sourceHeight <= 0 {
+		return image.NewNRGBA(image.Rect(0, 0, 1, 1))
+	}
+
+	if maxDimension <= 0 {
+		maxDimension = defaultGridThumbnailMaxDimension
+	}
+
+	targetWidth := sourceWidth
+	targetHeight := sourceHeight
+	if sourceWidth > maxDimension || sourceHeight > maxDimension {
+		if sourceWidth >= sourceHeight {
+			targetWidth = maxDimension
+			targetHeight = max(1, sourceHeight*maxDimension/sourceWidth)
+		} else {
+			targetHeight = maxDimension
+			targetWidth = max(1, sourceWidth*maxDimension/sourceHeight)
+		}
+	}
+
+	target := image.NewNRGBA(image.Rect(0, 0, targetWidth, targetHeight))
+	xdraw.CatmullRom.Scale(target, target.Bounds(), source, bounds, xdraw.Over, nil)
+	return target
 }
 
 func (c *Client) newRequest(
