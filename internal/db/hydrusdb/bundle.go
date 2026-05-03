@@ -124,6 +124,14 @@ func openBundle(ctx context.Context, dir string, mode openMode) (*Bundle, error)
 		}
 	}
 
+	if mode == modeReadWrite {
+		if err := configureSQLiteWriteConnection(ctx, conn, attachments); err != nil {
+			_ = conn.Close()
+			_ = db.Close()
+			return nil, err
+		}
+	}
+
 	if mode == modeReadOnly {
 		if _, err := conn.ExecContext(ctx, "PRAGMA query_only = ON"); err != nil {
 			_ = conn.Close()
@@ -416,6 +424,25 @@ func configureSQLiteConnection(ctx context.Context, conn *sql.Conn) error {
 		fmt.Sprintf("PRAGMA busy_timeout = %d", sqliteBusyTimeoutMS),
 	); err != nil {
 		return fmt.Errorf("set sqlite busy_timeout pragma: %w", err)
+	}
+
+	return nil
+}
+
+func configureSQLiteWriteConnection(ctx context.Context, conn *sql.Conn, attachments []attachment) error {
+	aliases := []string{"main"}
+	for _, attachment := range attachments {
+		aliases = append(aliases, attachment.alias)
+	}
+
+	for _, alias := range aliases {
+		var journalMode string
+		if err := conn.QueryRowContext(
+			ctx,
+			fmt.Sprintf("PRAGMA %s.journal_mode = WAL", alias),
+		).Scan(&journalMode); err != nil {
+			return fmt.Errorf("set sqlite journal_mode WAL for %s: %w", alias, err)
+		}
 	}
 
 	return nil

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/official-elinas/hydrus-go/internal/core/librarybrowse"
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
@@ -714,19 +715,19 @@ func TestBundleEnsurePTRSyncFoundation(t *testing.T) {
 			t.Fatal("status.IsComplete = true, want false while updates are still pending")
 		}
 
-		if _, err := bundle.RecordPreparedLocalImport(context.Background(), PreparedLocalImport{
-			HashHex:             strings.Repeat("11", 32),
-			Size:                17,
-			Mime:                29,
-			ImportedAtMS:        1111,
-			LocalFileServiceKey: hex.EncodeToString([]byte("repository updates")),
-		}); err != nil {
-			t.Fatalf("RecordPreparedLocalImport() error = %v", err)
-		}
-
-		status, err = bundle.FinalizePTRDownloadedUpdate(context.Background(), cfg, lease.RunToken, strings.Repeat("11", 32))
+		status, err = bundle.FinalizePTRDownloadedUpdatesBatch(context.Background(), cfg, lease.RunToken, []PTRDownloadedUpdateBatchItem{{
+			HashHex: strings.Repeat("11", 32),
+			Body:    []byte("ptr-update-body-01"),
+			PreparedImport: PreparedLocalImport{
+				HashHex:             strings.Repeat("11", 32),
+				Size:                18,
+				Mime:                29,
+				ImportedAtMS:        1111,
+				LocalFileServiceKey: hex.EncodeToString([]byte("repository updates")),
+			},
+		}})
 		if err != nil {
-			t.Fatalf("FinalizePTRDownloadedUpdate() error = %v", err)
+			t.Fatalf("FinalizePTRDownloadedUpdatesBatch() error = %v", err)
 		}
 
 		if status.DownloadedUpdateCount != 1 {
@@ -758,8 +759,179 @@ func TestBundleEnsurePTRSyncFoundation(t *testing.T) {
 			t.Fatalf("status.Phase = %q, want %q", status.Phase, coreptrsync.PhaseIdle)
 		}
 
-		if !status.IsComplete {
-			t.Fatal("status.IsComplete = false, want true after completion with no pending work")
+		if status.IsComplete {
+			t.Fatal("status.IsComplete = true, want false while finalized PTR work is still unapplied")
+		}
+	})
+
+	t.Run("accepts non-64-char repository definition hashes", func(t *testing.T) {
+		dir, _ := createTestBundle(t)
+
+		bundle, err := OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		cfg := coreptrsync.DefaultConfig()
+		cfg.Enabled = true
+
+		definitionsHash := strings.Repeat("ee", 32)
+
+		lease, err := bundle.BeginPTRSync(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("BeginPTRSync() error = %v", err)
+		}
+
+		remoteState := testPTRRemoteState(
+			t,
+			1700000400,
+			testPTRMetadataUpdate(t, 0, 10, 20, definitionsHash),
+		)
+		if _, err := bundle.PersistPTRSyncMetadata(context.Background(), cfg, lease.RunToken, remoteState, true); err != nil {
+			t.Fatalf("PersistPTRSyncMetadata() error = %v", err)
+		}
+
+		if _, err := bundle.FinalizePTRDownloadedUpdatesBatch(context.Background(), cfg, lease.RunToken, []PTRDownloadedUpdateBatchItem{{
+			HashHex: definitionsHash,
+			Body:    []byte("definitions-40-hex"),
+			PreparedImport: PreparedLocalImport{
+				HashHex:             definitionsHash,
+				Size:                18,
+				Mime:                28,
+				ImportedAtMS:        1111,
+				LocalFileServiceKey: hex.EncodeToString([]byte("repository updates")),
+			},
+		}}); err != nil {
+			t.Fatalf("FinalizePTRDownloadedUpdatesBatch() error = %v", err)
+		}
+
+		definitionHashHex := strings.Repeat("11", 20)
+		definitions := PTRDefinitionsUpdate{
+			ServiceHashIDsToHashes: map[int64]string{101: definitionHashHex},
+			ServiceTagIDsToTags:    map[int64]string{201: "creator:alice"},
+		}
+		if err := bundle.ApplyPTRDefinitions(context.Background(), cfg, lease.RunToken, definitionsHash, definitions); err != nil {
+			t.Fatalf("ApplyPTRDefinitions() error = %v", err)
+		}
+
+		serviceID := selectInt64(
+			t,
+			bundle.conn,
+			`SELECT service_id FROM main.services WHERE service_key = ?`,
+			mustDecodeHex(t, coreptrsync.DaemonServiceKeyHex()),
+		)
+		hashIDMapTableName, _ := generatePTRRepositoryDefinitionTableNames(serviceID)
+
+		hashID := selectInt64(
+			t,
+			bundle.conn,
+			fmt.Sprintf("SELECT hash_id FROM %s WHERE service_hash_id = ?", hashIDMapTableName),
+			101,
+		)
+		if got := selectInt64(
+			t,
+			bundle.conn,
+			`SELECT length(hash) FROM external_master.hashes WHERE hash_id = ?`,
+			hashID,
+		); got != 20 {
+			t.Fatalf("length(external_master.hashes.hash) = %d, want 20", got)
+		}
+
+		status, err := bundle.GetPTRSyncStatus(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("GetPTRSyncStatus() error = %v", err)
+		}
+		if status.ProcessedDefinitionCount != 1 {
+			t.Fatalf("status.ProcessedDefinitionCount = %d, want 1", status.ProcessedDefinitionCount)
+		}
+	})
+
+	t.Run("falls back to invalid repository tag for empty cleaned definition tags", func(t *testing.T) {
+		dir, _ := createTestBundle(t)
+
+		bundle, err := OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		cfg := coreptrsync.DefaultConfig()
+		cfg.Enabled = true
+
+		definitionsHash := strings.Repeat("ef", 32)
+
+		lease, err := bundle.BeginPTRSync(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("BeginPTRSync() error = %v", err)
+		}
+
+		remoteState := testPTRRemoteState(
+			t,
+			1700000500,
+			testPTRMetadataUpdate(t, 0, 10, 20, definitionsHash),
+		)
+		if _, err := bundle.PersistPTRSyncMetadata(context.Background(), cfg, lease.RunToken, remoteState, true); err != nil {
+			t.Fatalf("PersistPTRSyncMetadata() error = %v", err)
+		}
+
+		if _, err := bundle.FinalizePTRDownloadedUpdatesBatch(context.Background(), cfg, lease.RunToken, []PTRDownloadedUpdateBatchItem{{
+			HashHex: definitionsHash,
+			Body:    []byte("definitions-invalid-tag"),
+			PreparedImport: PreparedLocalImport{
+				HashHex:             definitionsHash,
+				Size:                23,
+				Mime:                28,
+				ImportedAtMS:        1111,
+				LocalFileServiceKey: hex.EncodeToString([]byte("repository updates")),
+			},
+		}}); err != nil {
+			t.Fatalf("FinalizePTRDownloadedUpdatesBatch() error = %v", err)
+		}
+
+		definitions := PTRDefinitionsUpdate{
+			ServiceTagIDsToTags: map[int64]string{201: "\x7f"},
+		}
+		if err := bundle.ApplyPTRDefinitions(context.Background(), cfg, lease.RunToken, definitionsHash, definitions); err != nil {
+			t.Fatalf("ApplyPTRDefinitions() error = %v", err)
+		}
+
+		serviceID := selectInt64(
+			t,
+			bundle.conn,
+			`SELECT service_id FROM main.services WHERE service_key = ?`,
+			mustDecodeHex(t, coreptrsync.DaemonServiceKeyHex()),
+		)
+		_, tagIDMapTableName := generatePTRRepositoryDefinitionTableNames(serviceID)
+		mappedTagID := selectInt64(
+			t,
+			bundle.conn,
+			fmt.Sprintf("SELECT tag_id FROM %s WHERE service_tag_id = ?", tagIDMapTableName),
+			201,
+		)
+
+		expectedTagID, err := bundle.EnsureTagID(context.Background(), ptrInvalidRepositoryTag)
+		if err != nil {
+			t.Fatalf("EnsureTagID(%q) error = %v", ptrInvalidRepositoryTag, err)
+		}
+		if mappedTagID != expectedTagID {
+			t.Fatalf("mappedTagID = %d, want invalid repository tag id %d", mappedTagID, expectedTagID)
+		}
+
+		status, err := bundle.GetPTRSyncStatus(context.Background(), cfg)
+		if err != nil {
+			t.Fatalf("GetPTRSyncStatus() error = %v", err)
+		}
+		if status.ProcessedDefinitionCount != 1 {
+			t.Fatalf("status.ProcessedDefinitionCount = %d, want 1", status.ProcessedDefinitionCount)
 		}
 	})
 }
@@ -1488,9 +1660,10 @@ func TestBundlePTRApplyPipeline(t *testing.T) {
 			lease.RunToken,
 			[]PTRDownloadedUpdateBatchItem{{
 				HashHex: hashHex,
+				Body:    []byte("ptr-update-body-batch1"),
 				PreparedImport: PreparedLocalImport{
 					HashHex:             hashHex,
-					Size:                21,
+					Size:                22,
 					Mime:                29,
 					ImportedAtMS:        4444,
 					LocalFileServiceKey: hex.EncodeToString([]byte("repository updates")),
@@ -1512,13 +1685,6 @@ func TestBundlePTRApplyPipeline(t *testing.T) {
 			mustDecodeHex(t, coreptrsync.DaemonServiceKeyHex()),
 		)
 		_, repositoryUnregisteredTableName, _ := generatePTRRepositoryTableNames(serviceID)
-		repositoryUpdatesServiceID := selectInt64(
-			t,
-			bundle.conn,
-			`SELECT service_id FROM main.services WHERE service_key = ?`,
-			[]byte("repository updates"),
-		)
-
 		if count := selectInt64(
 			t,
 			bundle.conn,
@@ -1528,22 +1694,16 @@ func TestBundlePTRApplyPipeline(t *testing.T) {
 			t.Fatalf("repository unregistered row count = %d, want 0", count)
 		}
 
-		if !rowExistsInDB(
-			t,
-			bundle.conn,
-			fmt.Sprintf(`SELECT 1 FROM main.current_files_%d WHERE hash_id = ?`, repositoryUpdatesServiceID),
-			localImport.FileID,
-		) {
-			t.Fatal("repository updates membership row missing after finalize replay")
-		}
-
+		_, _, repositoryProcessedTableName := generatePTRRepositoryTableNames(serviceID)
 		if count := selectInt64(
 			t,
 			bundle.conn,
-			`SELECT COUNT(*) FROM main.files_info WHERE hash_id = ?`,
+			fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE hash_id = ? AND content_type = ? AND length(body) = ?`, repositoryProcessedTableName),
 			localImport.FileID,
+			PTRContentTypeMappings,
+			22,
 		); count != 1 {
-			t.Fatalf("files_info row count = %d, want 1", count)
+			t.Fatalf("repository processed row count = %d, want 1", count)
 		}
 	})
 
@@ -1584,6 +1744,7 @@ func TestBundlePTRApplyPipeline(t *testing.T) {
 		batch := []PTRDownloadedUpdateBatchItem{
 			{
 				HashHex: definitionsHash,
+				Body:    []byte("definitions"),
 				PreparedImport: PreparedLocalImport{
 					HashHex:             definitionsHash,
 					Size:                11,
@@ -1594,6 +1755,7 @@ func TestBundlePTRApplyPipeline(t *testing.T) {
 			},
 			{
 				HashHex: mappingsHash,
+				Body:    []byte("mappings-123"),
 				PreparedImport: PreparedLocalImport{
 					HashHex:             mappingsHash,
 					Size:                12,
@@ -1769,6 +1931,15 @@ func TestBundlePTRApplyPipeline(t *testing.T) {
 		if status.ProcessedContentCount != 1 {
 			t.Fatalf("status.ProcessedContentCount = %d, want 1", status.ProcessedContentCount)
 		}
+
+		processable, err = bundle.ListPTRProcessableUpdates(context.Background(), cfg, lease.RunToken)
+		if err != nil {
+			t.Fatalf("ListPTRProcessableUpdates() after apply error = %v", err)
+		}
+
+		if len(processable) != 0 {
+			t.Fatalf("len(processable) after apply = %d, want 0", len(processable))
+		}
 	})
 }
 
@@ -1804,6 +1975,7 @@ func TestBundlePTRAppliedMappingsRemainSearchableAfterRestart(t *testing.T) {
 	batch := []PTRDownloadedUpdateBatchItem{
 		{
 			HashHex: definitionsHash,
+			Body:    []byte("definitions-1"),
 			PreparedImport: PreparedLocalImport{
 				HashHex:             definitionsHash,
 				Size:                13,
@@ -1814,6 +1986,7 @@ func TestBundlePTRAppliedMappingsRemainSearchableAfterRestart(t *testing.T) {
 		},
 		{
 			HashHex: mappingsHash,
+			Body:    []byte("mappings-12345"),
 			PreparedImport: PreparedLocalImport{
 				HashHex:             mappingsHash,
 				Size:                14,
@@ -1842,16 +2015,42 @@ func TestBundlePTRAppliedMappingsRemainSearchableAfterRestart(t *testing.T) {
 		t.Fatalf("ApplyPTRMappings() error = %v", err)
 	}
 
-		status, err := bundle.CompletePTRSyncSuccess(context.Background(), cfg, lease.RunToken)
-		if err != nil {
-			t.Fatalf("CompletePTRSyncSuccess() error = %v", err)
-		}
-		if !status.IsComplete {
-			t.Fatal("status.IsComplete = false, want true")
-		}
-		if status.LastSyncMappingCount == nil || *status.LastSyncMappingCount != 1 {
-			t.Fatalf("status.LastSyncMappingCount = %v, want 1", status.LastSyncMappingCount)
-		}
+	status, err := bundle.CompletePTRSyncSuccess(context.Background(), cfg, lease.RunToken)
+	if err != nil {
+		t.Fatalf("CompletePTRSyncSuccess() error = %v", err)
+	}
+	if !status.IsComplete {
+		t.Fatal("status.IsComplete = false, want true")
+	}
+	if status.IsUpToDate {
+		t.Fatal("status.IsUpToDate = true, want false when next update due is already in the past")
+	}
+	if status.LastSyncMappingCount == nil || *status.LastSyncMappingCount != 1 {
+		t.Fatalf("status.LastSyncMappingCount = %v, want 1", status.LastSyncMappingCount)
+	}
+
+	serviceID := selectInt64(
+		t,
+		bundle.conn,
+		`SELECT service_id FROM main.services WHERE service_key = ?`,
+		mustDecodeHex(t, coreptrsync.DaemonServiceKeyHex()),
+	)
+	if _, err := bundle.conn.ExecContext(
+		context.Background(),
+		`UPDATE main.ptr_sync_remote_state SET next_update_due = ? WHERE service_id = ?`,
+		time.Now().Add(1*time.Hour).Unix(),
+		serviceID,
+	); err != nil {
+		t.Fatalf("update ptr_sync_remote_state next_update_due error = %v", err)
+	}
+
+	status, err = bundle.GetPTRSyncStatus(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("GetPTRSyncStatus() after next_update_due bump error = %v", err)
+	}
+	if !status.IsUpToDate {
+		t.Fatal("status.IsUpToDate = false, want true with no local backlog and a future next_update_due")
+	}
 
 	if err := bundle.Close(); err != nil {
 		t.Fatalf("Close() error = %v", err)
@@ -1867,16 +2066,16 @@ func TestBundlePTRAppliedMappingsRemainSearchableAfterRestart(t *testing.T) {
 		}
 	}()
 
-		reopenedStatus, err := readBundle.GetPTRSyncStatus(context.Background(), cfg)
-		if err != nil {
-			t.Fatalf("GetPTRSyncStatus() after reopen error = %v", err)
-		}
-		if !reopenedStatus.IsComplete {
-			t.Fatal("reopenedStatus.IsComplete = false, want true")
-		}
-		if reopenedStatus.LastSyncMappingCount == nil || *reopenedStatus.LastSyncMappingCount != 1 {
-			t.Fatalf("reopenedStatus.LastSyncMappingCount = %v, want 1", reopenedStatus.LastSyncMappingCount)
-		}
+	reopenedStatus, err := readBundle.GetPTRSyncStatus(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("GetPTRSyncStatus() after reopen error = %v", err)
+	}
+	if !reopenedStatus.IsComplete {
+		t.Fatal("reopenedStatus.IsComplete = false, want true")
+	}
+	if reopenedStatus.LastSyncMappingCount == nil || *reopenedStatus.LastSyncMappingCount != 1 {
+		t.Fatalf("reopenedStatus.LastSyncMappingCount = %v, want 1", reopenedStatus.LastSyncMappingCount)
+	}
 
 	page, err := readBundle.SearchByTags(context.Background(), librarybrowse.SearchRequest{
 		Request: librarybrowse.Request{Offset: 0, Limit: 10},
