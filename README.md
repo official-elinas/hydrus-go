@@ -260,7 +260,7 @@ Important current limitations:
 - no public batch import flow yet
 - no public permanent delete flow yet
 - in-app video playback currently depends on a local `ffmpeg` binary and renders muted video frames inside the watcher; richer controls/audio/hardware-accelerated playback are still pending
-- full downloader/parser/subscription parity is still missing, but the daemon now exposes the Hydrus Client API mutation slice that `hydownloader-importer` needs (`add_file`, `associate_url`, local `add_tags`, `set_notes`, `set_time`, `force_commit`)
+- native-Go downloader/parser/subscription parity is still missing, but `hydrusd` now uses external hydownloader as its downloader system when enabled and exposes the Hydrus Client API mutation slice that `hydownloader-importer` needs (`add_file`, `associate_url`, local `add_tags`, `set_notes`, `set_time`, `force_commit`)
 
 
 The point of this slice is to lock down daemon startup, auth, DB bundle access,

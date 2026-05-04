@@ -4,8 +4,8 @@ Last updated: 2026-05-04
 
 ## Current gap
 
-`hydrus-go` still has no daemon-owned downloader, parser, watcher, or
-subscription system.
+`hydrus-go` now has a daemon-owned **external hydownloader integration path**,
+but it still does not have a native-Go downloader/parser/subscription system.
 
 What changed on 2026-05-04 is the first practical **hydownloader bridge**:
 
@@ -28,11 +28,12 @@ What changed on 2026-05-04 is the first practical **hydownloader bridge**:
     - `POST /v1/downloader/url`
     - `POST /v1/downloader/subscription`
 
-That means `hydrus-go` can now act as the Hydrus-side import target for the
-existing external `hydownloader` importer path, and it can supervise and queue
-that external downloader from the daemon. It still does not reimplement
-hydownloader's downloader jobs, gallery traversal, subscriptions, or parser
-execution natively in Go.
+That means `hydrus-go` can now use external `hydownloader` as its downloader
+system in the current daemon-first architecture: it can supervise and queue the
+external downloader from `hydrusd`, and it can act as the Hydrus-side import
+target for `hydownloader-importer`. What remains out of scope for this specific
+slice is a native-Go reimplementation of hydownloader's downloader jobs,
+gallery traversal, subscriptions, or parser execution.
 
 ## Python Hydrus systems to port
 
