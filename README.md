@@ -434,6 +434,7 @@ This bootstrap currently targets the Go toolchain declared in `go.mod`
 - `HYDRUS_GO_HYDOWNLOADER_HOST` (default: `127.0.0.1`)
 - `HYDRUS_GO_HYDOWNLOADER_PORT` (default: `53211`)
 - `HYDRUS_GO_HYDOWNLOADER_ACCESS_KEY` (optional; generated if empty)
+- `HYDRUS_GO_PUBLIC_API_URL` (optional explicit callback URL for hydownloader importer patching; use this when `HYDRUS_GO_LISTEN_ADDR` is a bind address like `0.0.0.0:...` rather than a real callback host)
 - `HYDRUS_GO_HYDOWNLOADER_AUTOIMPORT` (default: `true`; let hydownloader autoimport into hydrus-go through the compatibility API)
 - `HYDRUS_GO_HYDOWNLOADER_DAEMON_BIN` (default: `hydownloader-daemon`)
 - `HYDRUS_GO_HYDOWNLOADER_TOOLS_BIN` (default: `hydownloader-tools`)

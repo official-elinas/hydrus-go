@@ -185,7 +185,10 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 		return nil, fmt.Errorf("create access control: %w", err)
 	}
 
-	hydrusAPIURL := "http://" + cfg.ListenAddr
+	hydrusAPIURL := strings.TrimSpace(cfg.Downloader.PublicAPIURL)
+	if hydrusAPIURL == "" {
+		hydrusAPIURL = "http://" + cfg.ListenAddr
+	}
 	hydownloaderManager, err := hydownloadermanager.New(
 		startupCtx,
 		logger,

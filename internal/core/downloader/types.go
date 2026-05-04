@@ -5,14 +5,15 @@ import "context"
 
 // Config controls optional external hydownloader supervision.
 type Config struct {
-	Enabled    bool
-	Root       string
-	Host       string
-	Port       int
-	AccessKey  string
-	Autoimport bool
-	DaemonBin  string
-	ToolsBin   string
+	Enabled      bool
+	Root         string
+	Host         string
+	Port         int
+	AccessKey    string
+	PublicAPIURL string
+	Autoimport   bool
+	DaemonBin    string
+	ToolsBin     string
 }
 
 // DefaultConfig returns the conservative local-only hydownloader defaults.

@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	neturl "net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -118,6 +119,7 @@ func LoadFromEnvUnvalidated() (Config, error) {
 	}
 	cfg.Downloader.Port = downloaderPort
 	cfg.Downloader.AccessKey = strings.TrimSpace(os.Getenv("HYDRUS_GO_HYDOWNLOADER_ACCESS_KEY"))
+	cfg.Downloader.PublicAPIURL = strings.TrimSpace(os.Getenv("HYDRUS_GO_PUBLIC_API_URL"))
 	downloaderAutoimport, err := getEnvBool("HYDRUS_GO_HYDOWNLOADER_AUTOIMPORT", cfg.Downloader.Autoimport)
 	if err != nil {
 		return Config{}, err
@@ -247,6 +249,12 @@ func (c Config) validate() error {
 		}
 		if c.Downloader.Port <= 0 || c.Downloader.Port > 65535 {
 			return fmt.Errorf("HYDRUS_GO_HYDOWNLOADER_PORT must be between 1 and 65535")
+		}
+		if strings.TrimSpace(c.Downloader.PublicAPIURL) != "" {
+			parsed, err := neturl.Parse(strings.TrimSpace(c.Downloader.PublicAPIURL))
+			if err != nil || parsed.Scheme == "" || parsed.Host == "" {
+				return fmt.Errorf("HYDRUS_GO_PUBLIC_API_URL must be a full http or https URL when set")
+			}
 		}
 		if strings.TrimSpace(c.Downloader.DaemonBin) == "" {
 			return fmt.Errorf("HYDRUS_GO_HYDOWNLOADER_DAEMON_BIN must not be empty")

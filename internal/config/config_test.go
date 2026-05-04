@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	coredownloader "github.com/official-elinas/hydrus-go/internal/core/downloader"
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
 )
 
@@ -316,12 +317,23 @@ func TestConfigValidate_RejectsInvalidPTRFields(t *testing.T) {
 			},
 			wantErr: "HYDRUS_GO_PTR_SERVICE_NAME must not be empty",
 		},
+		{
+			name: "invalid downloader callback url",
+			mutate: func(cfg *Config) {
+				cfg.Downloader.Enabled = true
+				cfg.DBDir = t.TempDir()
+				cfg.Downloader.Root = t.TempDir()
+				cfg.Downloader.PublicAPIURL = "not-a-url"
+			},
+			wantErr: "HYDRUS_GO_PUBLIC_API_URL must be a full http or https URL when set",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := Config{
 				ListenAddr:               defaultListenAddr,
+				Downloader:               coredownloader.DefaultConfig(),
 				PTR:                      coreptrsync.DefaultConfig(),
 				AccessName:               defaultAccessName,
 				ShutdownTimeout:          time.Second,
@@ -359,6 +371,15 @@ func clearConfigEnv(t *testing.T) {
 	t.Setenv("HYDRUS_GO_SHUTDOWN_TIMEOUT", "")
 	t.Setenv("HYDRUS_GO_ALLOW_NON_LOCAL_CONNECTIONS", "")
 	t.Setenv("HYDRUS_GO_ENABLE_CORS", "")
+	t.Setenv("HYDRUS_GO_ENABLE_HYDOWNLOADER", "")
+	t.Setenv("HYDRUS_GO_HYDOWNLOADER_ROOT", "")
+	t.Setenv("HYDRUS_GO_HYDOWNLOADER_HOST", "")
+	t.Setenv("HYDRUS_GO_HYDOWNLOADER_PORT", "")
+	t.Setenv("HYDRUS_GO_HYDOWNLOADER_ACCESS_KEY", "")
+	t.Setenv("HYDRUS_GO_HYDOWNLOADER_AUTOIMPORT", "")
+	t.Setenv("HYDRUS_GO_HYDOWNLOADER_DAEMON_BIN", "")
+	t.Setenv("HYDRUS_GO_HYDOWNLOADER_TOOLS_BIN", "")
+	t.Setenv("HYDRUS_GO_PUBLIC_API_URL", "")
 	t.Setenv("HYDRUS_GO_ENABLE_PTR_SYNC", "")
 	t.Setenv("HYDRUS_GO_PTR_HOST", "")
 	t.Setenv("HYDRUS_GO_PTR_PORT", "")
