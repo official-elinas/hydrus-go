@@ -41,7 +41,7 @@ The first prototype iteration is intentionally narrow:
   usable daemon connection is restored
 - skip unsupported dropped items or unreadable paths with local feedback rather
   than failing the entire queue
-- preview selected JPEG/PNG/GIF originals through the daemon's `/v1/files/content` endpoint
+- preview selected still images and video poster frames through the daemon's `/v1/files/content` endpoint, using direct decode where possible and local FFmpeg conversion otherwise
   - keep preview bounded for thin-client responsiveness (currently 16 MiB payload,
     8192px maximum dimension, 16,000,000 decoded pixels)
 - show selected-file metadata in a left-side details pane, including daemon-served tag groups for the selected file
@@ -75,10 +75,10 @@ The thin-client-specific daemon endpoints for this prototype are:
   - streams the managed original file
 - `GET /v1/files/thumbnail?file_id=<id>`
   - streams the managed thumbnail when present
-  - fresh JPEG/PNG/GIF imports now attempt to create a managed thumbnail immediately
+  - fresh imports now attempt to create a managed thumbnail immediately for the currently supported still-image and FFmpeg-backed media subset
 - `POST /v1/import/local_file`
   - imports one daemon-local file path through the public thin-client contract
-  - supported JPEG/PNG/GIF still-image imports now attempt best-effort thumbnail generation after placement
+  - supported still-image/video imports now attempt best-effort thumbnail generation after placement through direct decode or local FFmpeg fallback depending on media type
 - `POST /v1/import/url`
   - imports one direct file URL through daemon-owned download/fetch logic
 - `POST /v1/import/upload`
@@ -110,9 +110,9 @@ Important notes:
   first start
 - the current first-start bootstrap on this branch is native Go rather than a
   Python checkout/runtime dependency
-- immediate thumbnail availability should currently only be expected for JPEG,
-  PNG, and GIF still-image imports; other media types may browse without a
-  thumbnail until broader generation support lands
+- immediate thumbnail availability should currently be expected only for the
+  formats covered by the current direct-decode/FFmpeg-backed generation slice;
+  unsupported or missing-FFmpeg media may still browse without a thumbnail
 - the current PTR slice supports pending-add staging, commit upload, pending-count visibility, restart opt-in persistence via the bundle-local `ptrsync` marker, and daemon retry/defer handling for transient `/update` transport failures
 - the current desktop PTR wording should be read literally: repository update **bundles** are not ordinary media files; the daemon separately reports pending download bundles, pending process bundles, local caught-up state, true up-to-date state, and raw-network vs effective-progress telemetry
 - when the remote PTR is temporarily busy, the daemon now reports retrying state with countdown-friendly status fields instead of silently hiding all retries inside one client request
@@ -130,7 +130,7 @@ Current minimum window structure:
     - queue review controls: retry selected, remove selected, retry failed, clear finished, clear queue
     - last action/result text
   - lower details pane:
-    - selected-file preview for supported JPEG/PNG/GIF image types
+  - selected-file preview for supported still images and video poster frames
     - selected-file tag metadata
     - selected-file metadata details
 - `Network > PTR Sync` opens a dedicated popup window for daemon-owned PTR status, refresh, and manual sync actions, including bundle progress ratios and up-to-date determination
