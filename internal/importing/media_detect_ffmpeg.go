@@ -35,6 +35,14 @@ func detectImportMIMEWithFFmpeg(path string) (int, bool) {
 			return 21, true
 		}
 		return 20, true
+	case strings.Contains(formatName, "flv"):
+		return 9, true
+	case strings.Contains(formatName, "asf") || strings.Contains(formatName, "wmv"):
+		return 18, true
+	case strings.Contains(formatName, "3gp") || strings.Contains(formatName, "3g2"):
+		return 14, true
+	case strings.Contains(formatName, "mpegts") || strings.Contains(formatName, "mpeg ts"):
+		return 25, true
 	case strings.Contains(formatName, "mov") || strings.Contains(formatName, "mp4") || strings.Contains(formatName, "m4a"):
 		if codecType == "audio" {
 			return 36, true

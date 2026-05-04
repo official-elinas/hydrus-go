@@ -19,24 +19,24 @@ import (
 
 // PreparedFile describes a caller-prepared local import. The caller is expected
 // to supply the source path and already-known file metadata.
-	type PreparedFile struct {
-		SourcePath          string
-		HashHex             string
-		KnownURLs           []string
-		SkipManagedPlacement bool
-		Size                int64
-	Mime                int
-	Width               *int64
-	Height              *int64
-	PixelHashHex        string
-	HasTransparency     *bool
-	Duration            *int64
-	NumFrames           *int64
-	HasAudio            *bool
-	NumWords            *int64
-	ImportedAtMS        int64
-	FileModifiedAtMS    *int64
-	LocalFileServiceKey string
+type PreparedFile struct {
+	SourcePath           string
+	HashHex              string
+	KnownURLs            []string
+	SkipManagedPlacement bool
+	Size                 int64
+	Mime                 int
+	Width                *int64
+	Height               *int64
+	PixelHashHex         string
+	HasTransparency      *bool
+	Duration             *int64
+	NumFrames            *int64
+	HasAudio             *bool
+	NumWords             *int64
+	ImportedAtMS         int64
+	FileModifiedAtMS     *int64
+	LocalFileServiceKey  string
 }
 
 // Result describes the composed storage-plus-DB outcome for one prepared
@@ -132,14 +132,14 @@ func (i *Importer) ImportPreparedFile(
 		}
 	}
 
-		dbResult, err := i.bundle.RecordPreparedLocalImport(
-			ctx,
-			hydrusdb.PreparedLocalImport{
-				HashHex:             prepared.HashHex,
-				KnownURLs:           append([]string(nil), prepared.KnownURLs...),
-				Size:                prepared.Size,
-				Mime:                prepared.Mime,
-				Width:               prepared.Width,
+	dbResult, err := i.bundle.RecordPreparedLocalImport(
+		ctx,
+		hydrusdb.PreparedLocalImport{
+			HashHex:             prepared.HashHex,
+			KnownURLs:           append([]string(nil), prepared.KnownURLs...),
+			Size:                prepared.Size,
+			Mime:                prepared.Mime,
+			Width:               prepared.Width,
 			Height:              prepared.Height,
 			PixelHashHex:        prepared.PixelHashHex,
 			HasTransparency:     prepared.HasTransparency,
@@ -216,14 +216,14 @@ func (i *Importer) ImportPreparedBytes(
 		return Result{}, err
 	}
 
-		dbResult, err := i.bundle.RecordPreparedLocalImport(
-			ctx,
-			hydrusdb.PreparedLocalImport{
-				HashHex:             prepared.HashHex,
-				KnownURLs:           append([]string(nil), prepared.KnownURLs...),
-				Size:                prepared.Size,
-				Mime:                prepared.Mime,
-				Width:               prepared.Width,
+	dbResult, err := i.bundle.RecordPreparedLocalImport(
+		ctx,
+		hydrusdb.PreparedLocalImport{
+			HashHex:             prepared.HashHex,
+			KnownURLs:           append([]string(nil), prepared.KnownURLs...),
+			Size:                prepared.Size,
+			Mime:                prepared.Mime,
+			Width:               prepared.Width,
 			Height:              prepared.Height,
 			PixelHashHex:        prepared.PixelHashHex,
 			HasTransparency:     prepared.HasTransparency,

@@ -638,10 +638,13 @@ func TestBuildSelectedPreviewResource_FFmpegFallbacks(t *testing.T) {
 		mime string
 	}{
 		{name: "mp4", ext: ".mp4", mime: "video/mp4"},
+		{name: "m4v", ext: ".m4v", mime: "video/mp4"},
 		{name: "webm", ext: ".webm", mime: "video/webm"},
 		{name: "mkv", ext: ".mkv", mime: "video/x-matroska"},
 		{name: "mov", ext: ".mov", mime: "video/quicktime"},
 		{name: "avi", ext: ".avi", mime: "video/x-msvideo"},
+		{name: "flv", ext: ".flv", mime: "video/x-flv"},
+		{name: "wmv", ext: ".wmv", mime: "video/x-ms-wmv"},
 	}
 
 	for _, tt := range tests {
@@ -1661,6 +1664,10 @@ func writeFFmpegVideoFixturePath(t *testing.T, ext string) string {
 		args = append(args, "-c:v", "libvpx-vp9", "-pix_fmt", "yuv420p")
 	case ".avi":
 		args = append(args, "-c:v", "mpeg4", "-pix_fmt", "yuv420p")
+	case ".flv":
+		args = append(args, "-c:v", "flv", "-pix_fmt", "yuv420p")
+	case ".wmv":
+		args = append(args, "-c:v", "wmv2", "-pix_fmt", "yuv420p")
 	default:
 		args = append(args, "-c:v", "libx264", "-pix_fmt", "yuv420p")
 	}
