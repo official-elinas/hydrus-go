@@ -31,7 +31,7 @@ This repository currently provides the following early migration slices:
 - daemon-owned anonymous PTR sync foundations, remote snapshot persistence, real `/update` download plus local repository-update registration, existing-DB restart/continuation handling, batched local repository-update finalization, and daemon status APIs that now distinguish local backlog completion from true up-to-date state
 - real-time PTR pending-count visibility and commit support across the daemon, daemonclient, and desktop prototype
 - an external hydownloader supervision bridge owned by `hydrusd`, including queue/status endpoints and the Hydrus Client API mutation slice that `hydownloader-importer` expects
-- an initial Fyne-based desktop prototype for `hydrusd`, including broader still-image preview, selected video poster previews, FFmpeg-backed in-app video playback in the watcher, incremental recent loading, a more resizable split-shell layout, daemon-backed search/sorting, and PTR status/manual sync/pending-count visibility
+- an initial Fyne-based desktop prototype for `hydrusd`, including broader still-image preview, selected video poster previews, FFmpeg-backed muted in-app video playback in the watcher, incremental recent loading, a more resizable split-shell layout, daemon-backed search/sorting, and PTR status/manual sync/pending-count visibility
 - real `hydrusd --listen host:port` runtime overrides for temporary LAN testing
 - explicit Linux/Windows desktop build targets, including a Windows GUI-subsystem executable for Explorer launches
 - a native-Go fresh Hydrus client bundle bootstrap for empty or missing DB directories, with plain `hydrusd` now seeding `./db` by default and verified end-to-end through live smoke testing
