@@ -198,7 +198,7 @@ func resizeThumbnailToFit(source image.Image, maxDimension int) image.Image {
 
 func supportsGeneratedThumbnail(mimeEnum int) bool {
 	switch mimeEnum {
-	case 1, 2, 3, 4, 9, 14, 18, 20, 21, 23, 25, 26, 27, 33, 34, 47, 56, 61, 63, 65, 70, 85:
+	case 1, 2, 3, 4, 9, 14, 18, 20, 21, 23, 25, 26, 27, 33, 34, 42, 47, 56, 61, 63, 65, 70, 85:
 		return true
 	default:
 		return false

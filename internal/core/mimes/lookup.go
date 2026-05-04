@@ -277,6 +277,7 @@ var extLookup = map[int]string{
 	37:  ".rm",
 	38:  ".ra",
 	39:  ".tta",
+	42:  ".video",
 	45:  ".clip",
 	46:  ".wav",
 	47:  ".ogv",
