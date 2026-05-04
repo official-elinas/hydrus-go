@@ -1,6 +1,6 @@
 # hydrus-go status
 
-Last updated: 2026-05-03
+Last updated: 2026-05-04
 
 ## Completed
 
@@ -59,6 +59,7 @@ Last updated: 2026-05-03
 - added public local-path import and trash endpoints built on top of separate read and write bundle connections
 - added best-effort JPEG/PNG import-time enrichment for `pixel_hash` and `has_transparency` so those full-metadata fields round-trip immediately for daemon-imported still images
 - added best-effort managed thumbnail generation for imported JPEG/PNG/GIF files, including stale-thumbnail repair on exact re-import
+- broadened MIME detection plus import-time FFmpeg-backed dimension/thumbnail fallbacks for additional still-image and video formats, including BMP/TIFF/WEBP/AVIF-aware changed-path coverage
 - added a first Fyne desktop prototype scaffold for `hydrusd`
 - added focused daemonclient contract tests for the desktop client's auth, browse, mutation, thumbnail, and content-fetch HTTP paths
 - added a real `hydrusd --listen host:port` runtime override for temporary LAN testing without extra environment setup
@@ -91,6 +92,9 @@ Last updated: 2026-05-03
 - wired the Fyne search bar/grid to daemon-backed local-library tag search for explicit/exact tag queries and later removed the loaded-grid fallback so unsupported terms no longer apply client-local filtering
 - added a direct PTR smoke test that proves PTR-applied mappings remain searchable through the library search path after reopen/restart
 - verified the resizable still-image watcher path for arrow-key and mouse-wheel previous/next navigation while keeping the selected gallery tile visibly highlighted, and added regression coverage for watcher navigation and tile-selection styling
+- added Hydrus Client API mutation compatibility endpoints needed by `hydownloader-importer`: `add_file`, `associate_url`, local `add_tags`, `set_notes`, `set_time`, and `force_commit`
+- added a fresh-bundle app round-trip test proving the new Hydrus Client API mutation slice can import a file, attach URLs, add local tags, set notes, set modified timestamps, and read the results back through `GET /get_files/file_metadata`
+- expanded the desktop selected-preview/watcher path to use direct decode where possible and local FFmpeg conversion otherwise, including video poster previews and an FFmpeg-backed in-app watcher video player (currently muted)
 - added daemon-side search support for `system:` predicates (`size`, `width`, `height`, `favorite`, `resolution`) and server-side sort controls (`import_oldest`, `size_desc`, `size_asc`)
 - wired the desktop search path to daemon-backed predicates (`size`, `width`, `height`, `favorite`, `resolution`) and sort modes; unsupported desktop search terms are now ignored rather than applied as UI-local fallback filtering
 - added end-to-end PTR pending-state visibility including DB counts, manager/store/API layers, daemonclient, and Fyne pending-count labeling
@@ -105,6 +109,7 @@ Last updated: 2026-05-03
 - preparing thin-client-driven performance validation for SQLite and managed `client_files` behavior alongside the first PTR daemon work
 - converting the latest parity reconnaissance into a concrete implementation order in `docs/PARITY_ROADMAP.md`
 - broadening daemon-side search beyond the current predicate slice into more complex Hydrus-like search terms and union/negation logic
+- tightening the new FFmpeg-backed video watcher path around richer controls, audio, and packaging expectations
 
 ### Active reconnaissance notes
 
@@ -229,6 +234,15 @@ See also: [`docs/PARITY_ROADMAP.md`](./PARITY_ROADMAP.md) for the prioritized pa
   - effective end-to-end progress pacing versus raw network fetch timing
 - updated the desktop PTR popup to present repository update **bundles** and done/total bundle progress rather than implying ordinary imported media-file downloads
 - refreshed README/docs to match the live API surface, current PTR behavior, and added a machine-readable `openapi.json` for Swagger/OpenAPI tooling
+
+### 2026-05-04 — Milestone: hydownloader bridge, broader media handling, and in-app video groundwork
+
+- added daemon-owned external hydownloader supervision with opt-in config, root initialization, config/import-job patching, and queue/status APIs for URLs and subscriptions
+- added the Hydrus Client API mutation bridge that `hydownloader-importer` expects today: `add_file`, `associate_url`, local `add_tags`, `set_notes`, `set_time`, and `force_commit`
+- verified that bridge end-to-end against a real fresh bundle through an app round-trip test that imports a file and reads back attached URLs, local tags, notes, and modified timestamps
+- broadened import MIME recognition and media metadata extraction for more still-image and video formats
+- added FFmpeg-backed thumbnail generation and preview conversion fallbacks so BMP/TIFF/WEBP/AVIF-class media can still produce thumbnails and selected previews when Go's built-in decoders are insufficient
+- replaced the old desktop video watcher placeholder path with an FFmpeg-backed in-app frame-stream player when a local `ffmpeg` binary is available, while keeping the existing image watcher flow for still images
 
 ### 2026-04-26 — Milestone: still-image watcher navigation and highlight verification
 

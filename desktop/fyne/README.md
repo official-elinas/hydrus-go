@@ -20,14 +20,16 @@ The prototype is intentionally narrow:
   - the single-file picker
   - the folder picker
   - drag-and-drop of files or folders into the window
+- queue downloader-managed gallery/post URLs through the existing `Import URL` dialog when hydownloader integration is enabled in `hydrusd`
 - process the queue sequentially through the daemon's remote-safe upload endpoint
 - review queued items in a dedicated list with retry/remove controls
 - keep queue staging usable while disconnected and resume processing when a
   usable daemon connection is restored
 - skip unsupported dropped items or unreadable paths with user-facing feedback
-- preview selected JPEG/PNG/GIF originals through the daemon's content endpoint
+- preview selected still images and video poster frames through the daemon's content endpoint, using direct decode where possible and local FFmpeg conversion otherwise
   - preview is intentionally bounded to keep the thin client responsive
   - current limits: 16 MiB payload, 8192px maximum dimension, 16,000,000 decoded pixels
+- play supported videos inside the watcher through an FFmpeg-backed in-app frame-stream path when a local `ffmpeg` binary is available
 - inspect selected-file tag metadata and file metadata in separate details sections
 - inspect daemon-owned PTR sync state and trigger a manual sync pass from a dedicated popup launched through `Network > PTR Sync`
 - clear the queue when idle or prune/retry finished items from the queue review pane
