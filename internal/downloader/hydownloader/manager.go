@@ -457,7 +457,16 @@ func (m *Manager) start(ctx context.Context) error {
 			m.mu.Unlock()
 			return fmt.Errorf("hydownloader exited during startup: %w", err)
 		case <-startupCtx.Done():
+			if cmd.Process != nil {
+				_ = cmd.Process.Kill()
+			}
+			select {
+			case <-waitDone:
+			case <-time.After(5 * time.Second):
+			}
 			m.mu.Lock()
+			m.cmd = nil
+			m.waitDone = nil
 			m.lastErr = startupCtx.Err().Error()
 			m.mu.Unlock()
 			return fmt.Errorf("wait for hydownloader API: %w", startupCtx.Err())
