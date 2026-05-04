@@ -170,6 +170,22 @@ func TestBundleEnsurePTRSyncFoundation(t *testing.T) {
 			}
 		}
 
+		for _, indexName := range []string{
+			fmt.Sprintf("current_mappings_%d_hash_id_idx", serviceID),
+			fmt.Sprintf("deleted_mappings_%d_hash_id_idx", serviceID),
+			fmt.Sprintf("pending_mappings_%d_hash_id_idx", serviceID),
+			fmt.Sprintf("petitioned_mappings_%d_hash_id_idx", serviceID),
+		} {
+			if !rowExistsInDB(
+				t,
+				mappingsConn,
+				`SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?`,
+				indexName,
+			) {
+				t.Fatalf("expected mappings index %q to exist", indexName)
+			}
+		}
+
 		if !rowExistsInDB(
 			t,
 			bundle.conn,

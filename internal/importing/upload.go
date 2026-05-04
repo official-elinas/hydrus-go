@@ -175,6 +175,10 @@ func detectUploadImportMIME(stagedPath string, filename string) (int, error) {
 		return mimeEnum, nil
 	}
 
+	if mimeEnum, ok := detectImportMIMEWithFFmpeg(stagedPath); ok {
+		return mimeEnum, nil
+	}
+
 	return 0, &fileimport.RequestError{
 		Message: fmt.Sprintf("%s has an unsupported file type", describeUploadFilename(filename)),
 	}

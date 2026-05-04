@@ -1230,6 +1230,26 @@ func ensurePTRMappingsTables(ctx context.Context, tx *ImmediateTx, serviceID int
 			)`,
 			serviceID,
 		),
+		fmt.Sprintf(
+			`CREATE INDEX IF NOT EXISTS external_mappings.current_mappings_%d_hash_id_idx ON current_mappings_%d (hash_id)`,
+			serviceID,
+			serviceID,
+		),
+		fmt.Sprintf(
+			`CREATE INDEX IF NOT EXISTS external_mappings.deleted_mappings_%d_hash_id_idx ON deleted_mappings_%d (hash_id)`,
+			serviceID,
+			serviceID,
+		),
+		fmt.Sprintf(
+			`CREATE INDEX IF NOT EXISTS external_mappings.pending_mappings_%d_hash_id_idx ON pending_mappings_%d (hash_id)`,
+			serviceID,
+			serviceID,
+		),
+		fmt.Sprintf(
+			`CREATE INDEX IF NOT EXISTS external_mappings.petitioned_mappings_%d_hash_id_idx ON petitioned_mappings_%d (hash_id)`,
+			serviceID,
+			serviceID,
+		),
 	}
 
 	for _, statement := range tables {

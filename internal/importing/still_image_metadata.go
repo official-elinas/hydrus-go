@@ -1,6 +1,7 @@
 package importing
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"image"
@@ -9,6 +10,14 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"os"
+	"strings"
+	"time"
+
+	"github.com/official-elinas/hydrus-go/internal/core/mimes"
+	"github.com/official-elinas/hydrus-go/internal/media/ffmpegutil"
+	_ "golang.org/x/image/bmp"
+	_ "golang.org/x/image/tiff"
+	_ "golang.org/x/image/webp"
 )
 
 type stillImageImportMetadata struct {
@@ -60,24 +69,32 @@ func detectStillImageImportMetadata(path string, mimeEnum int) stillImageImportM
 }
 
 func detectImageDimensions(path string, mimeEnum int) (*int64, *int64) {
-	if !supportsDecodeConfigDimensions(mimeEnum) {
+	if supportsDecodeConfigDimensions(mimeEnum) {
+		file, err := os.Open(path)
+		if err == nil {
+			defer file.Close()
+			config, _, decodeErr := image.DecodeConfig(file)
+			if decodeErr == nil {
+				width := int64(config.Width)
+				height := int64(config.Height)
+				return &width, &height
+			}
+		}
+	}
+
+	mimeType := strings.ToLower(strings.TrimSpace(mimes.Lookup(mimeEnum).Mimetype))
+	if !strings.HasPrefix(mimeType, "image/") && !strings.HasPrefix(mimeType, "video/") {
 		return nil, nil
 	}
 
-	file, err := os.Open(path)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	width, height, err := ffmpegutil.ProbeDimensions(ctx, path)
 	if err != nil {
 		return nil, nil
 	}
-	defer file.Close()
 
-	config, _, err := image.DecodeConfig(file)
-	if err != nil {
-		return nil, nil
-	}
-
-	width := int64(config.Width)
-	height := int64(config.Height)
-	return &width, &height
+	return width, height
 }
 
 func imageHasUsefulTransparency(decodedImage image.Image) bool {
@@ -96,7 +113,7 @@ func imageHasUsefulTransparency(decodedImage image.Image) bool {
 
 func supportsStillImageImportEnrichment(mimeEnum int) bool {
 	switch mimeEnum {
-	case 1, 2:
+	case 1, 2, 4, 23, 33, 34:
 		return true
 	default:
 		return false

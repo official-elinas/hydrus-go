@@ -28,41 +28,48 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	coredownloader "github.com/official-elinas/hydrus-go/internal/core/downloader"
 	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
+	"github.com/official-elinas/hydrus-go/internal/core/mimes"
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
 	"github.com/official-elinas/hydrus-go/internal/desktop/daemonclient"
+	"github.com/official-elinas/hydrus-go/internal/media/ffmpegutil"
+	_ "golang.org/x/image/bmp"
+	_ "golang.org/x/image/tiff"
+	_ "golang.org/x/image/webp"
 )
 
 const (
-	prefsDaemonURLKey         = "daemon_url"
-	prefsAccessKeyKey         = "access_key"
-	recentPageLimit           = 120
-	recentLoadTick            = 200 * time.Millisecond
-	ptrPollTick               = time.Second
-	ptrPollErrorLimit         = 3
-	previewByteLimit          = 16 << 20
-	previewPixelLimit         = 16_000_000
-	previewMaxDimension       = 8192
-	gridThumbnailMaxDimension = 256
-	watcherByteLimit          = 64 << 20
-	watcherPixelLimit         = 64_000_000
-	watcherMaxDimension       = 16384
-	tagSuggestionLimit        = 20
-	defaultDaemonURL          = "http://127.0.0.1:45869"
-	desktopWindowTitle        = "hydrus-go curation cockpit"
-	desktopHeaderTitle        = "Hydrus Go"
-	desktopHeaderSubtitle     = "Daemon-backed browse, import, search, and PTR"
-	desktopIntroText          = "Daemon-first cockpit for validating Hydrus workflows through hydrusd."
-	defaultStatusText         = "Ready. Connect to hydrusd to start validation."
-	defaultMetadataText       = "Select a file from the grid to inspect daemon-backed metadata."
-	defaultPreviewText        = "Select an image to preview."
-	defaultTagsText           = "Select a file to inspect tag metadata."
-	gallerySortNewest         = "Date: newest"
-	gallerySortOldest         = "Date: oldest"
-	gallerySortNameAZ         = "Name: A–Z"
-	gallerySortNameZA         = "Name: Z–A"
-	gallerySortSizeDesc       = "Size: largest"
-	gallerySortSizeAsc        = "Size: smallest"
+	prefsDaemonURLKey           = "daemon_url"
+	prefsAccessKeyKey           = "access_key"
+	recentPageLimit             = 120
+	recentLoadTick              = 200 * time.Millisecond
+	ptrPollTick                 = time.Second
+	ptrPollErrorLimit           = 3
+	previewByteLimit            = 16 << 20
+	previewPixelLimit           = 16_000_000
+	previewMaxDimension         = 8192
+	gridThumbnailMaxDimension   = 256
+	tileMetadataConcurrentLimit = 4
+	watcherByteLimit            = 64 << 20
+	watcherPixelLimit           = 64_000_000
+	watcherMaxDimension         = 16384
+	tagSuggestionLimit          = 20
+	defaultDaemonURL            = "http://127.0.0.1:45869"
+	desktopWindowTitle          = "hydrus-go curation cockpit"
+	desktopHeaderTitle          = "Hydrus Go"
+	desktopHeaderSubtitle       = "Daemon-backed browse, import, search, and PTR"
+	desktopIntroText            = "Daemon-first cockpit for validating Hydrus workflows through hydrusd."
+	defaultStatusText           = "Ready. Connect to hydrusd to start validation."
+	defaultMetadataText         = "Select a file from the grid to inspect daemon-backed metadata."
+	defaultPreviewText          = "Select an image or video to preview."
+	defaultTagsText             = "Select a file to inspect tag metadata."
+	gallerySortNewest           = "Date: newest"
+	gallerySortOldest           = "Date: oldest"
+	gallerySortNameAZ           = "Name: A–Z"
+	gallerySortNameZA           = "Name: Z–A"
+	gallerySortSizeDesc         = "Size: largest"
+	gallerySortSizeAsc          = "Size: smallest"
 )
 
 var gallerySortModes = []string{
@@ -1371,7 +1378,11 @@ func (p *prototype) showURLImportDialog() {
 	referralEntry := widget.NewEntry()
 	referralEntry.SetPlaceHolder("Optional referral URL")
 
-	statusLabel := widget.NewLabel("Download a direct file URL and import it through hydrusd.")
+	modeOptions := []string{"Hydownloader queue", "Direct file import"}
+	modeSelect := widget.NewSelect(modeOptions, nil)
+	modeSelect.SetSelected(modeOptions[0])
+
+	statusLabel := widget.NewLabel("Queue a gallery/post URL through hydownloader, or import one direct file URL through hydrusd.")
 	statusLabel.Wrapping = fyne.TextWrapWord
 
 	window := p.app.NewWindow("Import URL")
@@ -1379,6 +1390,7 @@ func (p *prototype) showURLImportDialog() {
 	window.SetPadded(true)
 
 	form := widget.NewForm(
+		widget.NewFormItem("Mode", modeSelect),
 		widget.NewFormItem("URL", urlEntry),
 		widget.NewFormItem("Referral URL", referralEntry),
 	)
@@ -1391,12 +1403,39 @@ func (p *prototype) showURLImportDialog() {
 			return
 		}
 
-		statusLabel.SetText("Importing URL through hydrusd...")
+		selectedMode := modeSelect.Selected
+		if selectedMode == modeOptions[0] {
+			statusLabel.SetText("Queueing URL through hydownloader...")
+		} else {
+			statusLabel.SetText("Importing URL through hydrusd...")
+		}
 		form.Disable()
 
-		go func(connection connectionSnapshot, rawURL string, referralURL string) {
+		go func(connection connectionSnapshot, rawURL string, referralURL string, selectedMode string) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
+
+			if selectedMode == modeOptions[0] {
+				err := connection.client.QueueDownloaderURL(ctx, coredownloader.URLRequest{URL: rawURL})
+				fyne.Do(func() {
+					if !p.isCurrentOperation(connection) {
+						window.Close()
+						return
+					}
+
+					if err != nil {
+						form.Enable()
+						statusLabel.SetText("Hydownloader queue request failed.")
+						dialog.ShowError(err, window)
+						return
+					}
+
+					message := "Queued URL through hydownloader. Files will appear after hydownloader finishes downloading and autoimporting them."
+					p.setStatus(message)
+					window.Close()
+				})
+				return
+			}
 
 			result, err := connection.client.ImportURL(ctx, fileimport.URLRequest{
 				URL:         rawURL,
@@ -1420,7 +1459,7 @@ func (p *prototype) showURLImportDialog() {
 				p.setStatus(fmt.Sprintf("Imported URL into file_id %d through hydrusd.", result.FileID))
 				window.Close()
 			})
-		}(connection, trimmedURL, strings.TrimSpace(referralEntry.Text))
+		}(connection, trimmedURL, strings.TrimSpace(referralEntry.Text), selectedMode)
 	}
 	form.OnCancel = func() {
 		window.Close()
@@ -2263,7 +2302,9 @@ func (p *prototype) ensureGridWrap() {
 				resource,
 				overlay,
 				recentItem.FileID == p.selectedFileID,
-				nil,
+				func() {
+					p.selectFile(recentItem.FileID)
+				},
 				func() {
 					p.selectFile(recentItem.FileID)
 					p.openNativeWatcherForFile(recentItem.FileID)
@@ -2436,7 +2477,8 @@ func (p *prototype) loadSelectedPreview(fileID int64) {
 			return
 		}
 
-		if err := validateSelectedPreviewPayload(payload); err != nil {
+		resource, err := buildSelectedPreviewResource(ctx, payload, item.MIME, item.FileID)
+		if err != nil {
 			fyne.Do(func() {
 				if !p.isCurrentOperation(connection) || !p.isCurrentPreviewRequest(requestID) || p.selectedFileID != item.FileID {
 					return
@@ -2446,11 +2488,6 @@ func (p *prototype) loadSelectedPreview(fileID int64) {
 			})
 			return
 		}
-
-		resource := fyne.NewStaticResource(
-			fmt.Sprintf("file-%d-original", item.FileID),
-			payload,
-		)
 		p.storeSelectedPreview(item, resource)
 
 		fyne.Do(func() {
@@ -2525,6 +2562,11 @@ func (p *prototype) openNativeWatcherForFile(fileID int64) {
 	}
 
 	title := fmt.Sprintf("Watcher • file_id %d", item.FileID)
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(item.MIME)), "video/") && supportsNativeVideoPlayback() {
+		p.openNativeVideoWatcherForFile(fileID, item, title)
+		return
+	}
+
 	if message := nativeWatcherFallbackMessage(item.MIME); message != "" {
 		p.presentWatcherWindow(title, newWatcherMessageContent(item.MIME, message))
 		return
@@ -2564,7 +2606,8 @@ func (p *prototype) openNativeWatcherForFile(fileID int64) {
 			return
 		}
 
-		if err := validateNativeWatcherPayload(payload); err != nil {
+		resource, err := buildNativeWatcherResource(ctx, payload, item.MIME, item.FileID)
+		if err != nil {
 			fyne.Do(func() {
 				if !p.isCurrentOperation(connection) || !p.isCurrentWatcherRequest(requestID) {
 					return
@@ -2574,11 +2617,6 @@ func (p *prototype) openNativeWatcherForFile(fileID int64) {
 			})
 			return
 		}
-
-		resource := fyne.NewStaticResource(
-			fmt.Sprintf("file-%d-watcher", item.FileID),
-			payload,
-		)
 
 		fyne.Do(func() {
 			if !p.isCurrentOperation(connection) || !p.isCurrentWatcherRequest(requestID) {
@@ -2916,9 +2954,27 @@ func (p *prototype) clearTileMetadataLoad(fileID int64, generation uint64) {
 	delete(p.tileMetadataLoads, fileID)
 }
 
+func (p *prototype) shouldPrefetchTileMetadata(fileID int64) bool {
+	if fileID <= 0 || fileID == p.selectedFileID {
+		return false
+	}
+
+	p.stateMu.RLock()
+	defer p.stateMu.RUnlock()
+
+	if !p.ptrStatusLoaded {
+		return true
+	}
+
+	return !p.ptrStatus.IsRunning
+}
+
 func (p *prototype) ensureTileMetadata(item daemonclient.RecentItem) {
 	connection := p.currentConnection()
 	if !connection.connected || connection.client == nil {
+		return
+	}
+	if !p.shouldPrefetchTileMetadata(item.FileID) {
 		return
 	}
 
@@ -2930,6 +2986,10 @@ func (p *prototype) ensureTileMetadata(item daemonclient.RecentItem) {
 	}
 
 	if _, loading := p.tileMetadataLoads[item.FileID]; loading {
+		p.tileMetadataMu.Unlock()
+		return
+	}
+	if len(p.tileMetadataLoads) >= tileMetadataConcurrentLimit {
 		p.tileMetadataMu.Unlock()
 		return
 	}
@@ -3165,7 +3225,7 @@ func newWatcherLoadingContent(mime string) fyne.CanvasObject {
 
 func newWatcherImageContent(item daemonclient.RecentItem, resource fyne.Resource) fyne.CanvasObject {
 	imageViewer := canvas.NewImageFromResource(resource)
-	imageViewer.FillMode = canvas.ImageFillOriginal
+	imageViewer.FillMode = canvas.ImageFillContain
 	imageViewer.ScaleMode = canvas.ImageScaleSmooth
 
 	headline := widget.NewLabelWithStyle(
@@ -3175,9 +3235,9 @@ func newWatcherImageContent(item daemonclient.RecentItem, resource fyne.Resource
 	)
 	headline.Wrapping = fyne.TextTruncate
 
-	footerText := "Original-size image viewer. Resize the window or use mouse wheel / arrow keys to navigate."
+	footerText := "Resizable image viewer. Resize the window or use mouse wheel / arrow keys to navigate."
 	if item.Width != nil && item.Height != nil {
-		footerText = fmt.Sprintf("Original-size image viewer • %dx%d • use mouse wheel / arrow keys to navigate.", *item.Width, *item.Height)
+		footerText = fmt.Sprintf("Resizable image viewer • %dx%d • use mouse wheel / arrow keys to navigate.", *item.Width, *item.Height)
 	}
 	footer := widget.NewLabel(footerText)
 	footer.Wrapping = fyne.TextWrapWord
@@ -3231,28 +3291,91 @@ func (p *prototype) setStatus(text string) {
 }
 
 func supportsSelectedPreviewMime(mime string) bool {
-	switch strings.TrimSpace(strings.ToLower(mime)) {
-	case "image/gif", "image/jpeg", "image/png":
-		return true
-	default:
-		return false
-	}
+	normalized := strings.TrimSpace(strings.ToLower(mime))
+	return strings.HasPrefix(normalized, "image/") || strings.HasPrefix(normalized, "video/")
 }
 
 func nativeWatcherFallbackMessage(mime string) string {
 	normalized := strings.TrimSpace(strings.ToLower(mime))
-	if supportsSelectedPreviewMime(normalized) {
+	if strings.HasPrefix(normalized, "image/") {
 		return ""
 	}
 
 	if strings.HasPrefix(normalized, "video/") {
+		if supportsNativeVideoPlayback() {
+			return ""
+		}
 		return "Native video playback is not yet bundled in this prototype.\n\nThis build keeps viewing inside the app, but core Fyne does not provide a built-in in-app video player."
 	}
 
 	return fmt.Sprintf("Viewer not available for %s.", mime)
 }
 
+func buildSelectedPreviewResource(ctx context.Context, payload []byte, mime string, fileID int64) (fyne.Resource, error) {
+	return buildBoundedPreviewResource(
+		ctx,
+		payload,
+		mime,
+		fmt.Sprintf("file-%d-original", fileID),
+		previewMaxDimension,
+		previewPixelLimit,
+		true,
+	)
+}
+
+func buildNativeWatcherResource(ctx context.Context, payload []byte, mime string, fileID int64) (fyne.Resource, error) {
+	return buildBoundedPreviewResource(
+		ctx,
+		payload,
+		mime,
+		fmt.Sprintf("file-%d-watcher", fileID),
+		watcherMaxDimension,
+		watcherPixelLimit,
+		false,
+	)
+}
+
+func buildBoundedPreviewResource(ctx context.Context, payload []byte, mime string, name string, maxDimension int, pixelLimit int64, allowVideoPoster bool) (fyne.Resource, error) {
+	normalized := strings.TrimSpace(strings.ToLower(mime))
+	sourceIsVideo := strings.HasPrefix(normalized, "video/")
+	if sourceIsVideo && !allowVideoPoster {
+		return nil, fmt.Errorf("video previews require the native watcher playback path")
+	}
+	if !strings.HasPrefix(normalized, "image/") && !sourceIsVideo {
+		return nil, fmt.Errorf("viewer not available for %s", mime)
+	}
+
+	if err := validatePreviewPayloadBounds(payload, maxDimension, pixelLimit); err == nil {
+		return fyne.NewStaticResource(name, payload), nil
+	}
+
+	pngPayload, err := ffmpegutil.TranscodeBytesToPNG(
+		ctx,
+		payload,
+		previewInputExtForMime(normalized),
+		maxDimension,
+		sourceIsVideo,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := validatePreviewPayloadBounds(pngPayload, maxDimension, pixelLimit); err != nil {
+		return nil, err
+	}
+
+	return fyne.NewStaticResource(name, pngPayload), nil
+}
+
 func validateSelectedPreviewPayload(payload []byte) error {
+	return validatePreviewPayloadBounds(payload, previewMaxDimension, previewPixelLimit)
+}
+
+func validateNativeWatcherPayload(payload []byte) error {
+	return validatePreviewPayloadBounds(payload, watcherMaxDimension, watcherPixelLimit)
+}
+
+func validatePreviewPayloadBounds(payload []byte, maxDimension int, pixelLimit int64) error {
 	config, _, err := image.DecodeConfig(bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("decode image config: %w", err)
@@ -3262,60 +3385,35 @@ func validateSelectedPreviewPayload(payload []byte) error {
 		return fmt.Errorf("decoded image dimensions were invalid")
 	}
 
-	if config.Width > previewMaxDimension || config.Height > previewMaxDimension {
+	if config.Width > maxDimension || config.Height > maxDimension {
 		return fmt.Errorf(
 			"decoded image dimensions %dx%d exceed the preview limit of %dx%d",
 			config.Width,
 			config.Height,
-			previewMaxDimension,
-			previewMaxDimension,
+			maxDimension,
+			maxDimension,
 		)
 	}
 
 	pixels := int64(config.Width) * int64(config.Height)
-	if pixels > previewPixelLimit {
+	if pixels > pixelLimit {
 		return fmt.Errorf(
 			"decoded image dimensions %dx%d exceed the preview limit of %d pixels",
 			config.Width,
 			config.Height,
-			previewPixelLimit,
+			pixelLimit,
 		)
 	}
 
 	return nil
 }
 
-func validateNativeWatcherPayload(payload []byte) error {
-	config, _, err := image.DecodeConfig(bytes.NewReader(payload))
-	if err != nil {
-		return fmt.Errorf("decode image config: %w", err)
+func previewInputExtForMime(mime string) string {
+	if mimeEnum, ok := mimes.FromMIMEType(mime); ok {
+		return mimes.Lookup(mimeEnum).Ext
 	}
 
-	if config.Width <= 0 || config.Height <= 0 {
-		return fmt.Errorf("decoded image dimensions were invalid")
-	}
-
-	if config.Width > watcherMaxDimension || config.Height > watcherMaxDimension {
-		return fmt.Errorf(
-			"decoded image dimensions %dx%d exceed the watcher limit of %dx%d",
-			config.Width,
-			config.Height,
-			watcherMaxDimension,
-			watcherMaxDimension,
-		)
-	}
-
-	pixels := int64(config.Width) * int64(config.Height)
-	if pixels > watcherPixelLimit {
-		return fmt.Errorf(
-			"decoded image dimensions %dx%d exceed the watcher limit of %d pixels",
-			config.Width,
-			config.Height,
-			watcherPixelLimit,
-		)
-	}
-
-	return nil
+	return ""
 }
 
 func formatMetadataDetails(metadata daemonclient.FileMetadata) string {

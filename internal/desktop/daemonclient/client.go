@@ -20,9 +20,15 @@ import (
 	"strings"
 	"time"
 
-	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
+	coredownloader "github.com/official-elinas/hydrus-go/internal/core/downloader"
 	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
+	"github.com/official-elinas/hydrus-go/internal/core/mimes"
+	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
+	"github.com/official-elinas/hydrus-go/internal/media/ffmpegutil"
+	_ "golang.org/x/image/bmp"
 	xdraw "golang.org/x/image/draw"
+	_ "golang.org/x/image/tiff"
+	_ "golang.org/x/image/webp"
 )
 
 const hydrusContentUpdatePendAction = "2"
@@ -118,6 +124,14 @@ type metadataResponse struct {
 
 type tagSuggestionsResponse struct {
 	Suggestions []string `json:"suggestions"`
+}
+
+type downloaderStatusResponse struct {
+	Downloader coredownloader.Status `json:"downloader"`
+}
+
+type downloaderMapResponse struct {
+	Downloaders map[string]string `json:"downloaders"`
 }
 
 type addTagsRequest struct {
@@ -327,6 +341,36 @@ func (c *Client) ImportURL(ctx context.Context, request fileimport.URLRequest) (
 	return response, nil
 }
 
+// GetDownloaderStatus returns the current daemon-owned hydownloader status.
+func (c *Client) GetDownloaderStatus(ctx context.Context) (coredownloader.Status, error) {
+	var response downloaderStatusResponse
+	if err := c.doJSON(ctx, http.MethodGet, "/v1/downloader/status", nil, true, &response); err != nil {
+		return coredownloader.Status{}, err
+	}
+
+	return response.Downloader, nil
+}
+
+// GetDownloaderDownloaders returns the supported hydownloader subscription downloaders.
+func (c *Client) GetDownloaderDownloaders(ctx context.Context) (map[string]string, error) {
+	var response downloaderMapResponse
+	if err := c.doJSON(ctx, http.MethodGet, "/v1/downloader/downloaders", nil, true, &response); err != nil {
+		return nil, err
+	}
+
+	return response.Downloaders, nil
+}
+
+// QueueDownloaderURL asks hydrusd to queue a hydownloader single URL job.
+func (c *Client) QueueDownloaderURL(ctx context.Context, request coredownloader.URLRequest) error {
+	return c.doJSON(ctx, http.MethodPost, "/v1/downloader/url", request, true, nil)
+}
+
+// QueueDownloaderSubscription asks hydrusd to queue a hydownloader subscription.
+func (c *Client) QueueDownloaderSubscription(ctx context.Context, request coredownloader.SubscriptionRequest) error {
+	return c.doJSON(ctx, http.MethodPost, "/v1/downloader/subscription", request, true, nil)
+}
+
 // UploadFile streams one local file to hydrusd for import.
 func (c *Client) UploadFile(ctx context.Context, path string) (ImportResult, error) {
 	normalizedPath := filepath.Clean(strings.TrimSpace(path))
@@ -523,8 +567,8 @@ func (c *Client) TriggerDBIntegrityCheck(ctx context.Context) (DBIntegrityRespon
 	return out, err
 }
 
-// GenerateGridThumbnail fetches a bounded original payload from hydrusd and
-// generates a client-local grid thumbnail.
+// GenerateGridThumbnail prefers the daemon thumbnail endpoint and falls back to
+// deriving a grid thumbnail from a bounded original payload.
 func (c *Client) GenerateGridThumbnail(ctx context.Context, item RecentItem, maxDimension int) ([]byte, error) {
 	if strings.TrimSpace(item.ContentURL) == "" {
 		return nil, fmt.Errorf("no content URL is available for file_id %d", item.FileID)
@@ -532,6 +576,13 @@ func (c *Client) GenerateGridThumbnail(ctx context.Context, item RecentItem, max
 
 	if maxDimension <= 0 {
 		maxDimension = defaultGridThumbnailMaxDimension
+	}
+
+	if strings.TrimSpace(item.ThumbnailURL) != "" {
+		thumbnailPayload, err := c.doBytesLimited(ctx, http.MethodGet, item.ThumbnailURL, true, gridThumbnailSourceByteLimit)
+		if err == nil && len(thumbnailPayload) > 0 {
+			return thumbnailPayload, nil
+		}
 	}
 
 	payload, err := c.doBytesLimited(ctx, http.MethodGet, item.ContentURL, true, gridThumbnailSourceByteLimit)
@@ -545,7 +596,18 @@ func (c *Client) GenerateGridThumbnail(ctx context.Context, item RecentItem, max
 
 	source, _, err := image.Decode(bytes.NewReader(payload))
 	if err != nil {
-		return nil, fmt.Errorf("decode original for grid thumbnail: %w", err)
+		fallback, fallbackErr := ffmpegutil.TranscodeBytesToPNG(
+			ctx,
+			payload,
+			previewInputExt(item.MIME),
+			maxDimension,
+			strings.HasPrefix(strings.ToLower(strings.TrimSpace(item.MIME)), "video/"),
+		)
+		if fallbackErr != nil {
+			return nil, fmt.Errorf("decode original for grid thumbnail: %w", err)
+		}
+
+		return fallback, nil
 	}
 
 	thumbnail := resizeImageToFit(source, maxDimension)
@@ -555,6 +617,14 @@ func (c *Client) GenerateGridThumbnail(ctx context.Context, item RecentItem, max
 	}
 
 	return buf.Bytes(), nil
+}
+
+func previewInputExt(mime string) string {
+	if mimeEnum, ok := mimes.FromMIMEType(mime); ok {
+		return mimes.Lookup(mimeEnum).Ext
+	}
+
+	return ""
 }
 
 // FetchFileContent returns the bytes for one daemon-served managed original.
@@ -570,6 +640,59 @@ func (c *Client) FetchFileContent(ctx context.Context, item RecentItem, maxBytes
 	}
 
 	return payload, nil
+}
+
+// FetchFileContentToTemp streams one daemon-served managed original into a temp
+// file so callers can hand large video payloads to native tools without keeping
+// the whole file in memory.
+func (c *Client) FetchFileContentToTemp(ctx context.Context, item RecentItem, maxBytes int64) (string, func(), error) {
+	if strings.TrimSpace(item.ContentURL) == "" {
+		return "", func() {}, fmt.Errorf("no content URL is available for file_id %d", item.FileID)
+	}
+
+	req, err := c.newRequest(ctx, http.MethodGet, item.ContentURL, nil, true)
+	if err != nil {
+		return "", func() {}, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", func() {}, fmt.Errorf("perform daemon request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := checkAPIResponse(resp); err != nil {
+		return "", func() {}, err
+	}
+
+	tempFile, err := os.CreateTemp("", "hydrus-go-content-*"+previewInputExt(item.MIME))
+	if err != nil {
+		return "", func() {}, fmt.Errorf("create temp content file: %w", err)
+	}
+	tempPath := tempFile.Name()
+	cleanup := func() {
+		_ = os.Remove(tempPath)
+	}
+
+	bodyReader := io.Reader(resp.Body)
+	if maxBytes > 0 {
+		bodyReader = io.LimitReader(resp.Body, maxBytes+1)
+	}
+
+	written, err := io.Copy(tempFile, bodyReader)
+	if closeErr := tempFile.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("stream daemon response body: %w", err)
+	}
+	if maxBytes > 0 && written > maxBytes {
+		cleanup()
+		return "", func() {}, fmt.Errorf("daemon response exceeded %d bytes", maxBytes)
+	}
+
+	return tempPath, cleanup, nil
 }
 
 func (c *Client) doJSON(

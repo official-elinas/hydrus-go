@@ -9,6 +9,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -187,6 +188,38 @@ func TestImporterImportLocalPath(t *testing.T) {
 				width:     14,
 				height:    11,
 				writeFile: writeGIFSourceFile,
+			},
+			{
+				name:      "bmp",
+				fileName:  "import.bmp",
+				wantMIME:  "image/bmp",
+				width:     16,
+				height:    9,
+				writeFile: writeFFmpegStillImageSourceFile,
+			},
+			{
+				name:      "tiff",
+				fileName:  "import.tiff",
+				wantMIME:  "image/tiff",
+				width:     17,
+				height:    10,
+				writeFile: writeFFmpegStillImageSourceFile,
+			},
+			{
+				name:      "webp",
+				fileName:  "import.webp",
+				wantMIME:  "image/webp",
+				width:     19,
+				height:    13,
+				writeFile: writeFFmpegStillImageSourceFile,
+			},
+			{
+				name:      "avif",
+				fileName:  "import.avif",
+				wantMIME:  "image/avif",
+				width:     20,
+				height:    14,
+				writeFile: writeFFmpegStillImageSourceFile,
 			},
 		}
 
@@ -680,6 +713,32 @@ func writeGIFSourceFile(
 	}
 
 	return path
+}
+
+func writeFFmpegStillImageSourceFile(
+	t *testing.T,
+	dir string,
+	name string,
+	width int,
+	height int,
+) string {
+	t.Helper()
+
+	inputPath := writePNGSourceFile(t, dir, name+".png", width, height)
+	outputPath := filepath.Join(dir, name)
+	cmd := exec.Command(
+		"ffmpeg",
+		"-nostdin",
+		"-v", "error",
+		"-y",
+		"-i", inputPath,
+		outputPath,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg convert %q error = %v\n%s", name, err, string(output))
+	}
+
+	return outputPath
 }
 
 func writeSolidImage(width int, height int) *image.RGBA {

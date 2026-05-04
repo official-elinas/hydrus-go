@@ -158,6 +158,10 @@ func detectLocalImportMIME(path string) (int, error) {
 		return mimeEnum, nil
 	}
 
+	if mimeEnum, ok := detectImportMIMEWithFFmpeg(path); ok {
+		return mimeEnum, nil
+	}
+
 	return 0, &fileimport.RequestError{
 		Message: fmt.Sprintf("local file path %q has an unsupported file type", path),
 	}
@@ -165,7 +169,7 @@ func detectLocalImportMIME(path string) (int, error) {
 
 func supportsDecodeConfigDimensions(mimeEnum int) bool {
 	switch mimeEnum {
-	case 1, 2, 3:
+	case 1, 2, 3, 4, 23, 33, 34:
 		return true
 	default:
 		return false
