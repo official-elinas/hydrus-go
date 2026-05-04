@@ -186,7 +186,7 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 	}
 
 	hydrusAPIURL := "http://" + cfg.ListenAddr
-	downloaderManager, err := hydownloadermanager.New(
+	hydownloaderManager, err := hydownloadermanager.New(
 		startupCtx,
 		logger,
 		cfg.Downloader,
@@ -205,8 +205,10 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 		}
 		return nil, fmt.Errorf("prepare hydownloader manager: %w", err)
 	}
-	if downloaderManager != nil {
-		downloaderStore = downloaderManager
+	var downloaderManager downloaderController
+	if hydownloaderManager != nil {
+		downloaderManager = hydownloaderManager
+		downloaderStore = hydownloaderManager
 	}
 
 	handler := httpapi.NewHandler(
