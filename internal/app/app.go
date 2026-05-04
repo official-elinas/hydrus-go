@@ -310,6 +310,15 @@ func (a *App) Run(ctx context.Context) error {
 	}()
 
 	if err := a.activateDownloaderAutoimportAfterReady(); err != nil {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), a.cfg.ShutdownTimeout)
+		if a.cfg.ShutdownTimeout <= 0 {
+			shutdownCtx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		}
+		defer cancel()
+		_ = a.server.Shutdown(shutdownCtx)
+		if waitErr := <-errCh; waitErr != nil {
+			return errors.Join(err, fmt.Errorf("wait for server stop: %w", waitErr))
+		}
 		return err
 	}
 
