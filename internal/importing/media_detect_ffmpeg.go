@@ -2,6 +2,7 @@ package importing
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -22,6 +23,7 @@ func detectImportMIMEWithFFmpeg(path string) (int, bool) {
 	compatibleBrands = strings.ToLower(strings.TrimSpace(compatibleBrands))
 	codecName = strings.ToLower(strings.TrimSpace(codecName))
 	codecType = strings.ToLower(strings.TrimSpace(codecType))
+	ext := strings.ToLower(strings.TrimSpace(filepath.Ext(path)))
 
 	switch {
 	case codecType == "video" && strings.Contains(codecName, "av1") && (strings.Contains(formatName, "avif") || strings.Contains(majorBrand, "avif") || strings.Contains(compatibleBrands, "avif")):
@@ -31,7 +33,7 @@ func detectImportMIMEWithFFmpeg(path string) (int, bool) {
 	case codecType == "video" && strings.Contains(codecName, "hevc") && (strings.Contains(formatName, "heif") || strings.Contains(majorBrand, "heif") || strings.Contains(compatibleBrands, "heif") || strings.Contains(majorBrand, "mif1") || strings.Contains(compatibleBrands, "mif1")):
 		return 61, true
 	case strings.Contains(formatName, "matroska") || strings.Contains(formatName, "webm"):
-		if strings.Contains(formatName, "webm") {
+		if ext == ".webm" {
 			return 21, true
 		}
 		return 20, true
@@ -46,6 +48,9 @@ func detectImportMIMEWithFFmpeg(path string) (int, bool) {
 	case strings.Contains(formatName, "mov") || strings.Contains(formatName, "mp4") || strings.Contains(formatName, "m4a"):
 		if codecType == "audio" {
 			return 36, true
+		}
+		if ext == ".mov" || strings.Contains(majorBrand, "qt") || strings.Contains(compatibleBrands, "qt") {
+			return 26, true
 		}
 		return 14, true
 	case strings.Contains(formatName, "avi"):

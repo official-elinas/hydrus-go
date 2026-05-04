@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
@@ -100,7 +101,7 @@ func TestImporterImportUpload(t *testing.T) {
 		}
 	})
 
-	t.Run("imports uploaded file through original filename extension fallback", func(t *testing.T) {
+	t.Run("rejects uploaded fake video bytes that only match by filename extension", func(t *testing.T) {
 		dir, _ := createImportTestBundle(t)
 
 		bundle, err := hydrusdb.OpenWritable(context.Background(), dir)
@@ -127,40 +128,16 @@ func TestImporterImportUpload(t *testing.T) {
 			[]byte("fake mp4 bytes for upload extension fallback"),
 		)
 
-		result, err := importer.ImportUpload(context.Background(), fileimport.UploadRequest{
+		_, err = importer.ImportUpload(context.Background(), fileimport.UploadRequest{
 			StagedPath: stagedPath,
 			Filename:   "clip.mp4",
 		})
-		if err != nil {
-			t.Fatalf("ImportUpload() error = %v", err)
+		var requestError *fileimport.RequestError
+		if !errorAs(t, err, &requestError) {
+			t.Fatalf("ImportUpload() error = %T, want *fileimport.RequestError", err)
 		}
-
-		if err := bundle.Close(); err != nil {
-			t.Fatalf("Close() error = %v", err)
-		}
-		bundle = nil
-
-		readBundle, err := hydrusdb.Open(context.Background(), dir)
-		if err != nil {
-			t.Fatalf("Open() error = %v", err)
-		}
-		defer func() {
-			if err := readBundle.Close(); err != nil {
-				t.Fatalf("Close() error = %v", err)
-			}
-		}()
-
-		rows, err := readBundle.GetMetadata(context.Background(), filemetadata.Request{
-			FileIDs:                    []int64{result.FileID},
-			OnlyReturnBasicInformation: true,
-		})
-		if err != nil {
-			t.Fatalf("GetMetadata() error = %v", err)
-		}
-
-		row := rows[0]
-		if row["mime"] != "video/mp4" {
-			t.Fatalf("row[mime] = %v, want video/mp4", row["mime"])
+		if !strings.Contains(err.Error(), "unsupported or unverified media payload") {
+			t.Fatalf("ImportUpload() error = %v, want unsupported or unverified media payload", err)
 		}
 	})
 

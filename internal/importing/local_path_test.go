@@ -477,7 +477,7 @@ func TestImporterImportLocalPath(t *testing.T) {
 		assertManagedThumbnailImage(t, thumbnailPath, 32, 20)
 	})
 
-	t.Run("imports a video-like path through extension fallback", func(t *testing.T) {
+	t.Run("rejects fake video bytes that only match by extension", func(t *testing.T) {
 		dir, _ := createImportTestBundle(t)
 
 		bundle, err := hydrusdb.OpenWritable(context.Background(), dir)
@@ -502,42 +502,13 @@ func TestImporterImportLocalPath(t *testing.T) {
 			[]byte("fake mp4 bytes for extension fallback"),
 		)
 
-		result, err := importer.ImportLocalPath(context.Background(), fileimport.Request{Path: sourcePath})
-		if err != nil {
-			t.Fatalf("ImportLocalPath() error = %v", err)
+		_, err = importer.ImportLocalPath(context.Background(), fileimport.Request{Path: sourcePath})
+		var requestError *fileimport.RequestError
+		if !errorAs(t, err, &requestError) {
+			t.Fatalf("ImportLocalPath() error = %T, want *fileimport.RequestError", err)
 		}
-
-		readBundle, err := hydrusdb.Open(context.Background(), dir)
-		if err != nil {
-			t.Fatalf("Open() error = %v", err)
-		}
-		defer func() {
-			if err := readBundle.Close(); err != nil {
-				t.Fatalf("Close() error = %v", err)
-			}
-		}()
-
-		rows, err := readBundle.GetMetadata(context.Background(), filemetadata.Request{
-			FileIDs:                    []int64{result.FileID},
-			OnlyReturnBasicInformation: true,
-		})
-		if err != nil {
-			t.Fatalf("GetMetadata() error = %v", err)
-		}
-
-		row := rows[0]
-		if row["mime"] != "video/mp4" {
-			t.Fatalf("row[mime] = %v, want video/mp4", row["mime"])
-		}
-
-		if row["width"] != nil || row["height"] != nil {
-			t.Fatalf("row width/height = %v/%v, want nil/nil", row["width"], row["height"])
-		}
-
-		layout := mustImportTestLayout(t, dir)
-		thumbnailPath := mustResolveManagedThumbnailPath(t, layout, result.Hash)
-		if _, err := os.Stat(thumbnailPath); !os.IsNotExist(err) {
-			t.Fatalf("thumbnail stat err = %v, want not exists", err)
+		if !strings.Contains(err.Error(), "unsupported or unverified media payload") {
+			t.Fatalf("ImportLocalPath() error = %v, want unsupported or unverified media payload", err)
 		}
 	})
 
@@ -842,6 +813,8 @@ func writeFFmpegVideoSourceFile(
 		"-i", fmt.Sprintf("color=c=#336699:s=%dx%d:d=1", width, height),
 	}
 	switch filepath.Ext(name) {
+	case ".webm":
+		args = append(args, "-c:v", "libvpx-vp9", "-pix_fmt", "yuv420p")
 	case ".flv":
 		args = append(args, "-c:v", "flv", "-pix_fmt", "yuv420p")
 	case ".wmv":
