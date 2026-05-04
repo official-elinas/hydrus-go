@@ -35,7 +35,13 @@ var (
 	openWriteBundle         = hydrusdb.OpenWritable
 	newDefaultImporter      = importing.NewDefaultImporter
 	ensureFreshClientBundle = bootstrap.EnsureFreshClientBundle
+	waitForDaemonReadyFn    = waitForDaemonReady
 )
+
+type downloaderController interface {
+	ActivateAutoimport(context.Context) error
+	Shutdown(context.Context) error
+}
 
 // App holds the bootstrap daemon runtime state.
 type App struct {
@@ -46,7 +52,7 @@ type App struct {
 	readBundle        *hydrusdb.Bundle
 	writeBundle       *hydrusdb.Bundle
 	ptrManager        *ptrsyncmanager.Manager
-	downloaderManager *hydownloadermanager.Manager
+	downloaderManager downloaderController
 }
 
 // New constructs the bootstrap daemon application.
@@ -301,19 +307,8 @@ func (a *App) Run(ctx context.Context) error {
 		errCh <- nil
 	}()
 
-	if a.downloaderManager != nil {
-		readyCtx, cancel := context.WithTimeout(context.Background(), a.cfg.ShutdownTimeout)
-		if a.cfg.ShutdownTimeout <= 0 {
-			readyCtx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
-		}
-		defer cancel()
-
-		if err := waitForDaemonReady(readyCtx, a.cfg.ListenAddr); err != nil {
-			return fmt.Errorf("wait for hydrus-go readiness before hydownloader autoimport: %w", err)
-		}
-		if err := a.downloaderManager.ActivateAutoimport(readyCtx); err != nil {
-			return fmt.Errorf("resume hydownloader autoimport: %w", err)
-		}
+	if err := a.activateDownloaderAutoimportAfterReady(); err != nil {
+		return err
 	}
 
 	select {
@@ -394,6 +389,29 @@ func (a *App) closeResources() {
 			a.logger.Error("close write hydrus DB bundle", "error", err)
 		}
 	}
+}
+
+func (a *App) activateDownloaderAutoimportAfterReady() error {
+	if a.downloaderManager == nil {
+		return nil
+	}
+
+	readyTimeout := a.cfg.ShutdownTimeout
+	if readyTimeout <= 0 {
+		readyTimeout = 30 * time.Second
+	}
+
+	readyCtx, cancel := context.WithTimeout(context.Background(), readyTimeout)
+	defer cancel()
+
+	if err := waitForDaemonReadyFn(readyCtx, a.cfg.ListenAddr); err != nil {
+		return fmt.Errorf("wait for hydrus-go readiness before hydownloader autoimport: %w", err)
+	}
+	if err := a.downloaderManager.ActivateAutoimport(readyCtx); err != nil {
+		return fmt.Errorf("resume hydownloader autoimport: %w", err)
+	}
+
+	return nil
 }
 
 func waitForDaemonReady(ctx context.Context, listenAddr string) error {

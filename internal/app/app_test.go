@@ -654,6 +654,67 @@ func TestNew_GrantsPTRMutationPermissionsThroughBootstrapAuth(t *testing.T) {
 	}
 }
 
+type stubDownloaderController struct {
+	activate func() error
+	shutdown func() error
+}
+
+func (s stubDownloaderController) ActivateAutoimport(context.Context) error {
+	if s.activate != nil {
+		return s.activate()
+	}
+	return nil
+}
+
+func (s stubDownloaderController) Shutdown(context.Context) error {
+	if s.shutdown != nil {
+		return s.shutdown()
+	}
+	return nil
+}
+
+func TestApp_ActivateDownloaderAutoimportAfterReady(t *testing.T) {
+	originalWait := waitForDaemonReadyFn
+	defer func() { waitForDaemonReadyFn = originalWait }()
+
+	calledWait := false
+	calledActivate := false
+	waitForDaemonReadyFn = func(ctx context.Context, listenAddr string) error {
+		calledWait = true
+		if listenAddr != "127.0.0.1:45869" {
+			t.Fatalf("listenAddr = %q, want 127.0.0.1:45869", listenAddr)
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("wait context already canceled: %v", ctx.Err())
+		}
+		return nil
+	}
+
+	application := &App{
+		cfg: config.Config{
+			ListenAddr:      "127.0.0.1:45869",
+			ShutdownTimeout: 3 * time.Second,
+		},
+		downloaderManager: stubDownloaderController{activate: func() error {
+			if !calledWait {
+				t.Fatal("ActivateAutoimport called before waitForDaemonReady")
+			}
+			calledActivate = true
+			return nil
+		}},
+	}
+
+	if err := application.activateDownloaderAutoimportAfterReady(); err != nil {
+		t.Fatalf("activateDownloaderAutoimportAfterReady() error = %v", err)
+	}
+	if !calledWait {
+		t.Fatal("waitForDaemonReady was not called")
+	}
+	if !calledActivate {
+		t.Fatal("ActivateAutoimport was not called")
+	}
+}
+
 func TestNew_PTRStatusIgnoresPersistedFoundationWhenSyncDisabled(t *testing.T) {
 	dbDir := createThinClientBundle(t)
 	enabledPTR := coreptrsync.DefaultConfig()
