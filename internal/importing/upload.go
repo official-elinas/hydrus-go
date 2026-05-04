@@ -63,6 +63,7 @@ func (i *Importer) ImportUpload(
 	}
 
 	stillImageMetadata := detectStillImageImportMetadata(stagedPath, mimeEnum)
+	videoMetadata := detectVideoImportMetadata(stagedPath, mimeEnum)
 	importedAtMS := time.Now().UTC().UnixMilli()
 
 	result, err := i.ImportPreparedFile(ctx, PreparedFile{
@@ -75,6 +76,9 @@ func (i *Importer) ImportUpload(
 		Height:              stillImageMetadata.Height,
 		PixelHashHex:        stillImageMetadata.PixelHashHex,
 		HasTransparency:     stillImageMetadata.HasTransparency,
+		Duration:            videoMetadata.Duration,
+		NumFrames:           videoMetadata.NumFrames,
+		HasAudio:            videoMetadata.HasAudio,
 		ImportedAtMS:        importedAtMS,
 		FileModifiedAtMS:    fileModifiedAtMS,
 		LocalFileServiceKey: strings.TrimSpace(request.LocalFileServiceKey),

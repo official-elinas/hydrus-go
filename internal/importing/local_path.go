@@ -60,6 +60,7 @@ func (i *Importer) ImportLocalPath(
 	}
 
 	stillImageMetadata := detectStillImageImportMetadata(sourcePath, mimeEnum)
+	videoMetadata := detectVideoImportMetadata(sourcePath, mimeEnum)
 
 	importedAtMS := time.Now().UTC().UnixMilli()
 	var fileModifiedAtMS *int64
@@ -76,6 +77,9 @@ func (i *Importer) ImportLocalPath(
 		Height:              stillImageMetadata.Height,
 		PixelHashHex:        stillImageMetadata.PixelHashHex,
 		HasTransparency:     stillImageMetadata.HasTransparency,
+		Duration:            videoMetadata.Duration,
+		NumFrames:           videoMetadata.NumFrames,
+		HasAudio:            videoMetadata.HasAudio,
 		ImportedAtMS:        importedAtMS,
 		FileModifiedAtMS:    fileModifiedAtMS,
 		LocalFileServiceKey: strings.TrimSpace(request.LocalFileServiceKey),

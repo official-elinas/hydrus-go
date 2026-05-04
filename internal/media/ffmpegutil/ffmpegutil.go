@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"strconv"
@@ -13,15 +14,97 @@ import (
 type probeInfo struct {
 	Format struct {
 		FormatName string `json:"format_name"`
+		Duration   string `json:"duration"`
 		Tags       struct {
 			MajorBrand       string `json:"major_brand"`
 			CompatibleBrands string `json:"compatible_brands"`
 		} `json:"tags"`
 	} `json:"format"`
 	Streams []struct {
-		CodecName string `json:"codec_name"`
-		CodecType string `json:"codec_type"`
+		CodecName    string `json:"codec_name"`
+		CodecType    string `json:"codec_type"`
+		NBFrames     string `json:"nb_frames"`
+		Duration     string `json:"duration"`
+		AvgFrameRate string `json:"avg_frame_rate"`
 	} `json:"streams"`
+}
+
+// ProbeMediaMetadata returns duration, frame count, and audio-presence hints.
+func ProbeMediaMetadata(ctx context.Context, path string) (durationMS *int64, numFrames *int64, hasAudio *bool, err error) {
+	cmd := exec.CommandContext(
+		ctx,
+		"ffprobe",
+		"-v", "error",
+		"-show_entries", "format=duration:stream=codec_type,nb_frames,duration,avg_frame_rate",
+		"-of", "json",
+		path,
+	)
+	output, err := cmd.Output()
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("run ffprobe metadata probe: %w", err)
+	}
+
+	var info probeInfo
+	if err := json.Unmarshal(output, &info); err != nil {
+		return nil, nil, nil, fmt.Errorf("decode ffprobe metadata probe: %w", err)
+	}
+
+	audio := false
+	videoDurationMS := int64(0)
+	videoFrames := int64(0)
+	videoFrameRate := 0.0
+	haveDuration := false
+	haveFrames := false
+	for _, stream := range info.Streams {
+		switch strings.TrimSpace(stream.CodecType) {
+		case "audio":
+			audio = true
+		case "video":
+			if videoFrameRate == 0 {
+				if parsed, ok := parseProbeRational(stream.AvgFrameRate); ok {
+					videoFrameRate = parsed
+				}
+			}
+			if !haveDuration {
+				if parsed, ok := parseProbeSecondsToMS(stream.Duration); ok {
+					videoDurationMS = parsed
+					haveDuration = true
+				}
+			}
+			if !haveFrames {
+				if parsed, ok := parseProbeInt64(stream.NBFrames); ok {
+					videoFrames = parsed
+					haveFrames = true
+				} else if rate, ok := parseProbeRational(stream.AvgFrameRate); ok {
+					if durationMS, ok := parseProbeSecondsToMS(stream.Duration); ok && durationMS > 0 {
+						videoFrames = int64(math.Round(rate * float64(durationMS) / 1000.0))
+						haveFrames = videoFrames > 0
+					}
+				}
+			}
+		}
+	}
+
+	if !haveDuration {
+		if parsed, ok := parseProbeSecondsToMS(info.Format.Duration); ok {
+			videoDurationMS = parsed
+			haveDuration = true
+		}
+	}
+	if !haveFrames && haveDuration && videoFrameRate > 0 {
+		videoFrames = int64(math.Round(videoFrameRate * float64(videoDurationMS) / 1000.0))
+		haveFrames = videoFrames > 0
+	}
+
+	if haveDuration {
+		durationMS = &videoDurationMS
+	}
+	if haveFrames {
+		numFrames = &videoFrames
+	}
+	hasAudio = &audio
+
+	return durationMS, numFrames, hasAudio, nil
 }
 
 // ProbeDimensions asks ffprobe for the first video/image stream dimensions.
@@ -186,4 +269,48 @@ func normalizedSuffix(ext string) string {
 		return trimmed
 	}
 	return "." + trimmed
+}
+
+func parseProbeSecondsToMS(value string) (int64, bool) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || trimmed == "N/A" {
+		return 0, false
+	}
+	seconds, err := strconv.ParseFloat(trimmed, 64)
+	if err != nil || seconds < 0 {
+		return 0, false
+	}
+	return int64(math.Round(seconds * 1000.0)), true
+}
+
+func parseProbeInt64(value string) (int64, bool) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || trimmed == "N/A" {
+		return 0, false
+	}
+	parsed, err := strconv.ParseInt(trimmed, 10, 64)
+	if err != nil || parsed < 0 {
+		return 0, false
+	}
+	return parsed, true
+}
+
+func parseProbeRational(value string) (float64, bool) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" || trimmed == "N/A" {
+		return 0, false
+	}
+	parts := strings.Split(trimmed, "/")
+	if len(parts) != 2 {
+		return 0, false
+	}
+	numerator, err := strconv.ParseFloat(strings.TrimSpace(parts[0]), 64)
+	if err != nil {
+		return 0, false
+	}
+	denominator, err := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+	if err != nil || denominator == 0 {
+		return 0, false
+	}
+	return numerator / denominator, true
 }

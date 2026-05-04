@@ -603,6 +603,17 @@ func TestImporterImportLocalPath(t *testing.T) {
 				if row["width"] != int64(8) || row["height"] != int64(6) {
 					t.Fatalf("row width/height = %v/%v, want 8/6", row["width"], row["height"])
 				}
+				if got := row["has_audio"]; got != false {
+					t.Fatalf("row[has_audio] = %v, want false", got)
+				}
+				duration, ok := row["duration"].(int64)
+				if !ok || duration <= 0 {
+					t.Fatalf("row[duration] = %v, want positive int64", row["duration"])
+				}
+				frames, ok := row["num_frames"].(int64)
+				if !ok || frames <= 0 {
+					t.Fatalf("row[num_frames] = %v, want positive int64", row["num_frames"])
+				}
 
 				layout := mustImportTestLayout(t, dir)
 				thumbnailPath := mustResolveManagedThumbnailPath(t, layout, result.Hash)
