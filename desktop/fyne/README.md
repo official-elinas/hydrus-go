@@ -29,7 +29,7 @@ The prototype is intentionally narrow:
 - preview selected still images and video poster frames through the daemon's content endpoint, using direct decode where possible and local FFmpeg conversion otherwise
   - preview is intentionally bounded to keep the thin client responsive
   - current limits: 16 MiB payload, 8192px maximum dimension, 16,000,000 decoded pixels
-- play supported videos inside the watcher through an FFmpeg-backed muted in-app frame-stream path when a local `ffmpeg` binary is available
+- play supported videos inside the watcher through an FFmpeg/FFplay-backed in-app path when local `ffmpeg`, `ffprobe`, and `ffplay` binaries are available
 - inspect selected-file tag metadata and file metadata in separate details sections
 - inspect daemon-owned PTR sync state and trigger a manual sync pass from a dedicated popup launched through `Network > PTR Sync`
 - clear the queue when idle or prune/retry finished items from the queue review pane

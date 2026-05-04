@@ -35,7 +35,8 @@ func supportsNativeVideoPlayback() bool {
 	videoPlaybackCheckOnce.Do(func() {
 		_, ffmpegErr := exec.LookPath("ffmpeg")
 		_, ffprobeErr := exec.LookPath("ffprobe")
-		videoPlaybackEnabled = ffmpegErr == nil && ffprobeErr == nil
+		_, ffplayErr := exec.LookPath("ffplay")
+		videoPlaybackEnabled = ffmpegErr == nil && ffprobeErr == nil && ffplayErr == nil
 	})
 
 	return videoPlaybackEnabled
@@ -64,7 +65,7 @@ func newWatcherVideoContent(item daemonclient.RecentItem) *watcherVideoContent {
 	status.Wrapping = fyne.TextWrapWord
 	status.Alignment = fyne.TextAlignCenter
 
-	footer := widget.NewLabel("In-app video playback via ffmpeg. Audio is muted in this prototype. Use arrow keys to navigate.")
+	footer := widget.NewLabel("In-app video playback via ffmpeg/ffplay. Close the watcher to stop playback and use arrow keys to navigate.")
 	footer.Wrapping = fyne.TextWrapWord
 
 	background := canvas.NewRectangle(color.NRGBA{R: 18, G: 18, B: 20, A: 255})
@@ -158,12 +159,29 @@ func playVideoFileInWatcher(ctx context.Context, path string, item daemonclient.
 		height = probedHeight
 	}
 
+	_, _, hasAudio, err := ffmpegutil.ProbeMediaMetadata(ctx, path)
+	if err != nil {
+		return err
+	}
+	audioDone := make(chan error, 1)
+	if hasAudio != nil && *hasAudio {
+		go func() {
+			audioDone <- playVideoAudio(ctx, path)
+		}()
+	} else {
+		close(audioDone)
+	}
+
 	if err := streamVideoFrames(ctx, path, watcherVideoMaxDimension, true, func(frame image.Image) {
 		fyne.Do(func() {
 			content.SetFrame(frame)
 		})
 	}); err != nil {
 		return err
+	}
+
+	if audioErr, ok := <-audioDone; ok && audioErr != nil && ctx.Err() == nil {
+		return audioErr
 	}
 
 	if ctx.Err() == nil {
@@ -234,6 +252,23 @@ func streamVideoFrames(ctx context.Context, path string, maxDimension int, realt
 		return fmt.Errorf("wait for ffmpeg playback: %w", err)
 	}
 
+	return nil
+}
+
+func playVideoAudio(ctx context.Context, path string) error {
+	cmd := exec.CommandContext(
+		ctx,
+		"ffplay",
+		"-nostdin",
+		"-nodisp",
+		"-autoexit",
+		"-loglevel", "error",
+		"-vn",
+		path,
+	)
+	if err := cmd.Run(); err != nil && ctx.Err() == nil {
+		return fmt.Errorf("play video audio: %w", err)
+	}
 	return nil
 }
 

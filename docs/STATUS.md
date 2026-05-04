@@ -94,7 +94,7 @@ Last updated: 2026-05-04
 - verified the resizable still-image watcher path for arrow-key and mouse-wheel previous/next navigation while keeping the selected gallery tile visibly highlighted, and added regression coverage for watcher navigation and tile-selection styling
 - added Hydrus Client API mutation compatibility endpoints needed by `hydownloader-importer`: `add_file`, `associate_url`, local `add_tags`, `set_notes`, `set_time`, and `force_commit`
 - added a fresh-bundle app round-trip test proving the new Hydrus Client API mutation slice can import a file, attach URLs, add local tags, set notes, set modified timestamps, and read the results back through `GET /get_files/file_metadata`
-- expanded the desktop selected-preview/watcher path to use direct decode where possible and local FFmpeg conversion otherwise, including video poster previews and an FFmpeg-backed in-app watcher video player (currently muted)
+- expanded the desktop selected-preview/watcher path to use direct decode where possible and local FFmpeg conversion otherwise, including video poster previews and an FFmpeg/FFplay-backed in-app watcher video player
 - added daemon-side search support for `system:` predicates (`size`, `width`, `height`, `favorite`, `resolution`) and server-side sort controls (`import_oldest`, `size_desc`, `size_asc`)
 - wired the desktop search path to daemon-backed predicates (`size`, `width`, `height`, `favorite`, `resolution`) and sort modes; unsupported desktop search terms are now ignored rather than applied as UI-local fallback filtering
 - added end-to-end PTR pending-state visibility including DB counts, manager/store/API layers, daemonclient, and Fyne pending-count labeling

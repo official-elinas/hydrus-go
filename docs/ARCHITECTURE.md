@@ -198,7 +198,7 @@ The current selected-file preview behavior is intentionally bounded rather than 
 
 - the desktop client uses `GET /v1/files/content` for selected still images and video poster previews, using direct decode or local FFmpeg conversion depending on media type
 - preview requests are bounded to 16 MiB payloads, 8192px maximum dimension, and 16,000,000 decoded pixels
-- the watcher now also has an FFmpeg-backed muted in-app frame-stream path for supported video MIME values when `ffmpeg`/`ffprobe` are available locally
+- the watcher now also has an FFmpeg/FFplay-backed in-app path for supported video MIME values when `ffmpeg`, `ffprobe`, and `ffplay` are available locally
 - those limits are deliberate thin-client safety rails so manual LAN testing can validate original-file serving without turning the prototype into an unrestricted media viewer
 
 The runtime storage/DB model for this phase is:

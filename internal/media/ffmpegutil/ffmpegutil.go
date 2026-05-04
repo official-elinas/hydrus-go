@@ -167,6 +167,12 @@ func ProbePrimaryStream(ctx context.Context, path string) (formatName string, ma
 	majorBrand = strings.TrimSpace(info.Format.Tags.MajorBrand)
 	compatibleBrands = strings.TrimSpace(info.Format.Tags.CompatibleBrands)
 	for _, stream := range info.Streams {
+		if strings.TrimSpace(stream.CodecType) != "video" {
+			continue
+		}
+		return formatName, majorBrand, compatibleBrands, strings.TrimSpace(stream.CodecName), "video", nil
+	}
+	for _, stream := range info.Streams {
 		if strings.TrimSpace(stream.CodecType) == "" {
 			continue
 		}
