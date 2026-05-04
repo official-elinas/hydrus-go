@@ -37,10 +37,11 @@ func TestManagerInitializesQueuesAndShutsDown(t *testing.T) {
 	}
 
 	var (
-		mu                   sync.Mutex
-		queuedURLBody        []map[string]any
+		mu                     sync.Mutex
+		queuedURLBody          []map[string]any
 		queuedSubscriptionBody []map[string]any
-		shutdownCalled       bool
+		resumeAutoimportCalled bool
+		shutdownCalled         bool
 	)
 
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -53,14 +54,17 @@ func TestManagerInitializesQueuesAndShutsDown(t *testing.T) {
 			writeManagerJSON(t, w, map[string]any{"version": "test"})
 		case "/get_status_info":
 			writeManagerJSON(t, w, map[string]any{
-				"subscriptions_due": 2,
-				"urls_queued": 1,
-				"subscriptions_paused": false,
-				"urls_paused": false,
-				"subscription_worker_status": "checking subscription",
-				"url_worker_status": "downloading URL",
+				"subscriptions_due":                    2,
+				"urls_queued":                          1,
+				"subscriptions_paused":                 false,
+				"urls_paused":                          false,
+				"autoimport_jobs_paused":               true,
+				"subscription_worker_status":           "checking subscription",
+				"url_worker_status":                    "downloading URL",
+				"autoimport_worker_status":             "paused",
 				"subscription_worker_last_update_time": 123.0,
-				"url_worker_last_update_time": 456.0,
+				"url_worker_last_update_time":          456.0,
+				"autoimport_worker_last_update_time":   789.0,
 			})
 		case "/downloaders":
 			writeManagerJSON(t, w, map[string]any{"gelbooru": "https://gelbooru.com/index.php?page=post&s=list&tags={keywords}"})
@@ -73,6 +77,11 @@ func TestManagerInitializesQueuesAndShutsDown(t *testing.T) {
 		case "/shutdown":
 			mu.Lock()
 			shutdownCalled = true
+			mu.Unlock()
+			writeManagerJSON(t, w, map[string]any{"status": true})
+		case "/resume_autoimports":
+			mu.Lock()
+			resumeAutoimportCalled = true
 			mu.Unlock()
 			writeManagerJSON(t, w, map[string]any{"status": true})
 		default:
@@ -129,6 +138,9 @@ func TestManagerInitializesQueuesAndShutsDown(t *testing.T) {
 	if !status.Running || status.URLsQueued != 1 || status.SubscriptionsDue != 2 {
 		t.Fatalf("status = %#v, want running with queued URL and due subscription counts", status)
 	}
+	if !status.AutoimportPaused || status.AutoimportWorkerStatus != "paused" {
+		t.Fatalf("status = %#v, want paused autoimport worker details", status)
+	}
 
 	downloaders, err := manager.Downloaders(context.Background())
 	if err != nil {
@@ -180,6 +192,10 @@ func TestManagerInitializesQueuesAndShutsDown(t *testing.T) {
 		t.Fatalf("import jobs text = %q, want hydrus API key replacement", importJobsText)
 	}
 
+	if err := manager.ActivateAutoimport(context.Background()); err != nil {
+		t.Fatalf("ActivateAutoimport() error = %v", err)
+	}
+
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	if err := manager.Shutdown(shutdownCtx); err != nil {
@@ -187,6 +203,9 @@ func TestManagerInitializesQueuesAndShutsDown(t *testing.T) {
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	if !resumeAutoimportCalled {
+		t.Fatal("resumeAutoimportCalled = false, want hydownloader autoimport resume API request")
+	}
 	if !shutdownCalled {
 		t.Fatal("shutdownCalled = false, want hydownloader shutdown API request")
 	}

@@ -5,14 +5,14 @@ import "context"
 
 // Config controls optional external hydownloader supervision.
 type Config struct {
-	Enabled   bool
-	Root      string
-	Host      string
-	Port      int
-	AccessKey string
+	Enabled    bool
+	Root       string
+	Host       string
+	Port       int
+	AccessKey  string
 	Autoimport bool
-	DaemonBin string
-	ToolsBin  string
+	DaemonBin  string
+	ToolsBin   string
 }
 
 // DefaultConfig returns the conservative local-only hydownloader defaults.
@@ -65,14 +65,17 @@ type Status struct {
 	Root                        string            `json:"root,omitempty"`
 	BaseURL                     string            `json:"base_url,omitempty"`
 	Autoimport                  bool              `json:"autoimport"`
+	AutoimportPaused            bool              `json:"autoimport_jobs_paused,omitempty"`
 	URLsQueued                  int64             `json:"urls_queued,omitempty"`
 	SubscriptionsDue            int64             `json:"subscriptions_due,omitempty"`
 	SubscriptionsPaused         bool              `json:"subscriptions_paused,omitempty"`
 	URLsPaused                  bool              `json:"urls_paused,omitempty"`
 	SubscriptionWorkerStatus    string            `json:"subscription_worker_status,omitempty"`
 	URLWorkerStatus             string            `json:"url_worker_status,omitempty"`
+	AutoimportWorkerStatus      string            `json:"autoimport_worker_status,omitempty"`
 	SubscriptionWorkerUpdatedAt float64           `json:"subscription_worker_last_update_time,omitempty"`
 	URLWorkerUpdatedAt          float64           `json:"url_worker_last_update_time,omitempty"`
+	AutoimportWorkerUpdatedAt   float64           `json:"autoimport_worker_last_update_time,omitempty"`
 	Downloaders                 map[string]string `json:"downloaders,omitempty"`
 	LastError                   string            `json:"last_error,omitempty"`
 }
@@ -83,6 +86,7 @@ type Store interface {
 	QueueURL(context.Context, URLRequest) error
 	QueueSubscription(context.Context, SubscriptionRequest) error
 	Downloaders(context.Context) (map[string]string, error)
+	ActivateAutoimport(context.Context) error
 }
 
 // Shutdowner is implemented by stores that own background resources.

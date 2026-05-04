@@ -163,10 +163,13 @@ func (m *Manager) Status(ctx context.Context) (coredownloader.Status, error) {
 	status.SubscriptionsDue = raw.SubscriptionsDue
 	status.SubscriptionsPaused = raw.SubscriptionsPaused
 	status.URLsPaused = raw.URLsPaused
+	status.AutoimportPaused = raw.AutoimportJobsPaused
 	status.SubscriptionWorkerStatus = raw.SubscriptionWorkerStatus
 	status.URLWorkerStatus = raw.URLWorkerStatus
+	status.AutoimportWorkerStatus = raw.AutoimportWorkerStatus
 	status.SubscriptionWorkerUpdatedAt = raw.SubscriptionWorkerLastUpdateTime
 	status.URLWorkerUpdatedAt = raw.URLWorkerLastUpdateTime
+	status.AutoimportWorkerUpdatedAt = raw.AutoimportWorkerLastUpdateTime
 	status.LastError = ""
 	return status, nil
 }
@@ -284,15 +287,37 @@ func (m *Manager) Downloaders(ctx context.Context) (map[string]string, error) {
 	return result, nil
 }
 
+// ActivateAutoimport resumes hydownloader's autoimport worker after hydrusd is ready.
+func (m *Manager) ActivateAutoimport(ctx context.Context) error {
+	if m == nil || !m.cfg.Autoimport {
+		return nil
+	}
+
+	var response struct {
+		Status bool `json:"status"`
+	}
+	if err := m.postJSON(ctx, "/resume_autoimports", map[string]any{}, &response); err != nil {
+		return err
+	}
+	if !response.Status {
+		return fmt.Errorf("hydownloader rejected autoimport resume request")
+	}
+
+	return nil
+}
+
 type hydownloaderStatusResponse struct {
 	SubscriptionsDue                 int64   `json:"subscriptions_due"`
 	URLsQueued                       int64   `json:"urls_queued"`
 	SubscriptionsPaused              bool    `json:"subscriptions_paused"`
 	URLsPaused                       bool    `json:"urls_paused"`
+	AutoimportJobsPaused             bool    `json:"autoimport_jobs_paused"`
 	SubscriptionWorkerStatus         string  `json:"subscription_worker_status"`
 	URLWorkerStatus                  string  `json:"url_worker_status"`
+	AutoimportWorkerStatus           string  `json:"autoimport_worker_status"`
 	SubscriptionWorkerLastUpdateTime float64 `json:"subscription_worker_last_update_time"`
 	URLWorkerLastUpdateTime          float64 `json:"url_worker_last_update_time"`
+	AutoimportWorkerLastUpdateTime   float64 `json:"autoimport_worker_last_update_time"`
 }
 
 func (m *Manager) ensureInitialized(ctx context.Context) error {
@@ -393,6 +418,8 @@ func (m *Manager) start(ctx context.Context) error {
 	args := []string{"start", "--path", m.cfg.Root}
 	if !m.cfg.Autoimport {
 		args = append(args, "--no-autoimporter")
+	} else {
+		args = append(args, "--paused-autoimporter")
 	}
 	cmd := execCommandContext(context.Background(), m.cfg.DaemonBin, args...)
 	cmd.Stdout = io.Discard

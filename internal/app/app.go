@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -38,13 +39,13 @@ var (
 
 // App holds the bootstrap daemon runtime state.
 type App struct {
-	cfg         config.Config
-	logger      *slog.Logger
-	access      *httpapi.AccessControl
-	server      *http.Server
-	readBundle  *hydrusdb.Bundle
-	writeBundle *hydrusdb.Bundle
-	ptrManager  *ptrsyncmanager.Manager
+	cfg               config.Config
+	logger            *slog.Logger
+	access            *httpapi.AccessControl
+	server            *http.Server
+	readBundle        *hydrusdb.Bundle
+	writeBundle       *hydrusdb.Bundle
+	ptrManager        *ptrsyncmanager.Manager
 	downloaderManager *hydownloadermanager.Manager
 }
 
@@ -227,13 +228,13 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 	}
 
 	return &App{
-		cfg:         cfg,
-		logger:      logger,
-		access:      access,
-		server:      server,
-		readBundle:  readBundle,
-		writeBundle: writeBundle,
-		ptrManager:  ptrManager,
+		cfg:               cfg,
+		logger:            logger,
+		access:            access,
+		server:            server,
+		readBundle:        readBundle,
+		writeBundle:       writeBundle,
+		ptrManager:        ptrManager,
 		downloaderManager: downloaderManager,
 	}, nil
 }
@@ -299,6 +300,21 @@ func (a *App) Run(ctx context.Context) error {
 
 		errCh <- nil
 	}()
+
+	if a.downloaderManager != nil {
+		readyCtx, cancel := context.WithTimeout(context.Background(), a.cfg.ShutdownTimeout)
+		if a.cfg.ShutdownTimeout <= 0 {
+			readyCtx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		}
+		defer cancel()
+
+		if err := waitForDaemonReady(readyCtx, a.cfg.ListenAddr); err != nil {
+			return fmt.Errorf("wait for hydrus-go readiness before hydownloader autoimport: %w", err)
+		}
+		if err := a.downloaderManager.ActivateAutoimport(readyCtx); err != nil {
+			return fmt.Errorf("resume hydownloader autoimport: %w", err)
+		}
+	}
 
 	select {
 	case <-ctx.Done():
@@ -376,6 +392,33 @@ func (a *App) closeResources() {
 	if a.writeBundle != nil {
 		if err := a.writeBundle.Close(); err != nil {
 			a.logger.Error("close write hydrus DB bundle", "error", err)
+		}
+	}
+}
+
+func waitForDaemonReady(ctx context.Context, listenAddr string) error {
+	baseURL := "http://" + strings.TrimSpace(listenAddr)
+	client := &http.Client{Timeout: 2 * time.Second}
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	for {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/healthz", nil)
+		if err == nil {
+			resp, err := client.Do(req)
+			if err == nil {
+				_, _ = io.Copy(io.Discard, resp.Body)
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					return nil
+				}
+			}
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
 		}
 	}
 }

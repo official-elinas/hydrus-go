@@ -3033,31 +3033,31 @@ func (s stubPTRStore) PendingMappingCount(
 }
 
 type fakeMetadataStore struct {
-	rows                   []filemetadata.Row
-	err                    error
-	integrityResult        filemetadata.IntegrityCheckResult
-	handle                 func(filemetadata.Request) ([]filemetadata.Row, error)
-	suggestTagsHandle      func(string, int) ([]string, error)
-	integrityHandle        func() (filemetadata.IntegrityCheckResult, error)
-	listRecentHandle       func(librarybrowse.Request) (librarybrowse.Page, error)
-	searchByTagsHandle     func(librarybrowse.SearchRequest) (librarybrowse.Page, error)
-	resolveContentHandle   func(int64) (fileassets.Descriptor, error)
-	resolveThumbnailHandle func(int64) (fileassets.Descriptor, error)
-	downloaderStatus       coredownloader.Status
-	downloaderStatusErr    error
-	queueURLHandle        func(coredownloader.URLRequest) error
+	rows                    []filemetadata.Row
+	err                     error
+	integrityResult         filemetadata.IntegrityCheckResult
+	handle                  func(filemetadata.Request) ([]filemetadata.Row, error)
+	suggestTagsHandle       func(string, int) ([]string, error)
+	integrityHandle         func() (filemetadata.IntegrityCheckResult, error)
+	listRecentHandle        func(librarybrowse.Request) (librarybrowse.Page, error)
+	searchByTagsHandle      func(librarybrowse.SearchRequest) (librarybrowse.Page, error)
+	resolveContentHandle    func(int64) (fileassets.Descriptor, error)
+	resolveThumbnailHandle  func(int64) (fileassets.Descriptor, error)
+	downloaderStatus        coredownloader.Status
+	downloaderStatusErr     error
+	queueURLHandle          func(coredownloader.URLRequest) error
 	queueSubscriptionHandle func(coredownloader.SubscriptionRequest) error
-	downloaderMap         map[string]string
-	downloaderMapErr      error
-	associateURLsHandle    func(clientapi.URLAssociationRequest) error
-	addTagsHandle          func(clientapi.TagRequest) error
-	setNotesHandle         func(clientapi.NotesRequest) (map[string]string, error)
-	setTimeHandle          func(clientapi.TimeRequest) error
-	importLocalHandle      func(fileimport.Request) (fileimport.Result, error)
-	importURLHandle        func(fileimport.URLRequest) (fileimport.Result, error)
-	importUploadHandle     func(fileimport.UploadRequest) (fileimport.Result, error)
-	trashFileHandle        func(filetrash.Request) (filetrash.Result, error)
-	lastRequest            *filemetadata.Request
+	downloaderMap           map[string]string
+	downloaderMapErr        error
+	associateURLsHandle     func(clientapi.URLAssociationRequest) error
+	addTagsHandle           func(clientapi.TagRequest) error
+	setNotesHandle          func(clientapi.NotesRequest) (map[string]string, error)
+	setTimeHandle           func(clientapi.TimeRequest) error
+	importLocalHandle       func(fileimport.Request) (fileimport.Result, error)
+	importURLHandle         func(fileimport.URLRequest) (fileimport.Result, error)
+	importUploadHandle      func(fileimport.UploadRequest) (fileimport.Result, error)
+	trashFileHandle         func(filetrash.Request) (filetrash.Result, error)
+	lastRequest             *filemetadata.Request
 }
 
 func (s *fakeMetadataStore) GetMetadata(
@@ -3174,6 +3174,12 @@ func (s *fakeMetadataStore) Downloaders(
 	}
 
 	return map[string]string{}, nil
+}
+
+func (s *fakeMetadataStore) ActivateAutoimport(
+	_ context.Context,
+) error {
+	return nil
 }
 
 func (s *fakeMetadataStore) AssociateURLs(

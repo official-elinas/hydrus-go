@@ -790,14 +790,17 @@
                             "root": { "type": "string" },
                             "base_url": { "type": "string" },
                             "autoimport": { "type": "boolean" },
+                            "autoimport_jobs_paused": { "type": "boolean" },
                             "urls_queued": { "type": "integer", "format": "int64" },
                             "subscriptions_due": { "type": "integer", "format": "int64" },
                             "subscriptions_paused": { "type": "boolean" },
                             "urls_paused": { "type": "boolean" },
                             "subscription_worker_status": { "type": "string" },
                             "url_worker_status": { "type": "string" },
+                            "autoimport_worker_status": { "type": "string" },
                             "subscription_worker_last_update_time": { "type": "number" },
                             "url_worker_last_update_time": { "type": "number" },
+                            "autoimport_worker_last_update_time": { "type": "number" },
                             "last_error": { "type": "string" }
                           },
                           "required": ["enabled", "configured", "running", "autoimport"]
