@@ -33,8 +33,9 @@ var (
 
 func supportsNativeVideoPlayback() bool {
 	videoPlaybackCheckOnce.Do(func() {
-		_, err := exec.LookPath("ffmpeg")
-		videoPlaybackEnabled = err == nil
+		_, ffmpegErr := exec.LookPath("ffmpeg")
+		_, ffprobeErr := exec.LookPath("ffprobe")
+		videoPlaybackEnabled = ffmpegErr == nil && ffprobeErr == nil
 	})
 
 	return videoPlaybackEnabled

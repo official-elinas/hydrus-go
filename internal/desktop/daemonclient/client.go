@@ -601,7 +601,7 @@ func (c *Client) GenerateGridThumbnail(ctx context.Context, item RecentItem, max
 			payload,
 			previewInputExt(item.MIME),
 			maxDimension,
-			strings.HasPrefix(strings.ToLower(strings.TrimSpace(item.MIME)), "video/"),
+			strings.HasPrefix(strings.ToLower(strings.TrimSpace(item.MIME)), "video/") || strings.TrimSpace(strings.ToLower(item.MIME)) == "video",
 		)
 		if fallbackErr != nil {
 			return nil, fmt.Errorf("decode original for grid thumbnail: %w", err)

@@ -2562,7 +2562,7 @@ func (p *prototype) openNativeWatcherForFile(fileID int64) {
 	}
 
 	title := fmt.Sprintf("Watcher • file_id %d", item.FileID)
-	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(item.MIME)), "video/") && supportsNativeVideoPlayback() {
+	if (strings.HasPrefix(strings.ToLower(strings.TrimSpace(item.MIME)), "video/") || strings.TrimSpace(strings.ToLower(item.MIME)) == "video") && supportsNativeVideoPlayback() {
 		p.openNativeVideoWatcherForFile(fileID, item, title)
 		return
 	}
@@ -3292,16 +3292,16 @@ func (p *prototype) setStatus(text string) {
 
 func supportsSelectedPreviewMime(mime string) bool {
 	normalized := strings.TrimSpace(strings.ToLower(mime))
-	return strings.HasPrefix(normalized, "image/") || strings.HasPrefix(normalized, "video/")
+	return strings.HasPrefix(normalized, "image/") || normalized == "image" || strings.HasPrefix(normalized, "video/") || normalized == "video"
 }
 
 func nativeWatcherFallbackMessage(mime string) string {
 	normalized := strings.TrimSpace(strings.ToLower(mime))
-	if strings.HasPrefix(normalized, "image/") {
+	if strings.HasPrefix(normalized, "image/") || normalized == "image" {
 		return ""
 	}
 
-	if strings.HasPrefix(normalized, "video/") {
+	if strings.HasPrefix(normalized, "video/") || normalized == "video" {
 		if supportsNativeVideoPlayback() {
 			return ""
 		}
@@ -3337,11 +3337,11 @@ func buildNativeWatcherResource(ctx context.Context, payload []byte, mime string
 
 func buildBoundedPreviewResource(ctx context.Context, payload []byte, mime string, name string, maxDimension int, pixelLimit int64, allowVideoPoster bool) (fyne.Resource, error) {
 	normalized := strings.TrimSpace(strings.ToLower(mime))
-	sourceIsVideo := strings.HasPrefix(normalized, "video/")
+	sourceIsVideo := strings.HasPrefix(normalized, "video/") || normalized == "video"
 	if sourceIsVideo && !allowVideoPoster {
 		return nil, fmt.Errorf("video previews require the native watcher playback path")
 	}
-	if !strings.HasPrefix(normalized, "image/") && !sourceIsVideo {
+	if !strings.HasPrefix(normalized, "image/") && normalized != "image" && !sourceIsVideo {
 		return nil, fmt.Errorf("viewer not available for %s", mime)
 	}
 
