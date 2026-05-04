@@ -157,25 +157,49 @@ func playVideoFileInWatcher(ctx context.Context, path string, item daemonclient.
 		height = probedHeight
 	}
 
-	targetWidth, targetHeight := fitVideoDimensions(*width, *height, watcherVideoMaxDimension)
+	if err := streamVideoFrames(ctx, path, watcherVideoMaxDimension, true, func(frame image.Image) {
+		fyne.Do(func() {
+			content.SetFrame(frame)
+		})
+	}); err != nil {
+		return err
+	}
+
+	if ctx.Err() == nil {
+		fyne.Do(func() {
+			content.SetStatus("Playback finished. Use arrow keys to navigate or close the watcher.")
+		})
+	}
+
+	return nil
+}
+
+func streamVideoFrames(ctx context.Context, path string, maxDimension int, realtime bool, onFrame func(image.Image)) error {
+	width, height, err := ffmpegutil.ProbeDimensions(ctx, path)
+	if err != nil {
+		return err
+	}
+
+	targetWidth, targetHeight := fitVideoDimensions(*width, *height, maxDimension)
 	frameSize := targetWidth * targetHeight * 4
 	if frameSize <= 0 {
 		return fmt.Errorf("invalid video frame size %dx%d", targetWidth, targetHeight)
 	}
 
-	cmd := exec.CommandContext(
-		ctx,
-		"ffmpeg",
-		"-nostdin",
-		"-re",
+	args := []string{"-nostdin"}
+	if realtime {
+		args = append(args, "-re")
+	}
+	args = append(args,
 		"-v", "error",
 		"-i", path,
 		"-an",
 		"-f", "rawvideo",
 		"-pix_fmt", "rgba",
-		"-vf", fmt.Sprintf("scale=w='min(iw,%d)':h='min(ih,%d)':force_original_aspect_ratio=decrease", watcherVideoMaxDimension, watcherVideoMaxDimension),
+		"-vf", fmt.Sprintf("scale=w='min(iw,%d)':h='min(ih,%d)':force_original_aspect_ratio=decrease", maxDimension, maxDimension),
 		"pipe:1",
 	)
+	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("open ffmpeg stdout pipe: %w", err)
@@ -202,19 +226,11 @@ func playVideoFileInWatcher(ctx context.Context, path string, item daemonclient.
 
 		frame := image.NewNRGBA(image.Rect(0, 0, targetWidth, targetHeight))
 		copy(frame.Pix, buffer)
-		fyne.Do(func() {
-			content.SetFrame(frame)
-		})
+		onFrame(frame)
 	}
 
 	if err := cmd.Wait(); err != nil && ctx.Err() == nil {
 		return fmt.Errorf("wait for ffmpeg playback: %w", err)
-	}
-
-	if ctx.Err() == nil {
-		fyne.Do(func() {
-			content.SetStatus("Playback finished. Use arrow keys to navigate or close the watcher.")
-		})
 	}
 
 	return nil

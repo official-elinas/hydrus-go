@@ -632,21 +632,52 @@ func TestBuildSelectedPreviewResource_FFmpegFallbacks(t *testing.T) {
 		}
 	})
 
-	t.Run("renders a video poster frame for selected preview", func(t *testing.T) {
-		payload := writeFFmpegVideoPreviewFixture(t, ".mp4")
-		resource, err := buildSelectedPreviewResource(context.Background(), payload, "video/mp4", 8)
-		if err != nil {
-			t.Fatalf("buildSelectedPreviewResource(video) error = %v", err)
-		}
+	tests := []struct {
+		name string
+		ext  string
+		mime string
+	}{
+		{name: "mp4", ext: ".mp4", mime: "video/mp4"},
+		{name: "webm", ext: ".webm", mime: "video/webm"},
+		{name: "mkv", ext: ".mkv", mime: "video/x-matroska"},
+		{name: "mov", ext: ".mov", mime: "video/quicktime"},
+		{name: "avi", ext: ".avi", mime: "video/x-msvideo"},
+	}
 
-		decoded, _, err := image.Decode(bytes.NewReader(resource.Content()))
-		if err != nil {
-			t.Fatalf("image.Decode(resource video poster) error = %v", err)
-		}
-		if decoded.Bounds().Dx() != 4 || decoded.Bounds().Dy() != 4 {
-			t.Fatalf("decoded video poster size = %dx%d, want 4x4", decoded.Bounds().Dx(), decoded.Bounds().Dy())
-		}
-	})
+	for _, tt := range tests {
+		tt := tt
+		t.Run("renders "+tt.name+" poster frame for selected preview", func(t *testing.T) {
+			payload := writeFFmpegVideoPreviewFixture(t, tt.ext)
+			resource, err := buildSelectedPreviewResource(context.Background(), payload, tt.mime, 8)
+			if err != nil {
+				t.Fatalf("buildSelectedPreviewResource(%s) error = %v", tt.mime, err)
+			}
+
+			decoded, _, err := image.Decode(bytes.NewReader(resource.Content()))
+			if err != nil {
+				t.Fatalf("image.Decode(resource %s poster) error = %v", tt.mime, err)
+			}
+			if decoded.Bounds().Dx() != 4 || decoded.Bounds().Dy() != 4 {
+				t.Fatalf("decoded %s poster size = %dx%d, want 4x4", tt.mime, decoded.Bounds().Dx(), decoded.Bounds().Dy())
+			}
+		})
+
+		t.Run("streams at least one frame for "+tt.name+" playback", func(t *testing.T) {
+			path := writeFFmpegVideoFixturePath(t, tt.ext)
+			frameCount := 0
+			err := streamVideoFrames(context.Background(), path, watcherVideoMaxDimension, false, func(img image.Image) {
+				if img != nil {
+					frameCount++
+				}
+			})
+			if err != nil {
+				t.Fatalf("streamVideoFrames(%s) error = %v", tt.ext, err)
+			}
+			if frameCount == 0 {
+				t.Fatalf("frameCount = 0, want at least one frame for %s", tt.ext)
+			}
+		})
+	}
 }
 
 func TestSelectedPreviewCacheHelpers(t *testing.T) {
@@ -1603,27 +1634,41 @@ func writeFFmpegPreviewFixture(t *testing.T, ext string) []byte {
 
 func writeFFmpegVideoPreviewFixture(t *testing.T, ext string) []byte {
 	t.Helper()
+	path := writeFFmpegVideoFixturePath(t, ext)
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(video output%s) error = %v", ext, err)
+	}
+
+	return payload
+}
+
+func writeFFmpegVideoFixturePath(t *testing.T, ext string) string {
+	t.Helper()
 
 	dir := t.TempDir()
 	outputPath := filepath.Join(dir, "output"+ext)
-	cmd := exec.Command(
+	args := []string{
 		"ffmpeg",
 		"-nostdin",
 		"-v", "error",
 		"-y",
 		"-f", "lavfi",
 		"-i", "color=c=#336699:s=4x4:d=1",
-		"-pix_fmt", "yuv420p",
-		outputPath,
-	)
+	}
+	switch ext {
+	case ".webm":
+		args = append(args, "-c:v", "libvpx-vp9", "-pix_fmt", "yuv420p")
+	case ".avi":
+		args = append(args, "-c:v", "mpeg4", "-pix_fmt", "yuv420p")
+	default:
+		args = append(args, "-c:v", "libx264", "-pix_fmt", "yuv420p")
+	}
+	args = append(args, outputPath)
+	cmd := exec.Command(args[0], args[1:]...)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("ffmpeg video fixture %q error = %v\n%s", ext, err, string(output))
 	}
 
-	payload, err := os.ReadFile(outputPath)
-	if err != nil {
-		t.Fatalf("ReadFile(video output%s) error = %v", ext, err)
-	}
-
-	return payload
+	return outputPath
 }
