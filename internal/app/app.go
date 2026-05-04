@@ -14,6 +14,8 @@ import (
 	"github.com/official-elinas/hydrus-go/internal/bootstrap"
 	"github.com/official-elinas/hydrus-go/internal/buildinfo"
 	"github.com/official-elinas/hydrus-go/internal/config"
+	"github.com/official-elinas/hydrus-go/internal/core/clientapi"
+	coredownloader "github.com/official-elinas/hydrus-go/internal/core/downloader"
 	"github.com/official-elinas/hydrus-go/internal/core/fileassets"
 	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
 	"github.com/official-elinas/hydrus-go/internal/core/filemetadata"
@@ -22,6 +24,7 @@ import (
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
 	"github.com/official-elinas/hydrus-go/internal/core/services"
 	"github.com/official-elinas/hydrus-go/internal/db/hydrusdb"
+	hydownloadermanager "github.com/official-elinas/hydrus-go/internal/downloader/hydownloader"
 	"github.com/official-elinas/hydrus-go/internal/importing"
 	ptrsyncmanager "github.com/official-elinas/hydrus-go/internal/ptrsync"
 )
@@ -42,6 +45,7 @@ type App struct {
 	readBundle  *hydrusdb.Bundle
 	writeBundle *hydrusdb.Bundle
 	ptrManager  *ptrsyncmanager.Manager
+	downloaderManager *hydownloadermanager.Manager
 }
 
 // New constructs the bootstrap daemon application.
@@ -56,6 +60,8 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 	var metadataStore filemetadata.Store
 	var browseStore librarybrowse.Store
 	var assetStore fileassets.Store
+	var clientAPIStore clientapi.Store
+	var downloaderStore coredownloader.Store
 	var importStore fileimport.Store
 	var trashStore filetrash.Store
 	var ptrStore coreptrsync.Store
@@ -110,6 +116,7 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 				}
 				writeBundle = nil
 			} else {
+				clientAPIStore = writeBundle
 				importStore = importer
 				trashStore = writeBundle
 			}
@@ -142,9 +149,12 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 	ptrStore = ptrManager
 
 	permissions := []httpapi.Permission{
+		httpapi.PermissionImportAndEditURLs,
 		httpapi.PermissionSearchAndFetchFiles,
 		httpapi.PermissionManageDatabase,
 		httpapi.PermissionEditFileTags,
+		httpapi.PermissionEditFileNotes,
+		httpapi.PermissionEditFileTimes,
 		httpapi.PermissionCommitPending,
 	}
 	if importStore != nil || trashStore != nil {
@@ -168,6 +178,30 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 		return nil, fmt.Errorf("create access control: %w", err)
 	}
 
+	hydrusAPIURL := "http://" + cfg.ListenAddr
+	downloaderManager, err := hydownloadermanager.New(
+		startupCtx,
+		logger,
+		cfg.Downloader,
+		hydrusAPIURL,
+		access.AccessKey(),
+	)
+	if err != nil {
+		if readBundle != nil {
+			_ = readBundle.Close()
+		}
+		if writeBundle != nil {
+			_ = writeBundle.Close()
+		}
+		if ptrManager != nil {
+			_ = ptrManager.Shutdown(context.Background())
+		}
+		return nil, fmt.Errorf("prepare hydownloader manager: %w", err)
+	}
+	if downloaderManager != nil {
+		downloaderStore = downloaderManager
+	}
+
 	handler := httpapi.NewHandler(
 		logger,
 		access,
@@ -175,6 +209,8 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 		metadataStore,
 		browseStore,
 		assetStore,
+		clientAPIStore,
+		downloaderStore,
 		importStore,
 		trashStore,
 		ptrStore,
@@ -198,6 +234,7 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 		readBundle:  readBundle,
 		writeBundle: writeBundle,
 		ptrManager:  ptrManager,
+		downloaderManager: downloaderManager,
 	}, nil
 }
 
@@ -283,6 +320,12 @@ func (a *App) Run(ctx context.Context) error {
 			}
 		}
 
+		if a.downloaderManager != nil {
+			if err := a.downloaderManager.Shutdown(shutdownCtx); err != nil {
+				return fmt.Errorf("shutdown hydownloader manager: %w", err)
+			}
+		}
+
 		if err := <-errCh; err != nil {
 			return fmt.Errorf("wait for server stop: %w", err)
 		}
@@ -307,6 +350,19 @@ func (a *App) closeResources() {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		if err := a.ptrManager.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
 			a.logger.Error("stop PTR sync manager", "error", err)
+		}
+		cancel()
+	}
+
+	if a.downloaderManager != nil {
+		shutdownTimeout := a.cfg.ShutdownTimeout
+		if shutdownTimeout <= 0 {
+			shutdownTimeout = 30 * time.Second
+		}
+
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		if err := a.downloaderManager.Shutdown(shutdownCtx); err != nil && !errors.Is(err, context.DeadlineExceeded) {
+			a.logger.Error("stop hydownloader manager", "error", err)
 		}
 		cancel()
 	}

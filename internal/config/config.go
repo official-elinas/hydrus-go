@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	coredownloader "github.com/official-elinas/hydrus-go/internal/core/downloader"
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
 )
 
@@ -28,6 +29,7 @@ type Config struct {
 	DBDir                      string
 	EnableFreshClientBootstrap bool
 	BootstrapTimeout           time.Duration
+	Downloader                 coredownloader.Config
 	PTR                        coreptrsync.Config
 	AccessKey                  string
 	AccessName                 string
@@ -60,6 +62,7 @@ func LoadFromEnvUnvalidated() (Config, error) {
 		DBDir:                      strings.TrimSpace(os.Getenv("HYDRUS_GO_DB_DIR")),
 		EnableFreshClientBootstrap: false,
 		BootstrapTimeout:           defaultBootstrapTimeout,
+		Downloader:                 coredownloader.DefaultConfig(),
 		PTR:                        coreptrsync.DefaultConfig(),
 		AccessKey:                  strings.TrimSpace(os.Getenv("HYDRUS_GO_ACCESS_KEY")),
 		AccessName:                 getEnv("HYDRUS_GO_ACCESS_NAME", defaultAccessName),
@@ -71,6 +74,9 @@ func LoadFromEnvUnvalidated() (Config, error) {
 
 	if cfg.DBDir != "" {
 		cfg.DBDir = filepath.Clean(cfg.DBDir)
+	}
+	if downloaderRoot := strings.TrimSpace(os.Getenv("HYDRUS_GO_HYDOWNLOADER_ROOT")); downloaderRoot != "" {
+		cfg.Downloader.Root = filepath.Clean(downloaderRoot)
 	}
 
 	enableFreshClientBootstrap, err := getFreshBootstrapEnabled()
@@ -99,6 +105,26 @@ func LoadFromEnvUnvalidated() (Config, error) {
 		return Config{}, err
 	}
 	cfg.PTR.Enabled = enablePTRSync
+
+	enableHydownloader, err := getEnvBool("HYDRUS_GO_ENABLE_HYDOWNLOADER", cfg.Downloader.Enabled)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.Downloader.Enabled = enableHydownloader
+	cfg.Downloader.Host = getEnv("HYDRUS_GO_HYDOWNLOADER_HOST", cfg.Downloader.Host)
+	downloaderPort, err := getEnvInt("HYDRUS_GO_HYDOWNLOADER_PORT", cfg.Downloader.Port)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.Downloader.Port = downloaderPort
+	cfg.Downloader.AccessKey = strings.TrimSpace(os.Getenv("HYDRUS_GO_HYDOWNLOADER_ACCESS_KEY"))
+	downloaderAutoimport, err := getEnvBool("HYDRUS_GO_HYDOWNLOADER_AUTOIMPORT", cfg.Downloader.Autoimport)
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.Downloader.Autoimport = downloaderAutoimport
+	cfg.Downloader.DaemonBin = getEnv("HYDRUS_GO_HYDOWNLOADER_DAEMON_BIN", cfg.Downloader.DaemonBin)
+	cfg.Downloader.ToolsBin = getEnv("HYDRUS_GO_HYDOWNLOADER_TOOLS_BIN", cfg.Downloader.ToolsBin)
 
 	cfg.PTR.Host = getEnv("HYDRUS_GO_PTR_HOST", cfg.PTR.Host)
 
@@ -207,6 +233,27 @@ func (c Config) validate() error {
 
 	if c.PTR.Enabled && strings.TrimSpace(c.DBDir) == "" {
 		return fmt.Errorf("HYDRUS_GO_DB_DIR is required when PTR sync is enabled")
+	}
+
+	if c.Downloader.Enabled {
+		if strings.TrimSpace(c.DBDir) == "" {
+			return fmt.Errorf("HYDRUS_GO_DB_DIR is required when hydownloader integration is enabled")
+		}
+		if strings.TrimSpace(c.Downloader.Root) == "" {
+			return fmt.Errorf("HYDRUS_GO_HYDOWNLOADER_ROOT is required when hydownloader integration is enabled")
+		}
+		if strings.TrimSpace(c.Downloader.Host) == "" {
+			return fmt.Errorf("HYDRUS_GO_HYDOWNLOADER_HOST must not be empty")
+		}
+		if c.Downloader.Port <= 0 || c.Downloader.Port > 65535 {
+			return fmt.Errorf("HYDRUS_GO_HYDOWNLOADER_PORT must be between 1 and 65535")
+		}
+		if strings.TrimSpace(c.Downloader.DaemonBin) == "" {
+			return fmt.Errorf("HYDRUS_GO_HYDOWNLOADER_DAEMON_BIN must not be empty")
+		}
+		if strings.TrimSpace(c.Downloader.ToolsBin) == "" {
+			return fmt.Errorf("HYDRUS_GO_HYDOWNLOADER_TOOLS_BIN must not be empty")
+		}
 	}
 
 	host, _, err := net.SplitHostPort(c.ListenAddr)

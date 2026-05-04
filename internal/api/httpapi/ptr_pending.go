@@ -1,6 +1,7 @@
 package httpapi
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -8,15 +9,27 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/official-elinas/hydrus-go/internal/core/clientapi"
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
+	"github.com/official-elinas/hydrus-go/internal/core/services"
 )
 
 type addTagsRequest struct {
-	Hash                       string                       `json:"hash"`
-	Hashes                     []string                     `json:"hashes"`
-	FileID                     *int64                       `json:"file_id"`
-	FileIDs                    []int64                      `json:"file_ids"`
+	Hash                       string                         `json:"hash"`
+	Hashes                     []string                       `json:"hashes"`
+	FileID                     *int64                         `json:"file_id"`
+	FileIDs                    []int64                        `json:"file_ids"`
+	ServiceKeysToTags          map[string][]string            `json:"service_keys_to_tags"`
+	ServiceNamesToTags         map[string][]string            `json:"service_names_to_tags"`
 	ServiceKeysToActionsToTags map[string]map[string][]string `json:"service_keys_to_actions_to_tags"`
+}
+
+type parsedAddTagsRequest struct {
+	Hashes                     []string
+	FileIDs                    []int64
+	ServiceKeysToTags          map[string][]string
+	ServiceNamesToTags         map[string][]string
+	ServiceKeysToActionsToTags map[string]map[string][]string
 }
 
 type commitPendingRequest struct {
@@ -30,18 +43,66 @@ func (s *Server) handlePostAddTags(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if s.ptrStore == nil {
-		writeError(w, http.StatusNotImplemented, "PTR pending tag staging is unavailable")
-		return
-	}
-
 	request, err := parseAddTagsRequest(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
-	result, err := s.ptrStore.AddPendingMappings(r.Context(), request)
+	if len(request.ServiceKeysToTags) > 0 || len(request.ServiceNamesToTags) > 0 {
+		if s.clientAPIStore == nil {
+			writeError(w, http.StatusNotImplemented, "local tag writes are unavailable until HYDRUS_GO_DB_DIR is configured")
+			return
+		}
+
+		if err := s.applyCurrentTagWrites(r.Context(), request); err != nil {
+			if writeClientAPIStoreError(w, err) {
+				return
+			}
+		}
+
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if len(request.ServiceKeysToActionsToTags) == 0 {
+		writeError(w, http.StatusBadRequest, "unsupported add_tags payload")
+		return
+	}
+
+	if allCurrent, err := request.currentActionTagRequests(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	} else if len(allCurrent) > 0 {
+		if s.clientAPIStore == nil {
+			writeError(w, http.StatusNotImplemented, "local tag writes are unavailable until HYDRUS_GO_DB_DIR is configured")
+			return
+		}
+
+		for _, currentRequest := range allCurrent {
+			if err := s.clientAPIStore.AddTags(r.Context(), currentRequest); err != nil {
+				if writeClientAPIStoreError(w, err) {
+					return
+				}
+			}
+		}
+
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	if s.ptrStore == nil {
+		writeError(w, http.StatusNotImplemented, "PTR pending tag staging is unavailable")
+		return
+	}
+
+	ptrRequest, err := request.pendingMappingsRequest()
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	result, err := s.ptrStore.AddPendingMappings(r.Context(), ptrRequest)
 	if err != nil {
 		switch {
 		case errors.Is(err, coreptrsync.ErrSyncDisabled), errors.Is(err, coreptrsync.ErrCommitPendingUnavailable):
@@ -56,6 +117,36 @@ func (s *Server) handlePostAddTags(w http.ResponseWriter, r *http.Request) {
 		"service_key":    result.ServiceKey,
 		"added_mappings": result.AddedMappings,
 	})
+}
+
+func (s *Server) applyCurrentTagWrites(ctx context.Context, request parsedAddTagsRequest) error {
+	for serviceKey, tags := range request.ServiceKeysToTags {
+		if err := s.clientAPIStore.AddTags(ctx, clientapi.TagRequest{
+			Hashes:     append([]string(nil), request.Hashes...),
+			FileIDs:    append([]int64(nil), request.FileIDs...),
+			ServiceKey: strings.ToLower(strings.TrimSpace(serviceKey)),
+			Tags:       append([]string(nil), tags...),
+		}); err != nil {
+			return err
+		}
+	}
+
+	for serviceName, tags := range request.ServiceNamesToTags {
+		service, ok := s.resolveWritableTagServiceByName(ctx, serviceName)
+		if !ok {
+			return &clientapi.NotFoundError{Message: "service not found"}
+		}
+		if err := s.clientAPIStore.AddTags(ctx, clientapi.TagRequest{
+			Hashes:     append([]string(nil), request.Hashes...),
+			FileIDs:    append([]int64(nil), request.FileIDs...),
+			ServiceKey: service.ServiceKey,
+			Tags:       append([]string(nil), tags...),
+		}); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func (s *Server) handlePostCommitPending(w http.ResponseWriter, r *http.Request) {
@@ -93,20 +184,24 @@ func (s *Server) handlePostCommitPending(w http.ResponseWriter, r *http.Request)
 	})
 }
 
-func parseAddTagsRequest(r *http.Request) (coreptrsync.PendingMappingsRequest, error) {
+func parseAddTagsRequest(r *http.Request) (parsedAddTagsRequest, error) {
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 
 	var raw addTagsRequest
 	if err := decoder.Decode(&raw); err != nil {
-		return coreptrsync.PendingMappingsRequest{}, err
+		return parsedAddTagsRequest{}, err
 	}
 
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
-		return coreptrsync.PendingMappingsRequest{}, errors.New("request body must contain a single JSON object")
+		return parsedAddTagsRequest{}, errors.New("request body must contain a single JSON object")
 	}
 
-	request := coreptrsync.PendingMappingsRequest{}
+	request := parsedAddTagsRequest{
+		ServiceKeysToTags:          raw.ServiceKeysToTags,
+		ServiceNamesToTags:         raw.ServiceNamesToTags,
+		ServiceKeysToActionsToTags: raw.ServiceKeysToActionsToTags,
+	}
 	if trimmedHash := strings.ToLower(strings.TrimSpace(raw.Hash)); trimmedHash != "" {
 		request.Hashes = append(request.Hashes, trimmedHash)
 	}
@@ -116,11 +211,52 @@ func parseAddTagsRequest(r *http.Request) (coreptrsync.PendingMappingsRequest, e
 	}
 	request.FileIDs = append(request.FileIDs, raw.FileIDs...)
 
-	if len(raw.ServiceKeysToActionsToTags) != 1 {
+	return request, nil
+}
+
+func (r parsedAddTagsRequest) currentActionTagRequests() ([]clientapi.TagRequest, error) {
+	requests := []clientapi.TagRequest{}
+	if len(r.ServiceKeysToActionsToTags) == 0 {
+		return requests, nil
+	}
+
+	for serviceKey, actionsToTags := range r.ServiceKeysToActionsToTags {
+		if len(actionsToTags) != 1 {
+			return nil, errors.New("only one action per service is supported")
+		}
+
+		for action, tags := range actionsToTags {
+			actionCode, err := strconv.Atoi(strings.TrimSpace(action))
+			if err != nil {
+				return nil, err
+			}
+			if actionCode != 0 {
+				return nil, nil
+			}
+
+			requests = append(requests, clientapi.TagRequest{
+				Hashes:     append([]string(nil), r.Hashes...),
+				FileIDs:    append([]int64(nil), r.FileIDs...),
+				ServiceKey: strings.ToLower(strings.TrimSpace(serviceKey)),
+				Tags:       append([]string(nil), tags...),
+			})
+		}
+	}
+
+	return requests, nil
+}
+
+func (r parsedAddTagsRequest) pendingMappingsRequest() (coreptrsync.PendingMappingsRequest, error) {
+	request := coreptrsync.PendingMappingsRequest{
+		Hashes:  append([]string(nil), r.Hashes...),
+		FileIDs: append([]int64(nil), r.FileIDs...),
+	}
+
+	if len(r.ServiceKeysToActionsToTags) != 1 {
 		return coreptrsync.PendingMappingsRequest{}, errors.New("service_keys_to_actions_to_tags must contain exactly one service")
 	}
 
-	for serviceKey, actionsToTags := range raw.ServiceKeysToActionsToTags {
+	for serviceKey, actionsToTags := range r.ServiceKeysToActionsToTags {
 		request.ServiceKey = strings.ToLower(strings.TrimSpace(serviceKey))
 		for action, tags := range actionsToTags {
 			actionCode, err := strconv.Atoi(strings.TrimSpace(action))
@@ -136,6 +272,17 @@ func parseAddTagsRequest(r *http.Request) (coreptrsync.PendingMappingsRequest, e
 	}
 
 	return request, nil
+}
+
+func (s *Server) resolveWritableTagServiceByName(ctx context.Context, serviceName string) (services.Service, bool) {
+	service, ok, err := s.services.ByName(ctx, strings.TrimSpace(serviceName))
+	if err != nil || !ok {
+		return services.Service{}, false
+	}
+	if service.Type != services.TypeLocalTag {
+		return services.Service{}, false
+	}
+	return service, true
 }
 
 func (s *Server) handleGetPendingCounts(w http.ResponseWriter, r *http.Request) {

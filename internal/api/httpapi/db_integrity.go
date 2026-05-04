@@ -27,3 +27,16 @@ func (s *Server) handlePostDatabaseIntegrityCheck(w http.ResponseWriter, r *http
 
 	writeJSON(w, http.StatusOK, map[string]any{"integrity": result})
 }
+
+func (s *Server) handlePostDatabaseForceCommit(w http.ResponseWriter, r *http.Request) {
+	_, statusCode, err := s.access.Authorize(
+		r,
+		PermissionManageDatabase,
+	)
+	if err != nil {
+		writeError(w, statusCode, err.Error())
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+}

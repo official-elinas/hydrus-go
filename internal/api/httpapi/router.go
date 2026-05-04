@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/official-elinas/hydrus-go/internal/buildinfo"
+	"github.com/official-elinas/hydrus-go/internal/core/clientapi"
+	coredownloader "github.com/official-elinas/hydrus-go/internal/core/downloader"
 	"github.com/official-elinas/hydrus-go/internal/core/fileassets"
 	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
 	"github.com/official-elinas/hydrus-go/internal/core/filemetadata"
@@ -22,16 +24,18 @@ import (
 )
 
 type Server struct {
-	logger        *slog.Logger
-	access        *AccessControl
-	services      services.Provider
-	metadataStore filemetadata.Store
-	browseStore   librarybrowse.Store
-	assetStore    fileassets.Store
-	importStore   fileimport.Store
-	trashStore    filetrash.Store
-	ptrStore      coreptrsync.Store
-	enableCORS    bool
+	logger         *slog.Logger
+	access         *AccessControl
+	services       services.Provider
+	metadataStore  filemetadata.Store
+	browseStore    librarybrowse.Store
+	assetStore     fileassets.Store
+	clientAPIStore clientapi.Store
+	downloaderStore coredownloader.Store
+	importStore    fileimport.Store
+	trashStore     filetrash.Store
+	ptrStore       coreptrsync.Store
+	enableCORS     bool
 }
 
 // NewHandler constructs the bootstrap hydrus-go HTTP API handler.
@@ -42,22 +46,26 @@ func NewHandler(
 	metadataStore filemetadata.Store,
 	browseStore librarybrowse.Store,
 	assetStore fileassets.Store,
+	clientAPIStore clientapi.Store,
+	downloaderStore coredownloader.Store,
 	importStore fileimport.Store,
 	trashStore filetrash.Store,
 	ptrStore coreptrsync.Store,
 	enableCORS bool,
 ) http.Handler {
 	server := &Server{
-		logger:        logger,
-		access:        access,
-		services:      serviceProvider,
-		metadataStore: metadataStore,
-		browseStore:   browseStore,
-		assetStore:    assetStore,
-		importStore:   importStore,
-		trashStore:    trashStore,
-		ptrStore:      ptrStore,
-		enableCORS:    enableCORS,
+		logger:         logger,
+		access:         access,
+		services:       serviceProvider,
+		metadataStore:  metadataStore,
+		browseStore:    browseStore,
+		assetStore:     assetStore,
+		clientAPIStore: clientAPIStore,
+		downloaderStore: downloaderStore,
+		importStore:    importStore,
+		trashStore:     trashStore,
+		ptrStore:       ptrStore,
+		enableCORS:     enableCORS,
 	}
 
 	mux := http.NewServeMux()
@@ -69,6 +77,14 @@ func NewHandler(
 	mux.Handle("/get_services", server.get("/get_services", server.handleGetServices))
 	mux.Handle("/get_service", server.get("/get_service", server.handleGetService))
 	mux.Handle("/v1/tags/autocomplete", server.get("/v1/tags/autocomplete", server.handleGetTagAutocomplete))
+	mux.Handle("/add_files/add_file", server.post("/add_files/add_file", server.handleHydrusAddFile))
+	mux.Handle("/add_urls/associate_url", server.post("/add_urls/associate_url", server.handleHydrusAssociateURL))
+	mux.Handle("/add_notes/set_notes", server.post("/add_notes/set_notes", server.handleHydrusSetNotes))
+	mux.Handle("/edit_times/set_time", server.post("/edit_times/set_time", server.handleHydrusSetTime))
+	mux.Handle("/v1/downloader/status", server.get("/v1/downloader/status", server.handleGetDownloaderStatus))
+	mux.Handle("/v1/downloader/downloaders", server.get("/v1/downloader/downloaders", server.handleGetDownloaderDownloaders))
+	mux.Handle("/v1/downloader/url", server.post("/v1/downloader/url", server.handlePostDownloaderURL))
+	mux.Handle("/v1/downloader/subscription", server.post("/v1/downloader/subscription", server.handlePostDownloaderSubscription))
 	mux.Handle(
 		"/get_files/file_metadata",
 		server.get("/get_files/file_metadata", server.handleGetFileMetadata),
@@ -82,6 +98,7 @@ func NewHandler(
 	mux.Handle("/v1/import/url", server.post("/v1/import/url", server.handleImportURL))
 	mux.Handle("/v1/import/upload", server.post("/v1/import/upload", server.handleImportUpload))
 	mux.Handle("/add_tags/add_tags", server.post("/add_tags/add_tags", server.handlePostAddTags))
+	mux.Handle("/manage_database/force_commit", server.post("/manage_database/force_commit", server.handlePostDatabaseForceCommit))
 	mux.Handle("/manage_database/integrity_check", server.post("/manage_database/integrity_check", server.handlePostDatabaseIntegrityCheck))
 	mux.Handle("/manage_services/commit_pending", server.post("/manage_services/commit_pending", server.handlePostCommitPending))
 	mux.Handle("/manage_services/pending_counts", server.get("/manage_services/pending_counts", server.handleGetPendingCounts))
