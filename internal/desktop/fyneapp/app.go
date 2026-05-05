@@ -2450,7 +2450,7 @@ func (p *prototype) loadSelectedPreview(fileID int64) {
 		defer cancel()
 		defer p.finishPreviewRequest(requestID)
 
-		payload, err := connection.client.FetchFileContent(ctx, item, previewByteLimit)
+		payload, err := connection.client.FetchSelectedPreview(ctx, item)
 		if err != nil {
 			if ctx.Err() != nil || !p.isCurrentPreviewRequest(requestID) {
 				return
@@ -3754,6 +3754,12 @@ func (p *prototype) fetchPTRStatus() {
 			}
 
 			if statusErr != nil {
+				if isTransientPTRStatusRequestError(statusErr) {
+					p.setStatus("PTR status refresh timed out. Retrying on next refresh.")
+					p.updateActionState()
+					return
+				}
+
 				p.setPTRVisualState("PTR sync: status fetch failed", false)
 				p.ptrStatusLabel.SetText(fmt.Sprintf("Status fetch failed: %v", statusErr))
 				p.ptrPendingLabel.SetText("Pending PTR mappings: unavailable")
@@ -3886,6 +3892,10 @@ func (p *prototype) pollPTRStatusUntilSettled(connection connectionSnapshot, req
 			status, err := connection.client.GetPTRStatus(ctx)
 			cancel()
 			if err != nil {
+				if isTransientPTRStatusRequestError(err) {
+					continue
+				}
+
 				consecutiveErrors++
 				shouldContinue := shouldContinuePTRPollingAfterError(consecutiveErrors)
 				fyne.Do(func() {
@@ -4023,6 +4033,10 @@ func ptrHeadlineText(status coreptrsync.Status) string {
 
 func shouldContinuePTRPollingAfterError(consecutiveErrors int) bool {
 	return consecutiveErrors < ptrPollErrorLimit
+}
+
+func isTransientPTRStatusRequestError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func ptrPollingErrorStatusText(err error, consecutiveErrors int) string {

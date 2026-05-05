@@ -479,6 +479,18 @@ func TestPTRPollingRetryHelpers(t *testing.T) {
 			t.Fatalf("ptrPollingErrorStatusText() = %q, want %q", got, want)
 		}
 	})
+
+	t.Run("classifies timeout and cancellation as transient ptr status errors", func(t *testing.T) {
+		if !isTransientPTRStatusRequestError(context.DeadlineExceeded) {
+			t.Fatal("isTransientPTRStatusRequestError(deadline) = false, want true")
+		}
+		if !isTransientPTRStatusRequestError(context.Canceled) {
+			t.Fatal("isTransientPTRStatusRequestError(canceled) = false, want true")
+		}
+		if isTransientPTRStatusRequestError(errors.New("temporary network failure")) {
+			t.Fatal("isTransientPTRStatusRequestError(network failure) = true, want false")
+		}
+	})
 }
 
 func TestNativeWatcherFallbackMessage(t *testing.T) {

@@ -38,6 +38,7 @@ const userAgent = "hydrus-desktop-prototype/0.1"
 const (
 	defaultGridThumbnailMaxDimension = 256
 	gridThumbnailSourceByteLimit     = 4 << 20
+	selectedPreviewThumbnailByteLimit = 8 << 20
 )
 
 // Client talks to hydrusd over HTTP.
@@ -617,6 +618,19 @@ func (c *Client) GenerateGridThumbnail(ctx context.Context, item RecentItem, max
 	}
 
 	return buf.Bytes(), nil
+}
+
+// FetchSelectedPreview prefers daemon thumbnail bytes for preview-pane display
+// and falls back to the bounded original only when no thumbnail is available.
+func (c *Client) FetchSelectedPreview(ctx context.Context, item RecentItem) ([]byte, error) {
+	if strings.TrimSpace(item.ThumbnailURL) != "" {
+		thumbnailPayload, err := c.doBytesLimited(ctx, http.MethodGet, item.ThumbnailURL, true, selectedPreviewThumbnailByteLimit)
+		if err == nil && len(thumbnailPayload) > 0 {
+			return thumbnailPayload, nil
+		}
+	}
+
+	return c.FetchFileContent(ctx, item, selectedPreviewThumbnailByteLimit)
 }
 
 func previewInputExt(mime string) string {
