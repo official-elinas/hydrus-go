@@ -50,6 +50,7 @@ type App struct {
 	access            *httpapi.AccessControl
 	server            *http.Server
 	readBundle        *hydrusdb.Bundle
+	ptrReadBundle     *hydrusdb.Bundle
 	writeBundle       *hydrusdb.Bundle
 	ptrManager        *ptrsyncmanager.Manager
 	downloaderManager downloaderController
@@ -73,6 +74,7 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 	var trashStore filetrash.Store
 	var ptrStore coreptrsync.Store
 	var readBundle *hydrusdb.Bundle
+	var ptrReadBundle *hydrusdb.Bundle
 	var writeBundle *hydrusdb.Bundle
 	var err error
 
@@ -97,6 +99,12 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 		readBundle, err = openReadBundle(startupCtx, cfg.DBDir)
 		if err != nil {
 			return nil, fmt.Errorf("open hydrus DB bundle: %w", err)
+		}
+
+		ptrReadBundle, err = openReadBundle(startupCtx, cfg.DBDir)
+		if err != nil {
+			_ = readBundle.Close()
+			return nil, fmt.Errorf("open PTR read hydrus DB bundle: %w", err)
 		}
 
 		writeBundle, err = openWriteBundle(startupCtx, cfg.DBDir)
@@ -139,12 +147,15 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 		startupCtx,
 		logger,
 		cfg.PTR,
-		readBundle,
+		ptrReadBundle,
 		writeBundle,
 	)
 	if err != nil {
 		if readBundle != nil {
 			_ = readBundle.Close()
+		}
+		if ptrReadBundle != nil {
+			_ = ptrReadBundle.Close()
 		}
 
 		if writeBundle != nil {
@@ -176,6 +187,9 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 	if err != nil {
 		if readBundle != nil {
 			_ = readBundle.Close()
+		}
+		if ptrReadBundle != nil {
+			_ = ptrReadBundle.Close()
 		}
 
 		if writeBundle != nil {
@@ -244,6 +258,7 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 		access:            access,
 		server:            server,
 		readBundle:        readBundle,
+		ptrReadBundle:     ptrReadBundle,
 		writeBundle:       writeBundle,
 		ptrManager:        ptrManager,
 		downloaderManager: downloaderManager,
@@ -395,6 +410,12 @@ func (a *App) closeResources() {
 	if a.readBundle != nil {
 		if err := a.readBundle.Close(); err != nil {
 			a.logger.Error("close read hydrus DB bundle", "error", err)
+		}
+	}
+
+	if a.ptrReadBundle != nil {
+		if err := a.ptrReadBundle.Close(); err != nil {
+			a.logger.Error("close ptr read hydrus DB bundle", "error", err)
 		}
 	}
 
