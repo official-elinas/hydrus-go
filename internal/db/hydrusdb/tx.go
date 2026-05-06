@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ImmediateTx wraps the dedicated bundle connection while a BEGIN IMMEDIATE
@@ -102,6 +103,12 @@ func (b *Bundle) WithImmediateTx(
 
 func rollbackImmediateTx(ctx context.Context, conn *sql.Conn) error {
 	if _, err := conn.ExecContext(ctx, "ROLLBACK"); err != nil {
+		// A canceled context can leave SQLite with no active transaction by the
+		// time the deferred rollback runs. In that case, preserve the original
+		// operation error instead of surfacing a misleading rollback failure.
+		if strings.Contains(err.Error(), "cannot rollback - no transaction is active") {
+			return nil
+		}
 		return fmt.Errorf("rollback immediate transaction: %w", err)
 	}
 
