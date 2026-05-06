@@ -2412,8 +2412,8 @@ func (p *prototype) selectFile(fileID int64) {
 	p.renderGrid()
 	p.updateActionState()
 	p.metadataLabel.SetText("Loading selected-file metadata from hydrusd...")
-	p.setRightTagsText("Loading tag metadata from hydrusd...")
-	p.setLeftTagsText("Loading selected-file tags from hydrusd...")
+	p.setRightTagsText("Loading selected-file tag metadata from hydrusd...")
+	p.setLeftTagsText("Loading selected-file tag metadata from hydrusd...")
 	p.loadSelectedPreview(fileID)
 	p.loadSelectedMetadata(fileID)
 }
@@ -2506,11 +2506,20 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 		return
 	}
 
+	if metadata, ok := p.lookupTileMetadata(fileID); ok {
+		p.metadataLabel.SetText(formatMetadataDetails(metadata))
+		p.setRightTagsMetadata(metadata)
+		p.setLeftTagsMetadata(metadata)
+		p.renderGrid()
+		p.refreshSearchSuggestions()
+		return
+	}
+
 	go func(connection connectionSnapshot, selectedFileID int64) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 
-		metadata, err := connection.client.GetFileMetadata(ctx, selectedFileID)
+		metadata, err := connection.client.GetBasicFileMetadata(ctx, selectedFileID)
 		if err != nil {
 			fyne.Do(func() {
 				if !p.isCurrentOperation(connection) {
@@ -2522,8 +2531,8 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 				}
 
 				p.metadataLabel.SetText("Could not load metadata from hydrusd.\n\n" + err.Error())
-				p.setRightTagsText("Could not load tag metadata from hydrusd.")
-				p.setLeftTagsText("Could not load selected-file tags from hydrusd.")
+				p.setRightTagsText("Could not load selected-file tag metadata from hydrusd.")
+				p.setLeftTagsText("Could not load selected-file tag metadata from hydrusd.")
 			})
 			return
 		}
@@ -2538,12 +2547,24 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 			}
 
 			p.tileMetadataMu.Lock()
-			p.tileMetadataCache[selectedFileID] = metadata
+			cached := p.tileMetadataCache[selectedFileID]
+			cached.FileID = metadata.FileID
+			cached.Hash = metadata.Hash
+			cached.MIME = metadata.MIME
+			cached.Size = metadata.Size
+			cached.Width = metadata.Width
+			cached.Height = metadata.Height
+			cached.IsLocal = metadata.IsLocal
+			cached.IsTrashed = metadata.IsTrashed
+			cached.IsDeleted = metadata.IsDeleted
+			p.tileMetadataCache[selectedFileID] = cached
 			p.tileMetadataMu.Unlock()
 
-			p.metadataLabel.SetText(formatMetadataDetails(metadata))
-			p.setRightTagsMetadata(metadata)
-			p.setLeftTagsMetadata(metadata)
+			p.metadataLabel.SetText(formatMetadataDetails(cached))
+			if len(cached.Tags) > 0 {
+				p.setRightTagsMetadata(cached)
+				p.setLeftTagsMetadata(cached)
+			}
 			p.renderGrid()
 			p.refreshSearchSuggestions()
 		})
@@ -3019,12 +3040,31 @@ func (p *prototype) ensureTileMetadata(item daemonclient.RecentItem) {
 		}
 
 		delete(p.tileMetadataLoads, item.FileID)
-		p.tileMetadataCache[item.FileID] = metadata
+		cached := p.tileMetadataCache[item.FileID]
+		if cached.FileID == 0 {
+			cached.FileID = metadata.FileID
+			cached.Hash = metadata.Hash
+			cached.MIME = metadata.MIME
+			cached.Size = metadata.Size
+			cached.Width = metadata.Width
+			cached.Height = metadata.Height
+			cached.IsLocal = metadata.IsLocal
+			cached.IsTrashed = metadata.IsTrashed
+			cached.IsDeleted = metadata.IsDeleted
+		}
+		cached.Ratings = metadata.Ratings
+		cached.Tags = metadata.Tags
+		p.tileMetadataCache[item.FileID] = cached
 		p.tileMetadataMu.Unlock()
 
 		fyne.Do(func() {
 			if !p.isCurrentOperation(connection) {
 				return
+			}
+
+			if p.selectedFileID == item.FileID {
+				p.setRightTagsMetadata(cached)
+				p.setLeftTagsMetadata(cached)
 			}
 
 			p.renderGrid()

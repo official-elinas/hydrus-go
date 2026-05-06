@@ -50,6 +50,7 @@ type App struct {
 	access            *httpapi.AccessControl
 	server            *http.Server
 	readBundle        *hydrusdb.Bundle
+	metadataReadBundle *hydrusdb.Bundle
 	ptrReadBundle     *hydrusdb.Bundle
 	writeBundle       *hydrusdb.Bundle
 	ptrManager        *ptrsyncmanager.Manager
@@ -74,11 +75,20 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 	var trashStore filetrash.Store
 	var ptrStore coreptrsync.Store
 	var readBundle *hydrusdb.Bundle
+	var metadataReadBundle *hydrusdb.Bundle
 	var ptrReadBundle *hydrusdb.Bundle
 	var writeBundle *hydrusdb.Bundle
 	var err error
 
 	if cfg.DBDir != "" {
+		logger.Info(
+			"preparing hydrus DB bundle",
+			"db_dir",
+			cfg.DBDir,
+			"fresh_bootstrap",
+			cfg.EnableFreshClientBootstrap,
+		)
+
 		bootstrapResult, err := ensureFreshClientBundle(startupCtx, bootstrap.Options{
 			DBDir:   cfg.DBDir,
 			Enabled: cfg.EnableFreshClientBootstrap,
@@ -96,17 +106,28 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 			)
 		}
 
+		logger.Info("opening hydrus DB read bundle", "db_dir", cfg.DBDir)
 		readBundle, err = openReadBundle(startupCtx, cfg.DBDir)
 		if err != nil {
 			return nil, fmt.Errorf("open hydrus DB bundle: %w", err)
 		}
 
+		logger.Info("opening PTR hydrus DB read bundle", "db_dir", cfg.DBDir)
 		ptrReadBundle, err = openReadBundle(startupCtx, cfg.DBDir)
 		if err != nil {
 			_ = readBundle.Close()
 			return nil, fmt.Errorf("open PTR read hydrus DB bundle: %w", err)
 		}
 
+		logger.Info("opening hydrus DB metadata read bundle", "db_dir", cfg.DBDir)
+		metadataReadBundle, err = openReadBundle(startupCtx, cfg.DBDir)
+		if err != nil {
+			_ = readBundle.Close()
+			_ = ptrReadBundle.Close()
+			return nil, fmt.Errorf("open metadata read hydrus DB bundle: %w", err)
+		}
+
+		logger.Info("opening hydrus DB write bundle", "db_dir", cfg.DBDir)
 		writeBundle, err = openWriteBundle(startupCtx, cfg.DBDir)
 		if err != nil {
 			logger.Warn(
@@ -138,11 +159,12 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 		}
 
 		serviceProvider = readBundle
-		metadataStore = newMetadataStoreRouter(readBundle, writeBundle)
+		metadataStore = newMetadataStoreRouter(metadataReadBundle, writeBundle)
 		browseStore = readBundle
 		assetStore = readBundle
 	}
 
+	logger.Info("preparing PTR sync manager", "enabled", cfg.PTR.Enabled)
 	ptrManager, err := ptrsyncmanager.NewManager(
 		startupCtx,
 		logger,
@@ -153,6 +175,9 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 	if err != nil {
 		if readBundle != nil {
 			_ = readBundle.Close()
+		}
+		if metadataReadBundle != nil {
+			_ = metadataReadBundle.Close()
 		}
 		if ptrReadBundle != nil {
 			_ = ptrReadBundle.Close()
@@ -188,6 +213,9 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 		if readBundle != nil {
 			_ = readBundle.Close()
 		}
+		if metadataReadBundle != nil {
+			_ = metadataReadBundle.Close()
+		}
 		if ptrReadBundle != nil {
 			_ = ptrReadBundle.Close()
 		}
@@ -203,6 +231,19 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 	if hydrusAPIURL == "" {
 		hydrusAPIURL = "http://" + cfg.ListenAddr
 	}
+	if cfg.Downloader.Enabled {
+		logger.Info(
+			"preparing hydownloader manager",
+			"root",
+			cfg.Downloader.Root,
+			"host",
+			cfg.Downloader.Host,
+			"port",
+			cfg.Downloader.Port,
+			"autoimport",
+			cfg.Downloader.Autoimport,
+		)
+	}
 	hydownloaderManager, err := hydownloadermanager.New(
 		startupCtx,
 		logger,
@@ -213,6 +254,9 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 	if err != nil {
 		if readBundle != nil {
 			_ = readBundle.Close()
+		}
+		if metadataReadBundle != nil {
+			_ = metadataReadBundle.Close()
 		}
 		if writeBundle != nil {
 			_ = writeBundle.Close()
@@ -258,6 +302,7 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 		access:            access,
 		server:            server,
 		readBundle:        readBundle,
+		metadataReadBundle: metadataReadBundle,
 		ptrReadBundle:     ptrReadBundle,
 		writeBundle:       writeBundle,
 		ptrManager:        ptrManager,
@@ -410,6 +455,12 @@ func (a *App) closeResources() {
 	if a.readBundle != nil {
 		if err := a.readBundle.Close(); err != nil {
 			a.logger.Error("close read hydrus DB bundle", "error", err)
+		}
+	}
+
+	if a.metadataReadBundle != nil {
+		if err := a.metadataReadBundle.Close(); err != nil {
+			a.logger.Error("close metadata read hydrus DB bundle", "error", err)
 		}
 	}
 

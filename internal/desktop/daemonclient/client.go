@@ -287,6 +287,21 @@ func (c *Client) GetFileMetadata(ctx context.Context, fileID int64) (FileMetadat
 	return response.Metadata[0], nil
 }
 
+// GetBasicFileMetadata loads the fast basic metadata subset for one selected file.
+func (c *Client) GetBasicFileMetadata(ctx context.Context, fileID int64) (FileMetadata, error) {
+	path := "/get_files/file_metadata?file_id=" + strconv.FormatInt(fileID, 10) + "&only_return_basic_information=true&include_services_object=false"
+	var response metadataResponse
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, true, &response); err != nil {
+		return FileMetadata{}, err
+	}
+
+	if len(response.Metadata) == 0 {
+		return FileMetadata{}, fmt.Errorf("daemon returned no metadata for file_id %d", fileID)
+	}
+
+	return response.Metadata[0], nil
+}
+
 // SuggestTags loads daemon-backed tag suggestions for one normalized prefix.
 func (c *Client) SuggestTags(
 	ctx context.Context,
