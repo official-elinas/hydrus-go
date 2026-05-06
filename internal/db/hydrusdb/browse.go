@@ -114,6 +114,14 @@ func (b *Bundle) ListRecent(
 }
 
 func (b *Bundle) resolveRecentBrowseTable(ctx context.Context) (string, error) {
+	b.recentBrowseTableMu.RLock()
+	if b.hasRecentBrowseTable {
+		tableName := b.recentBrowseTable
+		b.recentBrowseTableMu.RUnlock()
+		return tableName, nil
+	}
+	b.recentBrowseTableMu.RUnlock()
+
 	tableNames, err := b.lookupMainTableNames(ctx)
 	if err != nil {
 		return "", err
@@ -132,6 +140,7 @@ func (b *Bundle) resolveRecentBrowseTable(ctx context.Context) (string, error) {
 	} else if ok {
 		tableName := fmt.Sprintf("current_files_%d", service.id)
 		if _, exists := tableNames[tableName]; exists {
+			b.cacheRecentBrowseTable(tableName)
 			return tableName, nil
 		}
 	}
@@ -144,6 +153,7 @@ func (b *Bundle) resolveRecentBrowseTable(ctx context.Context) (string, error) {
 	} else if ok {
 		tableName := fmt.Sprintf("current_files_%d", service.id)
 		if _, exists := tableNames[tableName]; exists {
+			b.cacheRecentBrowseTable(tableName)
 			return tableName, nil
 		}
 	}
@@ -156,6 +166,7 @@ func (b *Bundle) resolveRecentBrowseTable(ctx context.Context) (string, error) {
 	} else if ok {
 		tableName := fmt.Sprintf("current_files_%d", service.id)
 		if _, exists := tableNames[tableName]; exists {
+			b.cacheRecentBrowseTable(tableName)
 			return tableName, nil
 		}
 	}
@@ -163,6 +174,17 @@ func (b *Bundle) resolveRecentBrowseTable(ctx context.Context) (string, error) {
 	return "", &librarybrowse.UnsupportedError{
 		Message: "recent local browse is unavailable for this Hydrus bundle",
 	}
+}
+
+func (b *Bundle) cacheRecentBrowseTable(tableName string) {
+	if strings.TrimSpace(tableName) == "" {
+		return
+	}
+
+	b.recentBrowseTableMu.Lock()
+	b.recentBrowseTable = tableName
+	b.hasRecentBrowseTable = true
+	b.recentBrowseTableMu.Unlock()
 }
 
 func managedThumbnailExists(layout clientfiles.Layout, hash string) (bool, error) {

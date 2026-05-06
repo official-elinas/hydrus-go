@@ -45,6 +45,10 @@ type Bundle struct {
 	managedLayoutMu  sync.RWMutex
 	managedLayout    clientfiles.Layout
 	hasManagedLayout bool
+
+	recentBrowseTableMu  sync.RWMutex
+	recentBrowseTable    string
+	hasRecentBrowseTable bool
 }
 
 type bundlePaths struct {
