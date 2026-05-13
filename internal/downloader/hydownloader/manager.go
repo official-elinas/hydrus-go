@@ -10,18 +10,28 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	neturl "net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	coredownloader "github.com/official-elinas/hydrus-go/internal/core/downloader"
 )
 
 var execCommandContext = exec.CommandContext
+
+var (
+	livenessInterval   = 30 * time.Second
+	restartBackoffBase = 2 * time.Second
+	restartBackoffMax  = 2 * time.Minute
+	restartBackoffMult = 2.0
+)
 
 const (
 	hydownloaderConfigFileName   = "hydownloader-config.json"
@@ -41,10 +51,11 @@ type Manager struct {
 	hydrusAccessKey string
 	httpClient      *http.Client
 
-	mu       sync.Mutex
-	cmd      *exec.Cmd
-	waitDone chan error
-	lastErr  string
+	mu          sync.Mutex
+	cmd         *exec.Cmd
+	waitDone    chan error
+	lastErr     string
+	stopLiveness chan struct{}
 }
 
 // New prepares the hydownloader root, starts the daemon process, and waits for
@@ -64,14 +75,19 @@ func New(ctx context.Context, logger *slog.Logger, cfg coredownloader.Config, hy
 		hydrusAPIURL:    strings.TrimSpace(hydrusAPIURL),
 		hydrusAccessKey: strings.TrimSpace(hydrusAccessKey),
 		httpClient:      &http.Client{Timeout: 30 * time.Second},
+		stopLiveness:    make(chan struct{}),
 	}
 
 	if err := manager.ensureInitialized(ctx); err != nil {
 		return nil, err
 	}
+	manager.killOrphanDaemon(ctx)
 	if err := manager.start(ctx); err != nil {
 		return nil, err
 	}
+
+	manager.checkCallbackURLReachability()
+	go manager.livenessLoop()
 
 	return manager, nil
 }
@@ -81,6 +97,14 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	if m == nil {
 		return nil
 	}
+
+	select {
+	case <-m.stopLiveness:
+	default:
+		close(m.stopLiveness)
+	}
+
+	m.logger.Info("shutting down hydownloader daemon", "root", m.cfg.Root, "host", m.cfg.Host, "port", m.cfg.Port)
 
 	m.refreshProcessState()
 
@@ -108,8 +132,10 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 		m.waitDone = nil
 		m.mu.Unlock()
 		if err != nil {
+			m.logger.Error("hydownloader shutdown wait returned error", "error", err)
 			return fmt.Errorf("wait for hydownloader shutdown: %w", err)
 		}
+		m.logger.Info("hydownloader daemon stopped cleanly")
 		return nil
 	case <-shutdownCtx.Done():
 		if cmd.Process != nil {
@@ -153,7 +179,8 @@ func (m *Manager) Status(ctx context.Context) (coredownloader.Status, error) {
 	m.mu.Unlock()
 
 	var raw hydownloaderStatusResponse
-	if err := m.postJSON(ctx, "/get_status_info", map[string]any{}, &raw); err != nil {
+	if err := m.postJSONWithRetry(ctx, "/get_status_info", map[string]any{}, &raw); err != nil {
+		m.logger.Warn("hydownloader status check failed", "error", err, "host", m.cfg.Host, "port", m.cfg.Port)
 		status.LastError = err.Error()
 		return status, nil
 	}
@@ -205,12 +232,16 @@ func (m *Manager) QueueURL(ctx context.Context, request coredownloader.URLReques
 	}
 
 	var response struct {
-		Status bool `json:"status"`
+		Status bool   `json:"status"`
+		Reason string `json:"reason"`
 	}
 	if err := m.postJSON(ctx, "/add_or_update_urls", body, &response); err != nil {
 		return err
 	}
 	if !response.Status {
+		if response.Reason != "" {
+			return fmt.Errorf("hydownloader rejected queued URL: %s", response.Reason)
+		}
 		return fmt.Errorf("hydownloader rejected queued URL")
 	}
 
@@ -261,12 +292,16 @@ func (m *Manager) QueueSubscription(ctx context.Context, request coredownloader.
 	}
 
 	var response struct {
-		Status bool `json:"status"`
+		Status bool   `json:"status"`
+		Reason string `json:"reason"`
 	}
 	if err := m.postJSON(ctx, "/add_or_update_subscriptions", body, &response); err != nil {
 		return err
 	}
 	if !response.Status {
+		if response.Reason != "" {
+			return fmt.Errorf("hydownloader rejected subscription request: %s", response.Reason)
+		}
 		return fmt.Errorf("hydownloader rejected subscription request")
 	}
 
@@ -280,7 +315,7 @@ func (m *Manager) Downloaders(ctx context.Context) (map[string]string, error) {
 	}
 
 	result := map[string]string{}
-	if err := m.postJSON(ctx, "/downloaders", map[string]any{}, &result); err != nil {
+	if err := m.postJSONWithRetry(ctx, "/downloaders", map[string]any{}, &result); err != nil {
 		return nil, err
 	}
 
@@ -293,16 +328,21 @@ func (m *Manager) ActivateAutoimport(ctx context.Context) error {
 		return nil
 	}
 
+	m.logger.Info("activating hydownloader autoimport", "host", m.cfg.Host, "port", m.cfg.Port)
+
 	var response struct {
 		Status bool `json:"status"`
 	}
 	if err := m.postJSON(ctx, "/resume_autoimports", map[string]any{}, &response); err != nil {
+		m.logger.Error("hydownloader autoimport activation failed", "error", err)
 		return err
 	}
 	if !response.Status {
+		m.logger.Error("hydownloader rejected autoimport resume request")
 		return fmt.Errorf("hydownloader rejected autoimport resume request")
 	}
 
+	m.logger.Info("hydownloader autoimport activated")
 	return nil
 }
 
@@ -330,11 +370,15 @@ func (m *Manager) ensureInitialized(ctx context.Context) error {
 	}
 
 	if strings.TrimSpace(m.cfg.AccessKey) == "" {
-		generated, err := randomURLSafeKey()
-		if err != nil {
-			return err
+		if existing := readExistingHydownloaderAccessKey(filepath.Join(root, hydownloaderConfigFileName)); existing != "" {
+			m.cfg.AccessKey = existing
+		} else {
+			generated, err := randomURLSafeKey()
+			if err != nil {
+				return err
+			}
+			m.cfg.AccessKey = generated
 		}
-		m.cfg.AccessKey = generated
 	}
 
 	if _, err := os.Stat(filepath.Join(root, hydownloaderDatabaseFileName)); os.IsNotExist(err) {
@@ -397,8 +441,15 @@ func (m *Manager) patchImportJobs(root string) error {
 		return fmt.Errorf("read hydownloader import jobs: %w", err)
 	}
 
-	updated := replacePythonAssignment(string(raw), "defAPIURL", m.hydrusAPIURL)
-	updated = replacePythonAssignment(updated, "defAPIKey", m.hydrusAccessKey)
+	updated, urlReplaced := replacePythonAssignment(string(raw), "defAPIURL", m.hydrusAPIURL)
+	if !urlReplaced {
+		m.logger.Warn("defAPIURL assignment not found in hydownloader import jobs; prepending line — file format may have changed", "path", path)
+	}
+	updated, keyReplaced := replacePythonAssignment(updated, "defAPIKey", m.hydrusAccessKey)
+	if !keyReplaced {
+		m.logger.Warn("defAPIKey assignment not found in hydownloader import jobs; prepending line — file format may have changed", "path", path)
+	}
+
 	if err := os.WriteFile(path, []byte(updated), 0o644); err != nil {
 		return fmt.Errorf("write hydownloader import jobs: %w", err)
 	}
@@ -415,6 +466,8 @@ func (m *Manager) start(ctx context.Context) error {
 		return nil
 	}
 
+	m.logger.Info("starting hydownloader daemon", "root", m.cfg.Root, "host", m.cfg.Host, "port", m.cfg.Port)
+
 	args := []string{"start", "--path", m.cfg.Root}
 	if !m.cfg.Autoimport {
 		args = append(args, "--no-autoimporter")
@@ -422,10 +475,21 @@ func (m *Manager) start(ctx context.Context) error {
 		args = append(args, "--paused-autoimporter")
 	}
 	cmd := execCommandContext(context.Background(), m.cfg.DaemonBin, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
 	cmd.Stdout = io.Discard
-	cmd.Stderr = io.Discard
+
+	stderrPipe, err := cmd.StderrPipe()
+	if err != nil {
+		m.logger.Warn("could not capture hydownloader stderr pipe; stderr will be discarded", "error", err)
+		cmd.Stderr = io.Discard
+	}
+
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start hydownloader daemon: %w", err)
+	}
+
+	if stderrPipe != nil {
+		go m.drainStderr(stderrPipe)
 	}
 
 	waitDone := make(chan error, 1)
@@ -445,6 +509,7 @@ func (m *Manager) start(ctx context.Context) error {
 	defer ticker.Stop()
 	for {
 		if err := m.postJSON(startupCtx, "/api_version", map[string]any{}, nil); err == nil {
+			m.logger.Info("hydownloader daemon is ready", "host", m.cfg.Host, "port", m.cfg.Port)
 			return nil
 		}
 
@@ -455,6 +520,7 @@ func (m *Manager) start(ctx context.Context) error {
 			m.waitDone = nil
 			m.lastErr = fmt.Sprintf("hydownloader exited during startup: %v", err)
 			m.mu.Unlock()
+			m.logger.Error("hydownloader exited during startup", "error", err, "root", m.cfg.Root)
 			return fmt.Errorf("hydownloader exited during startup: %w", err)
 		case <-startupCtx.Done():
 			if cmd.Process != nil {
@@ -469,8 +535,139 @@ func (m *Manager) start(ctx context.Context) error {
 			m.waitDone = nil
 			m.lastErr = startupCtx.Err().Error()
 			m.mu.Unlock()
+			m.logger.Error("timed out waiting for hydownloader API", "timeout", hydownloaderStartupWait, "root", m.cfg.Root)
 			return fmt.Errorf("wait for hydownloader API: %w", startupCtx.Err())
 		case <-ticker.C:
+		}
+	}
+}
+
+// livenessLoop polls /api_version every livenessInterval and relaunches the
+// daemon on crash with capped exponential backoff. It exits when stopLiveness
+// is closed.
+func (m *Manager) livenessLoop() {
+	backoff := restartBackoffBase
+	ticker := time.NewTicker(livenessInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-m.stopLiveness:
+			return
+		case <-ticker.C:
+		}
+
+		m.refreshProcessState()
+
+		m.mu.Lock()
+		running := m.cmd != nil
+		m.mu.Unlock()
+
+		if !running {
+			m.logger.Warn("hydownloader daemon has exited; scheduling restart",
+				"backoff", backoff, "root", m.cfg.Root)
+
+			select {
+			case <-m.stopLiveness:
+				return
+			case <-time.After(backoff):
+			}
+
+			backoff = time.Duration(float64(backoff) * restartBackoffMult)
+			if backoff > restartBackoffMax {
+				backoff = restartBackoffMax
+			}
+
+			m.logger.Info("restarting hydownloader daemon", "root", m.cfg.Root, "host", m.cfg.Host, "port", m.cfg.Port)
+			if err := m.start(context.Background()); err != nil {
+				m.logger.Error("hydownloader restart failed", "error", err, "root", m.cfg.Root)
+				m.mu.Lock()
+				m.lastErr = err.Error()
+				m.mu.Unlock()
+			} else {
+				m.logger.Info("hydownloader daemon restarted successfully", "root", m.cfg.Root)
+				backoff = restartBackoffBase
+			}
+			continue
+		}
+
+		probeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		apiErr := m.postJSON(probeCtx, "/api_version", map[string]any{}, nil)
+		cancel()
+
+		if apiErr != nil {
+			m.logger.Warn("hydownloader liveness check failed; daemon may be unresponsive",
+				"error", apiErr, "host", m.cfg.Host, "port", m.cfg.Port)
+		} else {
+			backoff = restartBackoffBase
+		}
+	}
+}
+
+// checkCallbackURLReachability performs a best-effort TCP dial to the public
+// API URL and logs a warning if it is unreachable. This is critical fix #2.
+func (m *Manager) checkCallbackURLReachability() {
+	rawURL := strings.TrimSpace(m.hydrusAPIURL)
+	if rawURL == "" {
+		return
+	}
+
+	parsed, err := neturl.Parse(rawURL)
+	if err != nil {
+		m.logger.Warn("hydownloader callback URL is unparseable; autoimport callbacks may fail",
+			"url", rawURL, "error", err)
+		return
+	}
+
+	host := parsed.Hostname()
+	port := parsed.Port()
+	if port == "" {
+		switch parsed.Scheme {
+		case "https":
+			port = "443"
+		default:
+			port = "80"
+		}
+	}
+
+	addr := net.JoinHostPort(host, port)
+	conn, dialErr := net.DialTimeout("tcp", addr, 3*time.Second)
+	if dialErr != nil {
+		m.logger.Warn(
+			"hydownloader callback URL is unreachable; autoimport callbacks will fail until resolved",
+			"url", rawURL,
+			"addr", addr,
+			"error", dialErr,
+		)
+		return
+	}
+	conn.Close()
+	m.logger.Info("hydownloader callback URL is reachable", "url", rawURL, "addr", addr)
+}
+
+// drainStderr reads from the hydownloader process stderr pipe and forwards
+// each non-empty line to the structured logger.
+func (m *Manager) drainStderr(r io.Reader) {
+	buf := make([]byte, 4096)
+	remainder := ""
+	for {
+		n, err := r.Read(buf)
+		if n > 0 {
+			chunk := remainder + string(buf[:n])
+			lines := strings.Split(chunk, "\n")
+			remainder = lines[len(lines)-1]
+			for _, line := range lines[:len(lines)-1] {
+				trimmed := strings.TrimSpace(line)
+				if trimmed != "" {
+					m.logger.Info("hydownloader stderr", "line", trimmed)
+				}
+			}
+		}
+		if err != nil {
+			if trimmed := strings.TrimSpace(remainder); trimmed != "" {
+				m.logger.Info("hydownloader stderr", "line", trimmed)
+			}
+			return
 		}
 	}
 }
@@ -488,9 +685,29 @@ func (m *Manager) refreshProcessState() {
 		m.waitDone = nil
 		if err != nil {
 			m.lastErr = err.Error()
+			m.logger.Error("hydownloader process exited unexpectedly", "error", err)
 		}
 	default:
 	}
+}
+
+var retryBackoffs = []time.Duration{time.Second, 2 * time.Second, 3 * time.Second}
+
+func (m *Manager) postJSONWithRetry(ctx context.Context, path string, body any, target any) error {
+	var lastErr error
+	for attempt, delay := range retryBackoffs {
+		if attempt > 0 {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+		if lastErr = m.postJSON(ctx, path, body, target); lastErr == nil {
+			return nil
+		}
+	}
+	return lastErr
 }
 
 func (m *Manager) postJSON(ctx context.Context, path string, body any, target any) error {
@@ -530,7 +747,7 @@ func (m *Manager) baseURL() string {
 	return fmt.Sprintf("http://%s:%d", m.cfg.Host, m.cfg.Port)
 }
 
-func replacePythonAssignment(source string, name string, value string) string {
+func replacePythonAssignment(source string, name string, value string) (string, bool) {
 	lines := strings.Split(source, "\n")
 	replacement := fmt.Sprintf("%s = %q", name, value)
 	replaced := false
@@ -545,7 +762,46 @@ func replacePythonAssignment(source string, name string, value string) string {
 		lines = append([]string{replacement}, lines...)
 	}
 
-	return strings.Join(lines, "\n")
+	return strings.Join(lines, "\n"), replaced
+}
+
+func (m *Manager) killOrphanDaemon(ctx context.Context) {
+	addr := fmt.Sprintf("%s:%d", m.cfg.Host, m.cfg.Port)
+	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	if err != nil {
+		return
+	}
+	conn.Close()
+
+	m.logger.Warn("found orphan hydownloader process on port; attempting graceful shutdown", "addr", addr)
+	shutCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	defer cancel()
+	_ = m.postJSON(shutCtx, "/shutdown", map[string]any{}, nil)
+
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		time.Sleep(500 * time.Millisecond)
+		c, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		if err != nil {
+			m.logger.Info("orphan hydownloader stopped", "addr", addr)
+			return
+		}
+		c.Close()
+	}
+	m.logger.Warn("orphan hydownloader did not stop after graceful shutdown; it may still be running", "addr", addr)
+}
+
+func readExistingHydownloaderAccessKey(configPath string) string {
+	raw, err := os.ReadFile(configPath)
+	if err != nil {
+		return ""
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		return ""
+	}
+	key, _ := payload["daemon.access-key"].(string)
+	return strings.TrimSpace(key)
 }
 
 func randomURLSafeKey() (string, error) {

@@ -211,6 +211,391 @@ func TestManagerInitializesQueuesAndShutsDown(t *testing.T) {
 	}
 }
 
+func TestManagerStartupError_DaemonCrashesDuringStartup(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "hydownloader-root")
+
+	originalExecCommandContext := execCommandContext
+	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		switch name {
+		case "fake-tools":
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatalf("MkdirAll(root) error = %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(root, hydownloaderDatabaseFileName), []byte("db"), 0o644); err != nil {
+				t.Fatalf("WriteFile(hydownloader.db) error = %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(root, hydownloaderConfigFileName), []byte("{}\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile(config) error = %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(root, hydownloaderImportJobsName), []byte("defAPIURL = \"old\"\ndefAPIKey = \"old\"\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile(import jobs) error = %v", err)
+			}
+			return exec.CommandContext(ctx, "sh", "-c", "true")
+		case "fake-daemon-crash":
+			return exec.CommandContext(ctx, "sh", "-c", "exit 1")
+		default:
+			t.Fatalf("unexpected command %q", name)
+			return exec.CommandContext(ctx, "sh", "-c", "false")
+		}
+	}
+	defer func() { execCommandContext = originalExecCommandContext }()
+
+	_, err := New(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), coredownloader.Config{
+		Enabled:   true,
+		Root:      root,
+		Host:      "127.0.0.1",
+		Port:      1,
+		AccessKey: "hydl-access-key",
+		DaemonBin: "fake-daemon-crash",
+		ToolsBin:  "fake-tools",
+	}, "http://127.0.0.1:45869", "hydrus-go-access-key")
+	if err == nil {
+		t.Fatal("New() error = nil, want startup error when daemon crashes immediately")
+	}
+}
+
+func TestManagerStartupError_StartupTimeout(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "hydownloader-root")
+
+	originalExecCommandContext := execCommandContext
+	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		switch name {
+		case "fake-tools":
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatalf("MkdirAll(root) error = %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(root, hydownloaderDatabaseFileName), []byte("db"), 0o644); err != nil {
+				t.Fatalf("WriteFile(hydownloader.db) error = %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(root, hydownloaderConfigFileName), []byte("{}\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile(config) error = %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(root, hydownloaderImportJobsName), []byte("defAPIURL = \"old\"\ndefAPIKey = \"old\"\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile(import jobs) error = %v", err)
+			}
+			return exec.CommandContext(ctx, "sh", "-c", "true")
+		case "fake-daemon-hang":
+			return exec.CommandContext(ctx, "sleep", "300")
+		default:
+			t.Fatalf("unexpected command %q", name)
+			return exec.CommandContext(ctx, "sh", "-c", "false")
+		}
+	}
+	defer func() { execCommandContext = originalExecCommandContext }()
+
+	startCtx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	_, err := New(startCtx, slog.New(slog.NewTextHandler(io.Discard, nil)), coredownloader.Config{
+		Enabled:   true,
+		Root:      root,
+		Host:      "127.0.0.1",
+		Port:      1,
+		AccessKey: "hydl-access-key",
+		DaemonBin: "fake-daemon-hang",
+		ToolsBin:  "fake-tools",
+	}, "http://127.0.0.1:45869", "hydrus-go-access-key")
+	if err == nil {
+		t.Fatal("New() error = nil, want timeout error when daemon never becomes reachable")
+	}
+}
+
+func TestManagerStatus_APIUnreachable(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "hydownloader-root")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+
+	host, portString, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort() error = %v", err)
+	}
+	port, err := strconv.Atoi(portString)
+	if err != nil {
+		t.Fatalf("Atoi(port) error = %v", err)
+	}
+
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeManagerJSON(t, w, map[string]any{"version": "test"})
+	})}
+	go server.Serve(listener)
+
+	originalExecCommandContext := execCommandContext
+	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		switch name {
+		case "fake-tools":
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatalf("MkdirAll(root) error = %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(root, hydownloaderDatabaseFileName), []byte("db"), 0o644); err != nil {
+				t.Fatalf("WriteFile(hydownloader.db) error = %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(root, hydownloaderConfigFileName), []byte("{}\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile(config) error = %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(root, hydownloaderImportJobsName), []byte("defAPIURL = \"old\"\ndefAPIKey = \"old\"\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile(import jobs) error = %v", err)
+			}
+			return exec.CommandContext(ctx, "sh", "-c", "true")
+		case "fake-daemon":
+			return exec.CommandContext(ctx, "sleep", "300")
+		default:
+			t.Fatalf("unexpected command %q", name)
+			return exec.CommandContext(ctx, "sh", "-c", "false")
+		}
+	}
+	defer func() { execCommandContext = originalExecCommandContext }()
+
+	manager, err := New(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), coredownloader.Config{
+		Enabled:   true,
+		Root:      root,
+		Host:      host,
+		Port:      port,
+		AccessKey: "hydl-access-key",
+		DaemonBin: "fake-daemon",
+		ToolsBin:  "fake-tools",
+	}, "http://127.0.0.1:45869", "hydrus-go-access-key")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer manager.Shutdown(context.Background()) //nolint:errcheck
+
+	server.Close()
+	listener.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	status, err := manager.Status(ctx)
+	if err != nil {
+		t.Fatalf("Status() error = %v, want nil (errors surfaced via status.LastError)", err)
+	}
+	if status.LastError == "" {
+		t.Fatal("status.LastError = empty, want error message when API is unreachable")
+	}
+}
+
+func TestManagerAutoRestart_AfterCrash(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "hydownloader-root")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer listener.Close()
+
+	host, portString, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort() error = %v", err)
+	}
+	port, err := strconv.Atoi(portString)
+	if err != nil {
+		t.Fatalf("Atoi(port) error = %v", err)
+	}
+
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeManagerJSON(t, w, map[string]any{"version": "test"})
+	})}
+	go server.Serve(listener)
+	defer server.Close()
+
+	var (
+		startMu    sync.Mutex
+		startCount int
+		readyCh    = make(chan struct{}, 10)
+	)
+
+	originalExecCommandContext := execCommandContext
+	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		switch name {
+		case "fake-tools":
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatalf("MkdirAll(root) error = %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(root, hydownloaderDatabaseFileName), []byte("db"), 0o644); err != nil {
+				t.Fatalf("WriteFile(hydownloader.db) error = %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(root, hydownloaderConfigFileName), []byte("{}\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile(config) error = %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(root, hydownloaderImportJobsName), []byte("defAPIURL = \"old\"\ndefAPIKey = \"old\"\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile(import jobs) error = %v", err)
+			}
+			return exec.CommandContext(ctx, "sh", "-c", "true")
+		case "fake-daemon":
+			startMu.Lock()
+			startCount++
+			current := startCount
+			startMu.Unlock()
+			if current == 1 {
+				// First start: exits immediately after a brief delay so the startup
+				// poll succeeds (the real HTTP server is up), then the process dies.
+				readyCh <- struct{}{}
+				return exec.CommandContext(ctx, "sh", "-c", "sleep 0.1")
+			}
+			readyCh <- struct{}{}
+			return exec.CommandContext(ctx, "sleep", "300")
+		default:
+			t.Fatalf("unexpected command %q", name)
+			return exec.CommandContext(ctx, "sh", "-c", "false")
+		}
+	}
+	defer func() { execCommandContext = originalExecCommandContext }()
+
+	origInterval := livenessInterval
+	origBase := restartBackoffBase
+	livenessInterval = 100 * time.Millisecond
+	restartBackoffBase = 50 * time.Millisecond
+	defer func() {
+		livenessInterval = origInterval
+		restartBackoffBase = origBase
+	}()
+
+	manager, err := New(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), coredownloader.Config{
+		Enabled:   true,
+		Root:      root,
+		Host:      host,
+		Port:      port,
+		AccessKey: "hydl-access-key",
+		DaemonBin: "fake-daemon",
+		ToolsBin:  "fake-tools",
+	}, "http://127.0.0.1:45869", "hydrus-go-access-key")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer manager.Shutdown(context.Background()) //nolint:errcheck
+
+	deadline := time.After(5 * time.Second)
+	restarted := false
+	for !restarted {
+		select {
+		case <-readyCh:
+			startMu.Lock()
+			count := startCount
+			startMu.Unlock()
+			if count >= 2 {
+				restarted = true
+			}
+		case <-deadline:
+			t.Fatal("daemon was not restarted within 5 seconds after crash")
+		}
+	}
+}
+
+func TestManagerQueueURL_RejectionWithReason(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "hydownloader-root")
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	defer listener.Close()
+
+	host, portString, err := net.SplitHostPort(listener.Addr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort() error = %v", err)
+	}
+	port, err := strconv.Atoi(portString)
+	if err != nil {
+		t.Fatalf("Atoi(port) error = %v", err)
+	}
+
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api_version":
+			writeManagerJSON(t, w, map[string]any{"version": "test"})
+		case "/add_or_update_urls":
+			writeManagerJSON(t, w, map[string]any{"status": false, "reason": "duplicate URL"})
+		default:
+			writeManagerJSON(t, w, map[string]any{"status": true})
+		}
+	})}
+	go server.Serve(listener)
+	defer server.Close()
+
+	originalExecCommandContext := execCommandContext
+	execCommandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		switch name {
+		case "fake-tools":
+			if err := os.MkdirAll(root, 0o755); err != nil {
+				t.Fatalf("MkdirAll(root) error = %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(root, hydownloaderDatabaseFileName), []byte("db"), 0o644); err != nil {
+				t.Fatalf("WriteFile(hydownloader.db) error = %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(root, hydownloaderConfigFileName), []byte("{}\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile(config) error = %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(root, hydownloaderImportJobsName), []byte("defAPIURL = \"old\"\ndefAPIKey = \"old\"\n"), 0o644); err != nil {
+				t.Fatalf("WriteFile(import jobs) error = %v", err)
+			}
+			return exec.CommandContext(ctx, "sh", "-c", "true")
+		case "fake-daemon":
+			return exec.CommandContext(ctx, "sleep", "300")
+		default:
+			t.Fatalf("unexpected command %q", name)
+			return exec.CommandContext(ctx, "sh", "-c", "false")
+		}
+	}
+	defer func() { execCommandContext = originalExecCommandContext }()
+
+	manager, err := New(context.Background(), slog.New(slog.NewTextHandler(io.Discard, nil)), coredownloader.Config{
+		Enabled:   true,
+		Root:      root,
+		Host:      host,
+		Port:      port,
+		AccessKey: "hydl-access-key",
+		DaemonBin: "fake-daemon",
+		ToolsBin:  "fake-tools",
+	}, "http://127.0.0.1:45869", "hydrus-go-access-key")
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer manager.Shutdown(context.Background()) //nolint:errcheck
+
+	err = manager.QueueURL(context.Background(), coredownloader.URLRequest{URL: "https://example.com/post/1"})
+	if err == nil {
+		t.Fatal("QueueURL() error = nil, want rejection error")
+	}
+	if !strings.Contains(err.Error(), "duplicate URL") {
+		t.Fatalf("QueueURL() error = %q, want reason 'duplicate URL' in message", err.Error())
+	}
+}
+
+func TestManagerPatchImportJobs_MissingAssignment(t *testing.T) {
+	var logBuf strings.Builder
+	logger := slog.New(slog.NewTextHandler(&logBuf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	m := &Manager{
+		logger:          logger,
+		hydrusAPIURL:    "http://127.0.0.1:45869",
+		hydrusAccessKey: "test-key",
+	}
+
+	root := t.TempDir()
+	path := filepath.Join(root, hydownloaderImportJobsName)
+	if err := os.WriteFile(path, []byte("# no assignments here\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	if err := m.patchImportJobs(root); err != nil {
+		t.Fatalf("patchImportJobs() error = %v", err)
+	}
+
+	if !strings.Contains(logBuf.String(), "defAPIURL") {
+		t.Errorf("expected warning about missing defAPIURL assignment, got logs: %s", logBuf.String())
+	}
+	if !strings.Contains(logBuf.String(), "defAPIKey") {
+		t.Errorf("expected warning about missing defAPIKey assignment, got logs: %s", logBuf.String())
+	}
+
+	content, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile() error = %v", err)
+	}
+	if !strings.Contains(string(content), `defAPIURL = "http://127.0.0.1:45869"`) {
+		t.Errorf("patchImportJobs did not prepend defAPIURL, content: %s", content)
+	}
+}
+
 func decodeManagerJSON(t *testing.T, reader io.Reader, target any) {
 	t.Helper()
 	if err := json.NewDecoder(reader).Decode(target); err != nil {
