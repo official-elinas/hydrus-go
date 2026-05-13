@@ -40,6 +40,7 @@ var (
 
 type downloaderController interface {
 	ActivateAutoimport(context.Context) error
+	CheckCallbackURLReachability()
 	Shutdown(context.Context) error
 }
 
@@ -493,6 +494,7 @@ func (a *App) activateDownloaderAutoimportAfterReady() error {
 	if err := waitForDaemonReadyFn(readyCtx, a.cfg.ListenAddr); err != nil {
 		return fmt.Errorf("wait for hydrus-go readiness before hydownloader autoimport: %w", err)
 	}
+	a.downloaderManager.CheckCallbackURLReachability()
 	if err := a.downloaderManager.ActivateAutoimport(readyCtx); err != nil {
 		return fmt.Errorf("resume hydownloader autoimport: %w", err)
 	}

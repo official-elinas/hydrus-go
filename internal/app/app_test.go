@@ -666,6 +666,9 @@ func (s stubDownloaderController) ActivateAutoimport(context.Context) error {
 	return nil
 }
 
+func (s stubDownloaderController) CheckCallbackURLReachability() {
+}
+
 func (s stubDownloaderController) Shutdown(context.Context) error {
 	if s.shutdown != nil {
 		return s.shutdown()

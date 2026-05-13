@@ -26,6 +26,8 @@ import (
 
 var execCommandContext = exec.CommandContext
 
+var killOrphanDaemonFn func(m *Manager, ctx context.Context) = (*Manager).killOrphanDaemon
+
 var (
 	livenessInterval   = 30 * time.Second
 	restartBackoffBase = 2 * time.Second
@@ -83,12 +85,11 @@ func New(ctx context.Context, logger *slog.Logger, cfg coredownloader.Config, hy
 	if err := manager.ensureInitialized(ctx); err != nil {
 		return nil, err
 	}
-	manager.killOrphanDaemon(ctx)
+	killOrphanDaemonFn(manager, ctx)
 	if err := manager.start(ctx); err != nil {
 		return nil, err
 	}
 
-	manager.checkCallbackURLReachability()
 	go func() {
 		defer close(manager.livenessDone)
 		manager.livenessLoop()
@@ -621,9 +622,9 @@ func (m *Manager) livenessLoop() {
 	}
 }
 
-// checkCallbackURLReachability performs a best-effort TCP dial to the public
-// API URL and logs a warning if it is unreachable. This is critical fix #2.
-func (m *Manager) checkCallbackURLReachability() {
+// CheckCallbackURLReachability performs a best-effort TCP dial to the public
+// API URL and logs a warning if it is unreachable.
+func (m *Manager) CheckCallbackURLReachability() {
 	rawURL := strings.TrimSpace(m.hydrusAPIURL)
 	if rawURL == "" {
 		return
@@ -791,11 +792,11 @@ func (m *Manager) killOrphanDaemon(ctx context.Context) {
 	conn.Close()
 
 	m.logger.Warn("found orphan hydownloader process on port; attempting graceful shutdown", "addr", addr)
-	shutCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+	shutCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	_ = m.postJSON(shutCtx, "/shutdown", map[string]any{}, nil)
 
-	deadline := time.Now().Add(8 * time.Second)
+	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		time.Sleep(500 * time.Millisecond)
 		c, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
@@ -805,7 +806,17 @@ func (m *Manager) killOrphanDaemon(ctx context.Context) {
 		}
 		c.Close()
 	}
-	m.logger.Warn("orphan hydownloader did not stop after graceful shutdown; it may still be running", "addr", addr)
+
+	m.logger.Warn("orphan hydownloader did not stop gracefully; force-killing by port", "addr", addr)
+	if pid, err := findPIDByPort(m.cfg.Port); err == nil && pid > 0 {
+		if kerr := syscall.Kill(pid, syscall.SIGKILL); kerr != nil {
+			m.logger.Warn("force-kill orphan hydownloader failed", "pid", pid, "error", kerr)
+		} else {
+			m.logger.Info("force-killed orphan hydownloader", "pid", pid)
+		}
+	} else {
+		m.logger.Warn("could not find orphan hydownloader PID for force-kill", "port", m.cfg.Port)
+	}
 }
 
 func readExistingHydownloaderAccessKey(configPath string) string {
@@ -819,6 +830,65 @@ func readExistingHydownloaderAccessKey(configPath string) string {
 	}
 	key, _ := payload["daemon.access-key"].(string)
 	return strings.TrimSpace(key)
+}
+
+func findPIDByPort(port int) (int, error) {
+	target := fmt.Sprintf("%04X", port)
+	for _, path := range []string{"/proc/net/tcp", "/proc/net/tcp6"} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		for _, line := range strings.Split(string(raw), "\n")[1:] {
+			fields := strings.Fields(line)
+			if len(fields) < 10 {
+				continue
+			}
+			localAddr := fields[1]
+			parts := strings.SplitN(localAddr, ":", 2)
+			if len(parts) != 2 || !strings.EqualFold(parts[1], target) {
+				continue
+			}
+			if fields[3] != "0A" {
+				continue
+			}
+			inode := fields[9]
+			pid, err := findPIDByInode(inode)
+			if err == nil && pid > 0 {
+				return pid, nil
+			}
+		}
+	}
+	return 0, fmt.Errorf("no process found listening on port %d", port)
+}
+
+func findPIDByInode(inode string) (int, error) {
+	target := "socket:[" + inode + "]"
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0, err
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		pid := 0
+		if _, err := fmt.Sscanf(e.Name(), "%d", &pid); err != nil || pid <= 0 {
+			continue
+		}
+		fdDir := fmt.Sprintf("/proc/%d/fd", pid)
+		fds, err := os.ReadDir(fdDir)
+		if err != nil {
+			continue
+		}
+		for _, fd := range fds {
+			link, err := os.Readlink(fmt.Sprintf("%s/%s", fdDir, fd.Name()))
+			if err == nil && link == target {
+				return pid, nil
+			}
+		}
+	}
+	return 0, fmt.Errorf("inode %s not found in /proc", inode)
 }
 
 func randomURLSafeKey() (string, error) {

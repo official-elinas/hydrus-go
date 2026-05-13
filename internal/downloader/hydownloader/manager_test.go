@@ -19,6 +19,11 @@ import (
 	coredownloader "github.com/official-elinas/hydrus-go/internal/core/downloader"
 )
 
+func TestMain(m *testing.M) {
+	killOrphanDaemonFn = func(_ *Manager, _ context.Context) {}
+	m.Run()
+}
+
 func TestManagerInitializesQueuesAndShutsDown(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "hydownloader-root")
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -42,6 +47,7 @@ func TestManagerInitializesQueuesAndShutsDown(t *testing.T) {
 		queuedSubscriptionBody []map[string]any
 		resumeAutoimportCalled bool
 		shutdownCalled         bool
+		serverCloser           func()
 	)
 
 	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -77,8 +83,12 @@ func TestManagerInitializesQueuesAndShutsDown(t *testing.T) {
 		case "/shutdown":
 			mu.Lock()
 			shutdownCalled = true
+			closer := serverCloser
 			mu.Unlock()
 			writeManagerJSON(t, w, map[string]any{"status": true})
+			if closer != nil {
+				go closer()
+			}
 		case "/resume_autoimports":
 			mu.Lock()
 			resumeAutoimportCalled = true
