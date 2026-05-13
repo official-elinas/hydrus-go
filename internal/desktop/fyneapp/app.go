@@ -2315,7 +2315,7 @@ func (p *prototype) ensureGridWrap() {
 				p.ensurePreviewResource(recentItem)
 			}
 
-			if !hasMetadata {
+			if !hasMetadata && gallerySortRequiresMetadata(p.gallerySortMode) {
 				p.ensureTileMetadata(recentItem)
 			}
 		},
@@ -2508,8 +2508,12 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 
 	if metadata, ok := p.lookupTileMetadata(fileID); ok {
 		p.metadataLabel.SetText(formatMetadataDetails(metadata))
-		p.setRightTagsMetadata(metadata)
-		p.setLeftTagsMetadata(metadata)
+		if len(metadata.Tags) > 0 {
+			p.setRightTagsMetadata(metadata)
+			p.setLeftTagsMetadata(metadata)
+		} else {
+			go p.loadSelectedTags(connection, fileID)
+		}
 		p.renderGrid()
 		p.refreshSearchSuggestions()
 		return
@@ -2568,7 +2572,44 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 			p.renderGrid()
 			p.refreshSearchSuggestions()
 		})
+
+		go p.loadSelectedTags(connection, selectedFileID)
 	}(connection, fileID)
+}
+
+func (p *prototype) loadSelectedTags(connection connectionSnapshot, fileID int64) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	metadata, err := connection.client.GetFileMetadata(ctx, fileID)
+	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
+		fyne.Do(func() {
+			if !p.isCurrentOperation(connection) || p.selectedFileID != fileID {
+				return
+			}
+			p.setRightTagsText("Could not load selected-file tag metadata from hydrusd.")
+			p.setLeftTagsText("Could not load selected-file tag metadata from hydrusd.")
+		})
+		return
+	}
+
+	p.tileMetadataMu.Lock()
+	cached := p.tileMetadataCache[fileID]
+	cached.Tags = metadata.Tags
+	p.tileMetadataCache[fileID] = cached
+	p.tileMetadataMu.Unlock()
+
+	fyne.Do(func() {
+		if !p.isCurrentOperation(connection) || p.selectedFileID != fileID {
+			return
+		}
+		p.setRightTagsMetadata(cached)
+		p.setLeftTagsMetadata(cached)
+		p.refreshSearchSuggestions()
+	})
 }
 
 func (p *prototype) openNativeWatcherForFile(fileID int64) {
@@ -3022,7 +3063,7 @@ func (p *prototype) ensureTileMetadata(item daemonclient.RecentItem) {
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 
-		metadata, err := connection.client.GetFileMetadata(ctx, item.FileID)
+		metadata, err := connection.client.GetBasicFileMetadata(ctx, item.FileID)
 		if err != nil {
 			p.clearTileMetadataLoad(item.FileID, generation)
 			return
@@ -3053,18 +3094,12 @@ func (p *prototype) ensureTileMetadata(item daemonclient.RecentItem) {
 			cached.IsDeleted = metadata.IsDeleted
 		}
 		cached.Ratings = metadata.Ratings
-		cached.Tags = metadata.Tags
 		p.tileMetadataCache[item.FileID] = cached
 		p.tileMetadataMu.Unlock()
 
 		fyne.Do(func() {
 			if !p.isCurrentOperation(connection) {
 				return
-			}
-
-			if p.selectedFileID == item.FileID {
-				p.setRightTagsMetadata(cached)
-				p.setLeftTagsMetadata(cached)
 			}
 
 			p.renderGrid()
@@ -3840,7 +3875,7 @@ func (p *prototype) triggerPTRSync() {
 	p.updateActionState()
 
 	go func(connection connectionSnapshot, requestID uint64) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 
 		status, err := connection.client.TriggerPTRSync(ctx)
