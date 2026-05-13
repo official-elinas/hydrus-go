@@ -51,11 +51,12 @@ type Manager struct {
 	hydrusAccessKey string
 	httpClient      *http.Client
 
-	mu          sync.Mutex
-	cmd         *exec.Cmd
-	waitDone    chan error
-	lastErr     string
-	stopLiveness chan struct{}
+	mu            sync.Mutex
+	cmd           *exec.Cmd
+	waitDone      chan error
+	lastErr       string
+	stopLiveness  chan struct{}
+	livenessDone  chan struct{}
 }
 
 // New prepares the hydownloader root, starts the daemon process, and waits for
@@ -76,6 +77,7 @@ func New(ctx context.Context, logger *slog.Logger, cfg coredownloader.Config, hy
 		hydrusAccessKey: strings.TrimSpace(hydrusAccessKey),
 		httpClient:      &http.Client{Timeout: 30 * time.Second},
 		stopLiveness:    make(chan struct{}),
+		livenessDone:    make(chan struct{}),
 	}
 
 	if err := manager.ensureInitialized(ctx); err != nil {
@@ -87,7 +89,10 @@ func New(ctx context.Context, logger *slog.Logger, cfg coredownloader.Config, hy
 	}
 
 	manager.checkCallbackURLReachability()
-	go manager.livenessLoop()
+	go func() {
+		defer close(manager.livenessDone)
+		manager.livenessLoop()
+	}()
 
 	return manager, nil
 }
@@ -105,6 +110,12 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	}
 
 	m.logger.Info("shutting down hydownloader daemon", "root", m.cfg.Root, "host", m.cfg.Host, "port", m.cfg.Port)
+
+	select {
+	case <-m.livenessDone:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 
 	m.refreshProcessState()
 
@@ -567,19 +578,25 @@ func (m *Manager) livenessLoop() {
 			m.logger.Warn("hydownloader daemon has exited; scheduling restart",
 				"backoff", backoff, "root", m.cfg.Root)
 
-			select {
-			case <-m.stopLiveness:
-				return
-			case <-time.After(backoff):
-			}
+		select {
+		case <-m.stopLiveness:
+			return
+		case <-time.After(backoff):
+		}
 
-			backoff = time.Duration(float64(backoff) * restartBackoffMult)
-			if backoff > restartBackoffMax {
-				backoff = restartBackoffMax
-			}
+		select {
+		case <-m.stopLiveness:
+			return
+		default:
+		}
 
-			m.logger.Info("restarting hydownloader daemon", "root", m.cfg.Root, "host", m.cfg.Host, "port", m.cfg.Port)
-			if err := m.start(context.Background()); err != nil {
+		backoff = time.Duration(float64(backoff) * restartBackoffMult)
+		if backoff > restartBackoffMax {
+			backoff = restartBackoffMax
+		}
+
+		m.logger.Info("restarting hydownloader daemon", "root", m.cfg.Root, "host", m.cfg.Host, "port", m.cfg.Port)
+		if err := m.start(context.Background()); err != nil {
 				m.logger.Error("hydownloader restart failed", "error", err, "root", m.cfg.Root)
 				m.mu.Lock()
 				m.lastErr = err.Error()
