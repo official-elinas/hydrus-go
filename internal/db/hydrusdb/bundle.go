@@ -29,7 +29,10 @@ type openMode string
 const (
 	modeReadOnly  openMode = "ro"
 	modeReadWrite openMode = "rw"
-	sqliteBusyTimeoutMS     = 5000
+
+	sqliteBusyTimeoutMS = 5000
+	sqliteMmapSize8GiB  = 8 * 1024 * 1024 * 1024
+	sqliteCacheSize256M = -262144
 )
 
 // Bundle is a Hydrus client DB bundle opened on a single dedicated SQLite
@@ -423,11 +426,22 @@ func configureSQLiteConnection(ctx context.Context, conn *sql.Conn) error {
 		return errors.New("sqlite connection is nil")
 	}
 
-	if _, err := conn.ExecContext(
-		ctx,
-		fmt.Sprintf("PRAGMA busy_timeout = %d", sqliteBusyTimeoutMS),
-	); err != nil {
-		return fmt.Errorf("set sqlite busy_timeout pragma: %w", err)
+	pragmas := []struct {
+		name  string
+		value int64
+	}{
+		{"busy_timeout", sqliteBusyTimeoutMS},
+		{"mmap_size", sqliteMmapSize8GiB},
+		{"cache_size", sqliteCacheSize256M},
+	}
+
+	for _, p := range pragmas {
+		if _, err := conn.ExecContext(
+			ctx,
+			fmt.Sprintf("PRAGMA %s = %d", p.name, p.value),
+		); err != nil {
+			return fmt.Errorf("set sqlite %s pragma: %w", p.name, err)
+		}
 	}
 
 	return nil
