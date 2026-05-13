@@ -363,22 +363,6 @@ func isLocalOnlyHost(host string) bool {
 
 func normalizeOptionalAccessKey(accessKey string) (string, error) {
 	normalized := strings.ToLower(strings.TrimSpace(accessKey))
-	if normalized == "" {
-		return "", nil
-	}
-
-	decoded, err := hex.DecodeString(normalized)
-	if err != nil {
-		return "", fmt.Errorf("decode HYDRUS_GO_ACCESS_KEY: %w", err)
-	}
-
-	if len(decoded) != 32 {
-		return "", fmt.Errorf(
-			"HYDRUS_GO_ACCESS_KEY must be 32 bytes (64 hex characters), got %d bytes",
-			len(decoded),
-		)
-	}
-
 	return normalized, nil
 }
 

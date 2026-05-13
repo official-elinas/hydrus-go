@@ -187,15 +187,6 @@ func TestLoadFromEnv_AllowsConfiguredOverrides(t *testing.T) {
 	}
 }
 
-func TestLoadFromEnv_RejectsInvalidAccessKey(t *testing.T) {
-	clearConfigEnv(t)
-	t.Setenv("HYDRUS_GO_ACCESS_KEY", "abcdef")
-
-	_, err := LoadFromEnv()
-	if err == nil {
-		t.Fatal("LoadFromEnv() error = nil, want error")
-	}
-}
 
 func TestLoadFromEnv_RejectsMissingDBDir(t *testing.T) {
 	clearConfigEnv(t)

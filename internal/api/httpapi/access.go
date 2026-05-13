@@ -251,15 +251,6 @@ func normalizeCredential(raw string) (string, error) {
 		return "", errors.New("credential is empty")
 	}
 
-	decoded, err := hex.DecodeString(normalized)
-	if err != nil {
-		return "", fmt.Errorf("decode credential: %w", err)
-	}
-
-	if len(decoded) != 32 {
-		return "", fmt.Errorf("credential must be 32 bytes, got %d", len(decoded))
-	}
-
 	return normalized, nil
 }
 
