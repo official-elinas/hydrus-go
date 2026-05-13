@@ -2520,7 +2520,7 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 	}
 
 	go func(connection connectionSnapshot, selectedFileID int64) {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 
 		metadata, err := connection.client.GetBasicFileMetadata(ctx, selectedFileID)
@@ -3060,7 +3060,7 @@ func (p *prototype) ensureTileMetadata(item daemonclient.RecentItem) {
 	p.tileMetadataMu.Unlock()
 
 	go func(connection connectionSnapshot, item daemonclient.RecentItem, generation uint64) {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 
 		metadata, err := connection.client.GetBasicFileMetadata(ctx, item.FileID)
