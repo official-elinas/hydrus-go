@@ -1572,6 +1572,16 @@ func upsertPTRSyncState(
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			seedDownloadedCount, seedErr := queryPTRDownloadedUpdateCount(ctx, tx, serviceID)
+			if seedErr != nil {
+				return fmt.Errorf("seed ptr_sync_state downloaded count: %w", seedErr)
+			}
+
+			seedDownloadedBytes, seedErr := queryPTRDownloadedUpdateBytes(ctx, tx, serviceID)
+			if seedErr != nil {
+				return fmt.Errorf("seed ptr_sync_state downloaded bytes: %w", seedErr)
+			}
+
 			nowMS := time.Now().UTC().UnixMilli()
 			if _, insertErr := tx.ExecContext(
 				ctx,
@@ -1602,8 +1612,8 @@ func upsertPTRSyncState(
 				0,
 				nil,
 				0,
-				0,
-				0,
+				seedDownloadedCount,
+				seedDownloadedBytes,
 				0,
 				0,
 				0,
