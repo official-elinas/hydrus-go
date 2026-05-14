@@ -143,6 +143,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 
 	_ = m.postJSON(shutdownCtx, "/shutdown", map[string]any{}, nil)
 
+	addr := fmt.Sprintf("%s:%d", m.cfg.Host, m.cfg.Port)
 	select {
 	case err := <-waitDone:
 		m.mu.Lock()
@@ -154,6 +155,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 			return fmt.Errorf("wait for hydownloader shutdown: %w", err)
 		}
 		m.logger.Info("hydownloader daemon stopped cleanly")
+		m.waitForPortFree(addr, 5*time.Second)
 		return nil
 	case <-shutdownCtx.Done():
 		if cmd.Process != nil {
@@ -169,6 +171,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 			if err != nil && !errors.As(err, &exitErr) {
 				return fmt.Errorf("kill hydownloader process: %w", err)
 			}
+			m.waitForPortFree(addr, 5*time.Second)
 			return nil
 		case <-time.After(5 * time.Second):
 			return fmt.Errorf("wait for hydownloader shutdown: %w", shutdownCtx.Err())
@@ -822,13 +825,19 @@ func (m *Manager) killOrphanDaemon(ctx context.Context) {
 
 func (m *Manager) waitForPortFree(addr string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
+	consecutive := 0
 	for time.Now().Before(deadline) {
 		time.Sleep(500 * time.Millisecond)
 		c, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
 		if err != nil {
-			return true
+			consecutive++
+			if consecutive >= 2 {
+				return true
+			}
+			continue
 		}
 		c.Close()
+		consecutive = 0
 	}
 	return false
 }
