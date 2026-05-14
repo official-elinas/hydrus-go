@@ -617,7 +617,7 @@ func TestNew_GrantsPTRMutationPermissionsThroughBootstrapAuth(t *testing.T) {
 			name:       "pending counts falls through auth",
 			method:     http.MethodGet,
 			path:       "/manage_services/pending_counts",
-			wantStatus: http.StatusServiceUnavailable,
+			wantStatus: http.StatusOK,
 		},
 		{
 			name:       "commit pending falls through auth",

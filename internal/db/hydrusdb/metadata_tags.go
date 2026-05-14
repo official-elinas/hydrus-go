@@ -8,6 +8,8 @@ import (
 	"slices"
 	"strconv"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/official-elinas/hydrus-go/internal/core/services"
 	coretags "github.com/official-elinas/hydrus-go/internal/core/tags"
 )
@@ -166,45 +168,82 @@ func (b *Bundle) lookupFileTags(
 		hasCombinedFileService,
 	)
 
-	storageByHashID := map[int64]map[string]tagIDStatusSets{}
-	displayByHashID := map[int64]map[string]tagIDStatusSets{}
+	type pairResult struct {
+		tagServiceKey   string
+		storageByHashID map[int64]tagIDStatusSets
+		displayByHashID map[int64]tagIDStatusSets
+	}
+
+	resultsCh := make(chan pairResult, len(realTagServices)*len(fileServiceGroups))
+
+	eg, egCtx := errgroup.WithContext(ctx)
+	eg.SetLimit(readPoolSize)
+
 	for _, tagService := range realTagServices {
 		for fileServiceID, groupedHashIDs := range fileServiceGroups {
+			tagService := tagService
+			fileServiceID := fileServiceID
+			groupedHashIDs := groupedHashIDs
 			useCombinedFallback := !hasCombinedFileService || fileServiceID == combinedFileService.id
 
-			groupStorageByHashID, err := b.lookupStorageTagServiceMappings(
-				ctx,
-				groupedHashIDs,
-				fileServiceID,
-				tagService,
-				mappingTableNames,
-				cacheTableNames,
-				useCombinedFallback,
-			)
-			if err != nil {
-				return nil, err
-			}
+			eg.Go(func() error {
+				conn, err := b.acquireReadConn(egCtx)
+				if err != nil {
+					return err
+				}
+				defer b.releaseReadConn(conn)
 
-			for hashID, statuses := range groupStorageByHashID {
-				ensureHashServiceTagSet(storageByHashID, hashID, tagService.serviceKey).merge(statuses)
-			}
+				groupStorageByHashID, err := b.lookupStorageTagServiceMappingsConn(
+					egCtx,
+					conn,
+					groupedHashIDs,
+					fileServiceID,
+					tagService,
+					mappingTableNames,
+					cacheTableNames,
+					useCombinedFallback,
+				)
+				if err != nil {
+					return err
+				}
 
-			groupDisplayByHashID, err := b.lookupDisplayTagServiceMappings(
-				ctx,
-				groupedHashIDs,
-				fileServiceID,
-				tagService,
-				groupStorageByHashID,
-				cacheTableNames,
-				useCombinedFallback,
-			)
-			if err != nil {
-				return nil, err
-			}
+				groupDisplayByHashID, err := b.lookupDisplayTagServiceMappingsConn(
+					egCtx,
+					conn,
+					groupedHashIDs,
+					fileServiceID,
+					tagService,
+					groupStorageByHashID,
+					cacheTableNames,
+					useCombinedFallback,
+				)
+				if err != nil {
+					return err
+				}
 
-			for hashID, statuses := range groupDisplayByHashID {
-				ensureHashServiceTagSet(displayByHashID, hashID, tagService.serviceKey).merge(statuses)
-			}
+				resultsCh <- pairResult{
+					tagServiceKey:   tagService.serviceKey,
+					storageByHashID: groupStorageByHashID,
+					displayByHashID: groupDisplayByHashID,
+				}
+				return nil
+			})
+		}
+	}
+
+	if err := eg.Wait(); err != nil {
+		return nil, err
+	}
+	close(resultsCh)
+
+	storageByHashID := map[int64]map[string]tagIDStatusSets{}
+	displayByHashID := map[int64]map[string]tagIDStatusSets{}
+	for result := range resultsCh {
+		for hashID, statuses := range result.storageByHashID {
+			ensureHashServiceTagSet(storageByHashID, hashID, result.tagServiceKey).merge(statuses)
+		}
+		for hashID, statuses := range result.displayByHashID {
+			ensureHashServiceTagSet(displayByHashID, hashID, result.tagServiceKey).merge(statuses)
 		}
 	}
 
@@ -221,7 +260,12 @@ func (b *Bundle) lookupFileTags(
 		}
 	}
 
-	tagsByID, err := b.lookupTagsByID(ctx, dedupeInt64s(seenTagIDs))
+	tagConn, err := b.acquireReadConn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	tagsByID, err := b.lookupTagsByIDConn(ctx, tagConn, dedupeInt64s(seenTagIDs))
+	b.releaseReadConn(tagConn)
 	if err != nil {
 		return nil, err
 	}
@@ -989,4 +1033,387 @@ func buildTagServicePayload(
 		"storage_tags": storageTags,
 		"display_tags": displayTags,
 	}
+}
+
+type queryContexter interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+func collectTagIDsFromTableQuerier(
+	ctx context.Context,
+	q queryContexter,
+	fileIDs []int64,
+	schemaName string,
+	tableName string,
+	status int,
+	mappings map[int64]tagIDStatusSets,
+) error {
+	query := fmt.Sprintf(
+		`SELECT hash_id, tag_id
+		FROM %s.%s
+		WHERE hash_id IN (%s)`,
+		schemaName,
+		tableName,
+		placeholders(len(fileIDs)),
+	)
+
+	rows, err := q.QueryContext(ctx, query, int64Args(fileIDs)...)
+	if err != nil {
+		return fmt.Errorf("query tag mappings %s.%s: %w", schemaName, tableName, err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			hashID int64
+			tagID  int64
+		)
+
+		if err := rows.Scan(&hashID, &tagID); err != nil {
+			return fmt.Errorf("scan tag mapping %s.%s row: %w", schemaName, tableName, err)
+		}
+
+		ensureTagIDStatusSet(mappings, hashID).add(status, tagID)
+	}
+
+	return rows.Err()
+}
+
+func (b *Bundle) lookupStorageTagServiceMappingsConn(
+	ctx context.Context,
+	conn *sql.Conn,
+	fileIDs []int64,
+	fileServiceID int64,
+	tagService serviceDefinition,
+	mappingTableNames map[string]struct{},
+	cacheTableNames map[string]struct{},
+	useCombinedFallback bool,
+) (map[int64]tagIDStatusSets, error) {
+	mappings := map[int64]tagIDStatusSets{}
+	if len(fileIDs) == 0 {
+		return mappings, nil
+	}
+
+	queries := []struct {
+		status    int
+		schema    string
+		tableName string
+	}{
+		{status: contentStatusCurrent, schema: "external_mappings", tableName: fmt.Sprintf("current_mappings_%d", tagService.id)},
+		{status: contentStatusDeleted, schema: "external_mappings", tableName: fmt.Sprintf("deleted_mappings_%d", tagService.id)},
+		{status: contentStatusPending, schema: "external_mappings", tableName: fmt.Sprintf("pending_mappings_%d", tagService.id)},
+	}
+
+	if !useCombinedFallback {
+		if n := specificStorageCurrentTableName(fileServiceID, tagService.id); tableExists(cacheTableNames, n) {
+			queries[0].schema, queries[0].tableName = "external_caches", n
+		}
+		if n := specificStorageDeletedTableName(fileServiceID, tagService.id); tableExists(cacheTableNames, n) {
+			queries[1].schema, queries[1].tableName = "external_caches", n
+		}
+		if n := specificStoragePendingTableName(fileServiceID, tagService.id); tableExists(cacheTableNames, n) {
+			queries[2].schema, queries[2].tableName = "external_caches", n
+		}
+	}
+
+	for _, q := range queries {
+		tableSet := mappingTableNames
+		if q.schema != "external_mappings" {
+			tableSet = cacheTableNames
+		}
+		if _, ok := tableSet[q.tableName]; !ok {
+			continue
+		}
+		if err := collectTagIDsFromTableQuerier(ctx, conn, fileIDs, q.schema, q.tableName, q.status, mappings); err != nil {
+			return nil, err
+		}
+	}
+
+	petitionedTableName := fmt.Sprintf("petitioned_mappings_%d", tagService.id)
+	if _, ok := mappingTableNames[petitionedTableName]; ok {
+		if err := collectTagIDsFromTableQuerier(ctx, conn, fileIDs, "external_mappings", petitionedTableName, contentStatusPetitioned, mappings); err != nil {
+			return nil, err
+		}
+	}
+
+	return mappings, nil
+}
+
+func (b *Bundle) lookupDisplayImplicationTagIDsConn(
+	ctx context.Context,
+	conn *sql.Conn,
+	tagServiceID int64,
+	tagIDs []int64,
+	cacheTableNames map[string]struct{},
+) (map[int64][]int64, error) {
+	implicationsByTagID := map[int64][]int64{}
+	if len(tagIDs) == 0 {
+		return implicationsByTagID, nil
+	}
+
+	idealsByTagID := map[int64]int64{}
+	for _, tagID := range tagIDs {
+		idealsByTagID[tagID] = tagID
+	}
+
+	siblingTableName := actualTagSiblingLookupTableName(tagServiceID)
+	if _, ok := cacheTableNames[siblingTableName]; ok {
+		query := fmt.Sprintf(
+			`SELECT bad_tag_id, ideal_tag_id
+			FROM external_caches.%s
+			WHERE bad_tag_id IN (%s)`,
+			siblingTableName,
+			placeholders(len(tagIDs)),
+		)
+
+		rows, err := conn.QueryContext(ctx, query, int64Args(tagIDs)...)
+		if err != nil {
+			return nil, fmt.Errorf("query tag siblings lookup %s: %w", siblingTableName, err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var badTagID, idealTagID int64
+			if err := rows.Scan(&badTagID, &idealTagID); err != nil {
+				return nil, fmt.Errorf("scan tag siblings lookup %s row: %w", siblingTableName, err)
+			}
+			idealsByTagID[badTagID] = idealTagID
+		}
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("iterate tag siblings lookup %s rows: %w", siblingTableName, err)
+		}
+	}
+
+	idealTagIDs := dedupeInt64s(mapValuesInt64(idealsByTagID))
+	ancestorsByChildTagID := map[int64][]int64{}
+	parentTableName := actualTagParentLookupTableName(tagServiceID)
+	if len(idealTagIDs) > 0 {
+		if _, ok := cacheTableNames[parentTableName]; ok {
+			query := fmt.Sprintf(
+				`SELECT child_tag_id, ancestor_tag_id
+				FROM external_caches.%s
+				WHERE child_tag_id IN (%s)`,
+				parentTableName,
+				placeholders(len(idealTagIDs)),
+			)
+
+			rows, err := conn.QueryContext(ctx, query, int64Args(idealTagIDs)...)
+			if err != nil {
+				return nil, fmt.Errorf("query tag parents lookup %s: %w", parentTableName, err)
+			}
+			defer rows.Close()
+
+			for rows.Next() {
+				var childTagID, ancestorTagID int64
+				if err := rows.Scan(&childTagID, &ancestorTagID); err != nil {
+					return nil, fmt.Errorf("scan tag parents lookup %s row: %w", parentTableName, err)
+				}
+				ancestorsByChildTagID[childTagID] = append(ancestorsByChildTagID[childTagID], ancestorTagID)
+			}
+			if err := rows.Err(); err != nil {
+				return nil, fmt.Errorf("iterate tag parents lookup %s rows: %w", parentTableName, err)
+			}
+		}
+	}
+
+	for _, tagID := range tagIDs {
+		idealTagID := idealsByTagID[tagID]
+		impliedTagIDs := []int64{idealTagID}
+		impliedTagIDs = append(impliedTagIDs, ancestorsByChildTagID[idealTagID]...)
+		implicationsByTagID[tagID] = dedupeInt64s(impliedTagIDs)
+	}
+
+	return implicationsByTagID, nil
+}
+
+func (b *Bundle) addDisplayImplicationsFromStorageConn(
+	ctx context.Context,
+	conn *sql.Conn,
+	tagService serviceDefinition,
+	storageByHashID map[int64]tagIDStatusSets,
+	status int,
+	cacheTableNames map[string]struct{},
+	displayByHashID map[int64]tagIDStatusSets,
+) error {
+	inputTagIDs := []int64{}
+	for _, storageStatuses := range storageByHashID {
+		for tagID := range storageStatuses[status] {
+			inputTagIDs = append(inputTagIDs, tagID)
+		}
+	}
+
+	implicationsByTagID, err := b.lookupDisplayImplicationTagIDsConn(
+		ctx,
+		conn,
+		tagService.id,
+		dedupeInt64s(inputTagIDs),
+		cacheTableNames,
+	)
+	if err != nil {
+		return err
+	}
+
+	for hashID, storageStatuses := range storageByHashID {
+		for tagID := range storageStatuses[status] {
+			impliedTagIDs, ok := implicationsByTagID[tagID]
+			if !ok || len(impliedTagIDs) == 0 {
+				continue
+			}
+			displayStatuses := ensureTagIDStatusSet(displayByHashID, hashID)
+			for _, impliedTagID := range impliedTagIDs {
+				displayStatuses.add(status, impliedTagID)
+			}
+		}
+	}
+
+	return nil
+}
+
+func (b *Bundle) lookupDisplayTagServiceMappingsConn(
+	ctx context.Context,
+	conn *sql.Conn,
+	fileIDs []int64,
+	fileServiceID int64,
+	tagService serviceDefinition,
+	storageByHashID map[int64]tagIDStatusSets,
+	cacheTableNames map[string]struct{},
+	useCombinedFallback bool,
+) (map[int64]tagIDStatusSets, error) {
+	displayByHashID := map[int64]tagIDStatusSets{}
+	if len(fileIDs) == 0 {
+		return displayByHashID, nil
+	}
+
+	useFallbackCurrent := true
+	useFallbackPending := true
+	if !useCombinedFallback {
+		currentDisplayTableName := specificDisplayCurrentTableName(fileServiceID, tagService.id)
+		if _, ok := cacheTableNames[currentDisplayTableName]; ok {
+			useFallbackCurrent = false
+			if err := collectTagIDsFromTableQuerier(ctx, conn, fileIDs, "external_caches", currentDisplayTableName, contentStatusCurrent, displayByHashID); err != nil {
+				return nil, err
+			}
+		}
+
+		pendingDisplayTableName := specificDisplayPendingTableName(fileServiceID, tagService.id)
+		if _, ok := cacheTableNames[pendingDisplayTableName]; ok {
+			useFallbackPending = false
+			if err := collectTagIDsFromTableQuerier(ctx, conn, fileIDs, "external_caches", pendingDisplayTableName, contentStatusPending, displayByHashID); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	if useFallbackCurrent {
+		if err := b.addDisplayImplicationsFromStorageConn(ctx, conn, tagService, storageByHashID, contentStatusCurrent, cacheTableNames, displayByHashID); err != nil {
+			return nil, err
+		}
+	}
+
+	if useFallbackPending {
+		if err := b.addDisplayImplicationsFromStorageConn(ctx, conn, tagService, storageByHashID, contentStatusPending, cacheTableNames, displayByHashID); err != nil {
+			return nil, err
+		}
+	}
+
+	for hashID, storageStatuses := range storageByHashID {
+		displayStatuses := ensureTagIDStatusSet(displayByHashID, hashID)
+		displayStatuses.copyStatusFrom(storageStatuses, contentStatusDeleted)
+		displayStatuses.copyStatusFrom(storageStatuses, contentStatusPetitioned)
+	}
+
+	return displayByHashID, nil
+}
+
+func (b *Bundle) lookupTagsByIDConn(
+	ctx context.Context,
+	conn *sql.Conn,
+	tagIDs []int64,
+) (map[int64]string, error) {
+	if len(tagIDs) == 0 {
+		return map[int64]string{}, nil
+	}
+
+	schemaMode, err := b.lookupMasterTagSchemaMode(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	switch schemaMode {
+	case masterTagSchemaSplit:
+		return b.lookupSplitTagsByIDConn(ctx, conn, tagIDs)
+	case masterTagSchemaLegacyFlat:
+		return b.lookupFlatTagsByIDConn(ctx, conn, tagIDs)
+	default:
+		return nil, errors.New("unsupported external_master tag schema mode")
+	}
+}
+
+func (b *Bundle) lookupSplitTagsByIDConn(
+	ctx context.Context,
+	conn *sql.Conn,
+	tagIDs []int64,
+) (map[int64]string, error) {
+	query := fmt.Sprintf(
+		`SELECT t.tag_id, n.namespace, s.subtag
+		FROM external_master.tags t
+		JOIN external_master.namespaces n USING (namespace_id)
+		JOIN external_master.subtags s USING (subtag_id)
+		WHERE t.tag_id IN (%s)`,
+		placeholders(len(tagIDs)),
+	)
+
+	rows, err := conn.QueryContext(ctx, query, int64Args(tagIDs)...)
+	if err != nil {
+		return nil, fmt.Errorf("query tags by ID: %w", err)
+	}
+	defer rows.Close()
+
+	tagsByID := map[int64]string{}
+	for rows.Next() {
+		var tagID int64
+		var namespace, subtag string
+		if err := rows.Scan(&tagID, &namespace, &subtag); err != nil {
+			return nil, fmt.Errorf("scan tags by ID row: %w", err)
+		}
+		tagsByID[tagID] = coretags.Combine(namespace, subtag)
+	}
+
+	return tagsByID, rows.Err()
+}
+
+func (b *Bundle) lookupFlatTagsByIDConn(
+	ctx context.Context,
+	conn *sql.Conn,
+	tagIDs []int64,
+) (map[int64]string, error) {
+	query := fmt.Sprintf(
+		`SELECT tag_id, tag
+		FROM external_master.tags
+		WHERE tag_id IN (%s)`,
+		placeholders(len(tagIDs)),
+	)
+
+	rows, err := conn.QueryContext(ctx, query, int64Args(tagIDs)...)
+	if err != nil {
+		return nil, fmt.Errorf("query flat tags by ID: %w", err)
+	}
+	defer rows.Close()
+
+	tagsByID := map[int64]string{}
+	for rows.Next() {
+		var tagID int64
+		var tag string
+		if err := rows.Scan(&tagID, &tag); err != nil {
+			return nil, fmt.Errorf("scan flat tags by ID row: %w", err)
+		}
+		tagsByID[tagID] = tag
+	}
+
+	return tagsByID, rows.Err()
+}
+
+func tableExists(tableSet map[string]struct{}, name string) bool {
+	_, ok := tableSet[name]
+	return ok
 }
