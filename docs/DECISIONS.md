@@ -399,18 +399,17 @@ automatically re-run PTR sync in the background on a periodic interval
 
 **Trigger condition**
 
-Background polling should activate only when **all** of the following are true:
+Background polling activates only when **all** of the following are true:
 
-1. the PTR opt-in marker file has been written (i.e. the user has triggered at
-   least one manual sync in the past, even across daemon restarts)
+1. the PTR opt-in marker file is present (written on first manual trigger,
+   survives daemon restarts — if it exists, the user has opted in regardless of
+   DB size or how long the daemon has been running)
 2. no sync pass is currently active
 3. the time elapsed since the last completed sync exceeds the configured
    interval (default: 24 hours)
 
-The interval should be configurable via an environment variable or config field,
-with 24 hours as the default. PTR sync should remain opt-in: the background
-scheduler must never fire on a fresh daemon start where the user has not
-previously opted in.
+PTR sync remains opt-in: the background scheduler must never fire when the
+opt-in marker is absent.
 
 **Implementation sketch (not yet done)**
 
