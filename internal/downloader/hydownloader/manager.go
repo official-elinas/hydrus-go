@@ -802,15 +802,9 @@ func (m *Manager) killOrphanDaemon(ctx context.Context) {
 	defer cancel()
 	_ = m.postJSON(shutCtx, "/shutdown", map[string]any{}, nil)
 
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		time.Sleep(500 * time.Millisecond)
-		c, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
-		if err != nil {
-			m.logger.Info("orphan hydownloader stopped", "addr", addr)
-			return
-		}
-		c.Close()
+	if m.waitForPortFree(addr, 30*time.Second) {
+		m.logger.Info("orphan hydownloader stopped", "addr", addr)
+		return
 	}
 
 	m.logger.Warn("orphan hydownloader did not stop gracefully; force-killing by port", "addr", addr)
@@ -819,10 +813,24 @@ func (m *Manager) killOrphanDaemon(ctx context.Context) {
 			m.logger.Warn("force-kill orphan hydownloader failed", "pid", pid, "error", kerr)
 		} else {
 			m.logger.Info("force-killed orphan hydownloader", "pid", pid)
+			m.waitForPortFree(addr, 10*time.Second)
 		}
 	} else {
 		m.logger.Warn("could not find orphan hydownloader PID for force-kill", "port", m.cfg.Port)
 	}
+}
+
+func (m *Manager) waitForPortFree(addr string, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(500 * time.Millisecond)
+		c, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
+		if err != nil {
+			return true
+		}
+		c.Close()
+	}
+	return false
 }
 
 func readExistingHydownloaderAccessKey(configPath string) string {
