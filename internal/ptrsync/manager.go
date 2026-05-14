@@ -165,6 +165,17 @@ func NewManager(
 			go func() {
 				_, _ = manager.Trigger(context.Background())
 			}()
+		} else {
+			hasMappings, mappingsErr := readBundle.HasPTRCurrentMappings(ctx)
+			if mappingsErr != nil {
+				if logger != nil {
+					logger.Warn("could not check PTR current mappings for auto-start", "error", mappingsErr)
+				}
+			} else if hasMappings {
+				go func() {
+					_, _ = manager.Trigger(context.Background())
+				}()
+			}
 		}
 	}
 

@@ -2001,6 +2001,38 @@ func (b *Bundle) GetPTRNextUpdateDue(
 	return nextUpdateDue, nil
 }
 
+// HasPTRCurrentMappings returns true when the PTR daemon service exists and its
+// current_mappings table is non-empty.
+func (b *Bundle) HasPTRCurrentMappings(ctx context.Context) (bool, error) {
+	conn, err := b.acquireReadConn(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer b.releaseReadConn(conn)
+
+	serviceID, err := lookupServiceIDByKeyTx(ctx, conn, coreptrsync.DaemonServiceKeyHex())
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	row := conn.QueryRowContext(
+		ctx,
+		fmt.Sprintf(`SELECT COUNT(*) FROM external_mappings.current_mappings_%d LIMIT 1`, serviceID),
+	)
+	var count int64
+	if err := row.Scan(&count); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("query PTR current mappings presence: %w", err)
+	}
+
+	return count > 0, nil
+}
+
 func defaultPTRSyncStatus(cfg coreptrsync.Config) coreptrsync.Status {
 	phase := coreptrsync.PhaseDisabled
 	if cfg.Enabled {

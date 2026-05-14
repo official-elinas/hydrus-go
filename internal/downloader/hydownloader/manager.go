@@ -59,6 +59,8 @@ type Manager struct {
 	lastErr       string
 	stopLiveness  chan struct{}
 	livenessDone  chan struct{}
+	livenessCtx   context.Context
+	livenessCancel context.CancelFunc
 }
 
 // New prepares the hydownloader root, starts the daemon process, and waits for
@@ -72,6 +74,7 @@ func New(ctx context.Context, logger *slog.Logger, cfg coredownloader.Config, hy
 		logger = slog.Default()
 	}
 
+	livenessCtx, livenessCancel := context.WithCancel(context.Background())
 	manager := &Manager{
 		logger:          logger,
 		cfg:             cfg,
@@ -80,6 +83,8 @@ func New(ctx context.Context, logger *slog.Logger, cfg coredownloader.Config, hy
 		httpClient:      &http.Client{Timeout: 30 * time.Second},
 		stopLiveness:    make(chan struct{}),
 		livenessDone:    make(chan struct{}),
+		livenessCtx:     livenessCtx,
+		livenessCancel:  livenessCancel,
 	}
 
 	if err := manager.ensureInitialized(ctx); err != nil {
@@ -109,6 +114,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	default:
 		close(m.stopLiveness)
 	}
+	m.livenessCancel()
 
 	m.logger.Info("shutting down hydownloader daemon", "root", m.cfg.Root, "host", m.cfg.Host, "port", m.cfg.Port)
 
@@ -597,7 +603,7 @@ func (m *Manager) livenessLoop() {
 		}
 
 		m.logger.Info("restarting hydownloader daemon", "root", m.cfg.Root, "host", m.cfg.Host, "port", m.cfg.Port)
-		if err := m.start(context.Background()); err != nil {
+		if err := m.start(m.livenessCtx); err != nil {
 				m.logger.Error("hydownloader restart failed", "error", err, "root", m.cfg.Root)
 				m.mu.Lock()
 				m.lastErr = err.Error()
@@ -609,7 +615,7 @@ func (m *Manager) livenessLoop() {
 			continue
 		}
 
-		probeCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		probeCtx, cancel := context.WithTimeout(m.livenessCtx, 5*time.Second)
 		apiErr := m.postJSON(probeCtx, "/api_version", map[string]any{}, nil)
 		cancel()
 
