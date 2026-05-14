@@ -134,6 +134,14 @@ func buildFileViewingStatisticsPayload(
 	return payload
 }
 
+func (b *Bundle) lookupFileViewingStatisticsConn(
+	ctx context.Context,
+	_ *sql.Conn,
+	fileIDs []int64,
+) (map[int64][]map[string]any, error) {
+	return b.lookupFileViewingStatistics(ctx, fileIDs)
+}
+
 func secondiseMSFloat(timestampMS int64) float64 {
 	return float64(timestampMS) / 1000.0
 }

@@ -2,6 +2,7 @@ package hydrusdb
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"slices"
@@ -284,6 +285,15 @@ func (b *Bundle) lookupFileTags(
 	}
 
 	return payloads, nil
+}
+
+func (b *Bundle) lookupFileTagsConn(
+	ctx context.Context,
+	_ *sql.Conn,
+	fileIDs []int64,
+	currentFileServices map[int64][]currentFileServiceMembership,
+) (map[int64]metadataTagsPayload, error) {
+	return b.lookupFileTags(ctx, fileIDs, currentFileServices)
 }
 
 func findServiceDefinitionByType(
