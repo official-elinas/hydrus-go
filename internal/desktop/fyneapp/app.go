@@ -3803,7 +3803,7 @@ func (p *prototype) fetchPTRStatus() {
 	p.updateActionState()
 
 	go func(connection connectionSnapshot, requestID uint64) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		var wg sync.WaitGroup

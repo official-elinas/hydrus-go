@@ -52,6 +52,8 @@ type Bundle struct {
 	recentBrowseTableMu  sync.RWMutex
 	recentBrowseTable    string
 	hasRecentBrowseTable bool
+
+	schemaTableNamesCache sync.Map
 }
 
 type bundlePaths struct {

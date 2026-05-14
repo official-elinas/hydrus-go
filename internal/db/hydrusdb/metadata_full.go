@@ -756,6 +756,10 @@ func (b *Bundle) lookupSchemaTableNames(
 		return nil, fmt.Errorf("unsupported sqlite schema name %q", schemaName)
 	}
 
+	if cached, ok := b.schemaTableNamesCache.Load(schemaName); ok {
+		return cached.(map[string]struct{}), nil
+	}
+
 	rows, err := b.conn.QueryContext(
 		ctx,
 		fmt.Sprintf(`SELECT name FROM %s.sqlite_master WHERE type = 'table'`, schemaName),
@@ -779,6 +783,7 @@ func (b *Bundle) lookupSchemaTableNames(
 		return nil, fmt.Errorf("iterate sqlite table names for schema %s: %w", schemaName, err)
 	}
 
+	b.schemaTableNamesCache.Store(schemaName, tableNames)
 	return tableNames, nil
 }
 
