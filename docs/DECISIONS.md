@@ -379,3 +379,55 @@ SQLite state directly.
 **Consequence**
 
 The current PTR slice exposes `GET /service/ptr/status` and `POST /service/ptr/sync`, and the daemon now also owns anonymous PTR `/update` download plus local `repository updates` registration. Downloaded definitions/content are still not applied into local mappings or tag/query state; that remains later backend work.
+
+## 2026-05-14 — PTR background polling after first manual opt-in (not yet implemented)
+
+**Decision**
+
+Once the user has triggered at least one manual PTR sync, the daemon should
+automatically re-run PTR sync in the background on a periodic interval
+(target: approximately every 24 hours) without requiring further user action.
+
+**Why**
+
+- a user who has opted in once has expressed intent to stay up to date with the
+  Public Tag Repository; silently going stale after the first sync is unexpected
+- matches the Python Hydrus behavior where the client schedules periodic PTR
+  update checks after the repository is enabled
+- the daemon already holds all required context: the opt-in marker, the PTR
+  config, the writable bundle, and the sync runner lifecycle
+
+**Trigger condition**
+
+Background polling should activate only when **all** of the following are true:
+
+1. the PTR opt-in marker file has been written (i.e. the user has triggered at
+   least one manual sync in the past, even across daemon restarts)
+2. no sync pass is currently active
+3. the time elapsed since the last completed sync exceeds the configured
+   interval (default: 24 hours)
+
+The interval should be configurable via an environment variable or config field,
+with 24 hours as the default. PTR sync should remain opt-in: the background
+scheduler must never fire on a fresh daemon start where the user has not
+previously opted in.
+
+**Implementation sketch (not yet done)**
+
+- `Manager` startup: if the opt-in marker is present and no active run exists,
+  start a ticker/sleep loop in `runnerCtx`
+- on each tick: call the same `beginSync` path that `Trigger` uses, guarded by
+  `runMu`; skip silently if a run is already active
+- `Manager` fields to add: `autoSyncInterval time.Duration`,
+  `lastSyncCompletedAt time.Time` (persisted or derived from PTR status)
+- the background goroutine must respect `runnerCtx` cancellation for clean
+  shutdown
+- expose the next scheduled sync time in `coreptrsync.Status` so the UI can
+  show it
+
+**Files to touch when implementing**
+
+- `internal/ptrsync/manager.go` — scheduler loop and startup check
+- `internal/core/ptrsync/types.go` — add `NextScheduledSyncAt` to `Status`
+- `internal/config/config.go` — `HYDRUS_GO_PTR_AUTO_SYNC_INTERVAL` env var
+- `internal/api/httpapi/ptrsync.go` — surface `NextScheduledSyncAt` in response
