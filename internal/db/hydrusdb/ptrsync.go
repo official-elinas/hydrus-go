@@ -229,7 +229,13 @@ func (b *Bundle) ListPTRPendingMappingsForCommit(
 		return nil, err
 	}
 
-	service, ok, err := lookupServiceByKeyTx(ctx, b.conn, targetServiceKey)
+	conn, err := b.acquireReadConn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer b.releaseReadConn(conn)
+
+	service, ok, err := lookupServiceByKeyTx(ctx, conn, targetServiceKey)
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +243,7 @@ func (b *Bundle) ListPTRPendingMappingsForCommit(
 		return nil, fmt.Errorf("PTR service key %q is unavailable", targetServiceKey)
 	}
 
-	serviceID, err := lookupServiceIDByKeyTx(ctx, b.conn, targetServiceKey)
+	serviceID, err := lookupServiceIDByKeyTx(ctx, conn, targetServiceKey)
 	if err != nil {
 		return nil, err
 	}
@@ -254,7 +260,7 @@ func (b *Bundle) ListPTRPendingMappingsForCommit(
 		serviceID,
 	)
 
-	rows, err := b.conn.QueryContext(ctx, query)
+	rows, err := conn.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("query PTR pending mappings for commit: %w", err)
 	}
@@ -316,7 +322,13 @@ func (b *Bundle) CountPTRPendingMappings(
 		return coreptrsync.PendingInfo{}, err
 	}
 
-	serviceID, err := lookupServiceIDByKeyTx(ctx, b.conn, targetServiceKey)
+	conn, err := b.acquireReadConn(ctx)
+	if err != nil {
+		return coreptrsync.PendingInfo{}, err
+	}
+	defer b.releaseReadConn(conn)
+
+	serviceID, err := lookupServiceIDByKeyTx(ctx, conn, targetServiceKey)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return coreptrsync.PendingInfo{}, fmt.Errorf("%w: %s", coreptrsync.ErrPTRServiceNotFound, targetServiceKey)
@@ -325,7 +337,7 @@ func (b *Bundle) CountPTRPendingMappings(
 	}
 
 	var count int64
-	row := b.conn.QueryRowContext(
+	row := conn.QueryRowContext(
 		ctx,
 		fmt.Sprintf(`SELECT COUNT(*) FROM external_mappings.pending_mappings_%d`, serviceID),
 	)
@@ -1956,7 +1968,13 @@ func (b *Bundle) GetPTRNextUpdateDue(
 		return 0, nil
 	}
 
-	serviceID, err := lookupServiceIDByKeyTx(ctx, b.conn, coreptrsync.DaemonServiceKeyHex())
+	conn, err := b.acquireReadConn(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer b.releaseReadConn(conn)
+
+	serviceID, err := lookupServiceIDByKeyTx(ctx, conn, coreptrsync.DaemonServiceKeyHex())
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, nil
@@ -1965,7 +1983,7 @@ func (b *Bundle) GetPTRNextUpdateDue(
 		return 0, err
 	}
 
-	row := b.conn.QueryRowContext(
+	row := conn.QueryRowContext(
 		ctx,
 		`SELECT next_update_due FROM main.ptr_sync_remote_state WHERE service_id = ?`,
 		serviceID,
@@ -3082,7 +3100,13 @@ func (b *Bundle) LoadPTRStoredUpdateBody(
 		return nil, 0, false, fmt.Errorf("normalize PTR update hash %q: %w", hashHex, err)
 	}
 
-	serviceID, err := lookupServiceIDByKeyTx(ctx, b.conn, coreptrsync.DaemonServiceKeyHex())
+	conn, err := b.acquireReadConn(ctx)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	defer b.releaseReadConn(conn)
+
+	serviceID, err := lookupServiceIDByKeyTx(ctx, conn, coreptrsync.DaemonServiceKeyHex())
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, 0, false, nil
@@ -3092,7 +3116,7 @@ func (b *Bundle) LoadPTRStoredUpdateBody(
 	}
 
 	_, _, repositoryProcessedTableName := generatePTRRepositoryTableNames(serviceID)
-	row := b.conn.QueryRowContext(
+	row := conn.QueryRowContext(
 		ctx,
 		fmt.Sprintf(`SELECT mime, body FROM %s rp JOIN external_master.hashes h USING (hash_id) WHERE h.hash = ? AND body IS NOT NULL LIMIT 1`, repositoryProcessedTableName),
 		hashBytes,
