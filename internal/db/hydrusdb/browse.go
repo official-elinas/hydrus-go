@@ -29,6 +29,20 @@ func (b *Bundle) ListRecent(
 		return librarybrowse.Page{}, fmt.Errorf("browse limit must be greater than zero")
 	}
 
+	conn, err := b.acquireReadConn(ctx)
+	if err != nil {
+		return librarybrowse.Page{}, err
+	}
+	defer b.releaseReadConn(conn)
+
+	return b.listRecentWithConn(ctx, conn, request)
+}
+
+func (b *Bundle) listRecentWithConn(
+	ctx context.Context,
+	conn *sql.Conn,
+	request librarybrowse.Request,
+) (librarybrowse.Page, error) {
 	tableName, err := b.resolveRecentBrowseTable(ctx)
 	if err != nil {
 		return librarybrowse.Page{}, err
@@ -57,7 +71,7 @@ func (b *Bundle) ListRecent(
 		tableName,
 	)
 
-	rows, err := b.conn.QueryContext(ctx, query, request.Limit+1, request.Offset)
+	rows, err := conn.QueryContext(ctx, query, request.Limit+1, request.Offset)
 	if err != nil {
 		return librarybrowse.Page{}, fmt.Errorf("query recent local files: %w", err)
 	}
@@ -231,6 +245,20 @@ func (b *Bundle) SearchByTags(
 		return b.ListRecent(ctx, request.Request)
 	}
 
+	conn, err := b.acquireReadConn(ctx)
+	if err != nil {
+		return librarybrowse.Page{}, err
+	}
+	defer b.releaseReadConn(conn)
+
+	return b.searchByTagsWithConn(ctx, conn, request)
+}
+
+func (b *Bundle) searchByTagsWithConn(
+	ctx context.Context,
+	conn *sql.Conn,
+	request librarybrowse.SearchRequest,
+) (librarybrowse.Page, error) {
 	currentFilesTable, err := b.resolveRecentBrowseTable(ctx)
 	if err != nil {
 		return librarybrowse.Page{}, err
@@ -264,7 +292,7 @@ func (b *Bundle) SearchByTags(
 
 	tagIDs := make([]int64, 0, len(request.Tags))
 	for _, rawTag := range request.Tags {
-		tagID, found, err := b.lookupTagIDReadOnly(ctx, schemaMode, rawTag)
+		tagID, found, err := b.lookupTagIDReadOnlyConn(ctx, conn, schemaMode, rawTag)
 		if err != nil {
 			return librarybrowse.Page{}, fmt.Errorf("lookup tag id for %q: %w", rawTag, err)
 		}
@@ -371,7 +399,7 @@ func (b *Bundle) SearchByTags(
 
 	args = append(args, request.Limit+1, request.Offset)
 
-	rows, err := b.conn.QueryContext(ctx, query, args...)
+	rows, err := conn.QueryContext(ctx, query, args...)
 	if err != nil {
 		return librarybrowse.Page{}, fmt.Errorf("query tag-search local files: %w", err)
 	}
@@ -427,8 +455,9 @@ func (b *Bundle) SearchByTags(
 	return page, nil
 }
 
-func (b *Bundle) lookupTagIDReadOnly(
+func (b *Bundle) lookupTagIDReadOnlyConn(
 	ctx context.Context,
+	conn *sql.Conn,
 	schemaMode masterTagSchemaMode,
 	tag string,
 ) (int64, bool, error) {
@@ -439,7 +468,7 @@ func (b *Bundle) lookupTagIDReadOnly(
 
 	switch schemaMode {
 	case masterTagSchemaLegacyFlat:
-		row := b.conn.QueryRowContext(
+		row := conn.QueryRowContext(
 			ctx,
 			`SELECT tag_id FROM external_master.tags WHERE tag = ?`,
 			cleanTag,
@@ -459,7 +488,7 @@ func (b *Bundle) lookupTagIDReadOnly(
 	case masterTagSchemaSplit:
 		namespace, subtag := coretags.Split(cleanTag)
 
-		row := b.conn.QueryRowContext(
+		row := conn.QueryRowContext(
 			ctx,
 			`SELECT t.tag_id
 			FROM external_master.tags t
