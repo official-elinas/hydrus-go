@@ -164,6 +164,7 @@ type prototype struct {
 	thumbnailCacheM       sync.Mutex
 	tileMetadataCache     map[int64]daemonclient.FileMetadata
 	tileMetadataLoads     map[int64]struct{}
+	tileMetadataTagLoads  map[int64]struct{}
 	tileMetadataGen       uint64
 	tileMetadataMu        sync.Mutex
 	previewRequestID      uint64
@@ -210,6 +211,7 @@ func newPrototype() *prototype {
 		thumbnailLoads:       map[int64]struct{}{},
 		tileMetadataCache:    map[int64]daemonclient.FileMetadata{},
 		tileMetadataLoads:    map[int64]struct{}{},
+		tileMetadataTagLoads: map[int64]struct{}{},
 	}
 
 	p.connectionLabel = widget.NewLabel("")
@@ -2196,6 +2198,7 @@ func (p *prototype) applyRecentItems(items []daemonclient.RecentItem, preferredF
 		p.tileMetadataGen++
 		p.tileMetadataCache = map[int64]daemonclient.FileMetadata{}
 		p.tileMetadataLoads = map[int64]struct{}{}
+		p.tileMetadataTagLoads = map[int64]struct{}{}
 		p.tileMetadataMu.Unlock()
 	}
 
@@ -2512,7 +2515,15 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 			p.setRightTagsMetadata(metadata)
 			p.setLeftTagsMetadata(metadata)
 		} else {
-			go p.loadSelectedTags(connection, fileID)
+			p.tileMetadataMu.Lock()
+			_, alreadyLoading := p.tileMetadataTagLoads[fileID]
+			if !alreadyLoading {
+				p.tileMetadataTagLoads[fileID] = struct{}{}
+			}
+			p.tileMetadataMu.Unlock()
+			if !alreadyLoading {
+				go p.loadSelectedTags(connection, fileID)
+			}
 		}
 		p.renderGrid()
 		p.refreshSearchSuggestions()
@@ -2573,13 +2584,27 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 			p.refreshSearchSuggestions()
 		})
 
-		go p.loadSelectedTags(connection, selectedFileID)
+		p.tileMetadataMu.Lock()
+		_, alreadyLoading := p.tileMetadataTagLoads[selectedFileID]
+		if !alreadyLoading {
+			p.tileMetadataTagLoads[selectedFileID] = struct{}{}
+		}
+		p.tileMetadataMu.Unlock()
+		if !alreadyLoading {
+			go p.loadSelectedTags(connection, selectedFileID)
+		}
 	}(connection, fileID)
 }
 
 func (p *prototype) loadSelectedTags(connection connectionSnapshot, fileID int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+
+	defer func() {
+		p.tileMetadataMu.Lock()
+		delete(p.tileMetadataTagLoads, fileID)
+		p.tileMetadataMu.Unlock()
+	}()
 
 	metadata, err := connection.client.GetFileMetadata(ctx, fileID)
 	if err != nil {
