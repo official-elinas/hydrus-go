@@ -135,7 +135,7 @@ type prototype struct {
 	ptrStatusLabel    *widget.Label
 	ptrHeadlineLabel  *widget.Label
 	ptrPendingLabel   *widget.Label
-	ptrProgressBar    *widget.ProgressBarInfinite
+	ptrProgressBar    *widget.ProgressBar
 	queueList         *widget.List
 	gridHost          *fyne.Container
 	gridWrap          *widget.GridWrap
@@ -241,10 +241,10 @@ func newPrototype() *prototype {
 	p.statusBarLabel.Wrapping = fyne.TextTruncate
 	p.ptrHeadlineLabel = widget.NewLabelWithStyle("PTR sync: offline", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	p.ptrStatusLabel = widget.NewLabel("PTR sync status: offline")
-	p.ptrStatusLabel.Wrapping = fyne.TextTruncate
+	p.ptrStatusLabel.Wrapping = fyne.TextWrapWord
 	p.ptrPendingLabel = widget.NewLabel("Pending PTR mappings: offline")
-	p.ptrPendingLabel.Wrapping = fyne.TextTruncate
-	p.ptrProgressBar = widget.NewProgressBarInfinite()
+	p.ptrPendingLabel.Wrapping = fyne.TextWrapWord
+	p.ptrProgressBar = widget.NewProgressBar()
 	p.ptrProgressBar.Hide()
 	p.queueList = widget.NewList(
 		p.importQueueLength,
@@ -853,13 +853,19 @@ func (p *prototype) showPTRWindow() {
 		compactControlRow(p.ptrRefreshButton, p.ptrSyncButton),
 		nil,
 		nil,
-		container.NewPadded(container.NewVBox(
-			p.ptrHeadlineLabel,
-			p.ptrProgressBar,
-			widget.NewSeparator(),
-			p.ptrStatusLabel,
-			widget.NewSeparator(),
-			p.ptrPendingLabel,
+		container.NewPadded(container.NewBorder(
+			container.NewVBox(
+				p.ptrHeadlineLabel,
+				p.ptrProgressBar,
+				widget.NewSeparator(),
+			),
+			container.NewVBox(
+				widget.NewSeparator(),
+				p.ptrPendingLabel,
+			),
+			nil,
+			nil,
+			container.NewVScroll(p.ptrStatusLabel),
 		)),
 	)
 
@@ -914,7 +920,7 @@ func (p *prototype) showEditTagsDialog() {
 		suggestionList.UnselectAll()
 	}
 
-	suggestionHint := widget.NewLabel("Suggestions come from the currently loaded tags for this file.")
+	suggestionHint := widget.NewLabel("Type a tag prefix to search the PTR tag repository.")
 	suggestionHint.Wrapping = fyne.TextWrapWord
 
 	statusLabel := widget.NewLabel("Load current metadata to inspect tags before staging pending PTR mappings.")
@@ -931,15 +937,11 @@ func (p *prototype) showEditTagsDialog() {
 	commitButton.Disable()
 
 	suggestions := []string{}
-	localSuggestions := []string{}
+	existingTags := map[string]struct{}{}
 	activeSuggestionRequestID := uint64(0)
-	renderSuggestions := func(next []string) {
+	renderSuggestions := func(next []string, hint string) {
 		suggestions = append([]string(nil), next...)
-		if len(suggestions) == 0 {
-			suggestionHint.SetText("No local suggestions are available for the selected file yet.")
-		} else {
-			suggestionHint.SetText("Click a suggestion to add it to the staging input.")
-		}
+		suggestionHint.SetText(hint)
 
 		suggestionList.Length = func() int { return len(suggestions) }
 		suggestionList.UpdateItem = func(id widget.ListItemID, item fyne.CanvasObject) {
@@ -955,6 +957,7 @@ func (p *prototype) showEditTagsDialog() {
 			button.SetText(tag)
 			button.OnTapped = func() {
 				entry.SetText(appendTagEditorInput(entry.Text, tag))
+				entry.FocusGained()
 			}
 			button.Enable()
 		}
@@ -964,15 +967,14 @@ func (p *prototype) showEditTagsDialog() {
 	refreshSuggestions := func() {
 		prefix := currentTagEditorPrefix(entry.Text)
 		if prefix == "" {
-			renderSuggestions(localSuggestions)
+			renderSuggestions(nil, "Type a tag prefix to search the PTR tag repository.")
 			return
 		}
 
-		filteredLocal := filterTagSuggestions(localSuggestions, prefix)
 		activeSuggestionRequestID++
 		requestID := activeSuggestionRequestID
 
-		go func(connection connectionSnapshot, prefix string, filteredLocal []string, requestID uint64) {
+		go func(connection connectionSnapshot, prefix string, existing map[string]struct{}, requestID uint64) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
@@ -984,14 +986,25 @@ func (p *prototype) showEditTagsDialog() {
 
 				if err != nil {
 					if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-						renderSuggestions(filteredLocal)
+						renderSuggestions(nil, "Autocomplete unavailable. Enter tags manually.")
 					}
 					return
 				}
 
-				renderSuggestions(mergeTagSuggestions(filteredLocal, remoteSuggestions))
+				filtered := remoteSuggestions[:0]
+				for _, t := range remoteSuggestions {
+					if _, already := existing[strings.TrimSpace(t)]; !already {
+						filtered = append(filtered, t)
+					}
+				}
+
+				if len(filtered) == 0 {
+					renderSuggestions(nil, fmt.Sprintf("No new tags matching %q.", prefix))
+				} else {
+					renderSuggestions(filtered, fmt.Sprintf("%d suggestion(s) for %q — click to stage.", len(filtered), prefix))
+				}
 			})
-		}(connection, prefix, filteredLocal, requestID)
+		}(connection, prefix, existingTags, requestID)
 	}
 
 	updateStageButton := func() {
@@ -1040,8 +1053,8 @@ func (p *prototype) showEditTagsDialog() {
 					statusLabel.SetText("Could not load metadata from hydrusd.")
 					metadataLabel.SetText("Could not load selected-file metadata from hydrusd.\n\n" + err.Error())
 					tagsLabel.SetText("Could not load tag metadata from hydrusd.")
-					localSuggestions = nil
-					renderSuggestions(nil)
+					existingTags = map[string]struct{}{}
+					renderSuggestions(nil, "Type a tag prefix to search the PTR tag repository.")
 					setBusy(false)
 					commitButton.Disable()
 					return
@@ -1049,7 +1062,7 @@ func (p *prototype) showEditTagsDialog() {
 
 				metadataLabel.SetText(formatMetadataDetails(metadata))
 				tagsLabel.SetText(formatTagMetadata(metadata))
-				localSuggestions = collectTagEditorSuggestions(metadata)
+				existingTags = collectExistingTagSet(metadata)
 				refreshSuggestions()
 				statusLabel.SetText("Loaded selected-file metadata. Stage tags to create pending PTR mappings or commit existing pending mappings.")
 				setBusy(false)
@@ -1167,11 +1180,12 @@ func (p *prototype) showEditTagsDialog() {
 				nil,
 				nil,
 				nil,
-				container.NewVBox(
-					entry,
-					widget.NewSeparator(),
-					suggestionHint,
-					container.NewVScroll(suggestionList),
+				container.NewBorder(
+					container.NewVBox(entry, widget.NewSeparator(), suggestionHint, widget.NewSeparator()),
+					nil,
+					nil,
+					nil,
+					suggestionList,
 				),
 			),
 		)),
@@ -4074,7 +4088,17 @@ func (p *prototype) pollPTRStatusUntilSettled(connection connectionSnapshot, req
 }
 
 func (p *prototype) renderPTRStatus(status coreptrsync.Status) {
-	p.setPTRVisualState(ptrHeadlineText(status), status.IsRunning || status.Phase == coreptrsync.PhaseSyncing)
+	running := status.IsRunning || status.Phase == coreptrsync.PhaseSyncing
+	p.setPTRVisualState(ptrHeadlineText(status), running)
+	if running {
+		done := status.ProcessedDefinitionCount + status.ProcessedContentCount
+		total := done + status.PendingProcessCount
+		if total > 0 {
+			p.ptrProgressBar.SetValue(float64(done) / float64(total))
+		} else {
+			p.ptrProgressBar.SetValue(0)
+		}
+	}
 	p.ptrStatusLabel.SetText(formatPTRStatus(status))
 	p.updateActionState()
 }
@@ -4126,11 +4150,10 @@ func (p *prototype) setPTRVisualState(headline string, running bool) {
 	p.ptrHeadlineLabel.SetText(headline)
 	if running {
 		p.ptrProgressBar.Show()
-		p.ptrProgressBar.Start()
 		return
 	}
 
-	p.ptrProgressBar.Stop()
+	p.ptrProgressBar.SetValue(0)
 	p.ptrProgressBar.Hide()
 }
 
@@ -4772,6 +4795,20 @@ func collectTagEditorSuggestions(metadata daemonclient.FileMetadata) []string {
 
 	sort.Strings(suggestions)
 	return suggestions
+}
+
+func collectExistingTagSet(metadata daemonclient.FileMetadata) map[string]struct{} {
+	set := map[string]struct{}{}
+	for _, service := range metadata.Tags {
+		for _, tags := range metadataTagPreferredTagsByStatus(service) {
+			for _, tag := range tags {
+				if normalized := strings.TrimSpace(tag); normalized != "" {
+					set[normalized] = struct{}{}
+				}
+			}
+		}
+	}
+	return set
 }
 
 func shortCredential(value string) string {
