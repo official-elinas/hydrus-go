@@ -3611,44 +3611,43 @@ func formatTagMetadataSegments(metadata daemonclient.FileMetadata) []widget.Rich
 				continue
 			}
 
-			segments = append(
-				segments,
-				&widget.TextSegment{
-					Text:  metadataTagStatusLabel(statusKey) + ": ",
-					Style: widget.RichTextStyleInline,
-				},
-			)
+			segments = append(segments, &widget.TextSegment{
+				Text:  metadataTagStatusLabel(statusKey) + ": ",
+				Style: widget.RichTextStyleInline,
+			})
 
-			for tagIndex, tag := range serviceTags {
-				if tagIndex > 0 {
-					segments = append(
-						segments,
-						&widget.TextSegment{
-							Text:  ", ",
-							Style: widget.RichTextStyleInline,
-						},
-					)
+			type colorRun struct {
+				color fyne.ThemeColorName
+				tags  []string
+			}
+			var runs []colorRun
+			for _, tag := range serviceTags {
+				c := metadataTagColorName(tag)
+				if len(runs) > 0 && runs[len(runs)-1].color == c {
+					runs[len(runs)-1].tags = append(runs[len(runs)-1].tags, tag)
+				} else {
+					runs = append(runs, colorRun{color: c, tags: []string{tag}})
 				}
-
-				segments = append(
-					segments,
-					&widget.TextSegment{
-						Text: tag,
-						Style: widget.RichTextStyle{
-							Inline:    true,
-							ColorName: metadataTagColorName(tag),
-						},
-					},
-				)
 			}
 
-			segments = append(
-				segments,
-				&widget.TextSegment{
-					Text:  "\n",
-					Style: widget.RichTextStyleInline,
-				},
-			)
+			for runIndex, run := range runs {
+				text := strings.Join(run.tags, ", ")
+				if runIndex < len(runs)-1 {
+					text += ", "
+				}
+				segments = append(segments, &widget.TextSegment{
+					Text: text,
+					Style: widget.RichTextStyle{
+						Inline:    true,
+						ColorName: run.color,
+					},
+				})
+			}
+
+			segments = append(segments, &widget.TextSegment{
+				Text:  "\n",
+				Style: widget.RichTextStyleInline,
+			})
 		}
 	}
 

@@ -401,9 +401,10 @@ automatically re-run PTR sync in the background on a periodic interval
 
 Background polling activates only when **all** of the following are true:
 
-1. the PTR opt-in marker file is present (written on first manual trigger,
-   survives daemon restarts — if it exists, the user has opted in regardless of
-   DB size or how long the daemon has been running)
+1. the PTR opt-in marker file is present — this is a plain file named `ptrsync`
+   written alongside `client.db` in the configured DB directory the first time
+   the user triggers a manual sync; it survives daemon restarts and signals
+   opt-in regardless of DB size or uptime
 2. no sync pass is currently active
 3. the time elapsed since the last completed sync exceeds the configured
    interval (default: 24 hours)

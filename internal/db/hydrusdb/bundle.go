@@ -8,11 +8,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/official-elinas/hydrus-go/internal/core/services"
 	"github.com/official-elinas/hydrus-go/internal/storage/clientfiles"
@@ -91,7 +93,75 @@ func Open(ctx context.Context, dir string) (*Bundle, error) {
 // mutation workflows. Public HTTP surfaces should not use this until the write
 // path is fully designed and documented.
 func OpenWritable(ctx context.Context, dir string) (*Bundle, error) {
-	return openBundle(ctx, dir, modeReadWrite)
+	b, err := openBundle(ctx, dir, modeReadWrite)
+	if err != nil {
+		return nil, err
+	}
+	go b.ensureMappingIndexes(ctx)
+	return b, nil
+}
+
+func (b *Bundle) ensureMappingIndexes(ctx context.Context) {
+	prefixes := []string{
+		"current_mappings_",
+		"deleted_mappings_",
+		"pending_mappings_",
+		"petitioned_mappings_",
+	}
+
+	rows, err := b.conn.QueryContext(ctx,
+		`SELECT name FROM external_mappings.sqlite_master WHERE type='table'`)
+	if err != nil {
+		slog.Error("ensureMappingIndexes: list tables", "err", err)
+		return
+	}
+	defer rows.Close()
+
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			slog.Error("ensureMappingIndexes: scan table name", "err", err)
+			return
+		}
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(name, prefix) {
+				tables = append(tables, name)
+				break
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		slog.Error("ensureMappingIndexes: iterate tables", "err", err)
+		return
+	}
+
+	for _, table := range tables {
+		idxName := table + "_hash_id_idx"
+		existing, err := b.conn.QueryContext(ctx,
+			`SELECT 1 FROM external_mappings.sqlite_master WHERE type='index' AND name=?`, idxName)
+		if err != nil {
+			slog.Error("ensureMappingIndexes: check index", "index", idxName, "err", err)
+			return
+		}
+		exists := existing.Next()
+		_ = existing.Close()
+		if exists {
+			continue
+		}
+
+		slog.Info("ensureMappingIndexes: building hash_id index", "table", table)
+		t := time.Now()
+		query := fmt.Sprintf(
+			`CREATE INDEX IF NOT EXISTS external_mappings.%s ON %s (hash_id)`,
+			idxName, table,
+		)
+		if _, err := b.conn.ExecContext(ctx, query); err != nil {
+			slog.Error("ensureMappingIndexes: create index", "index", idxName, "err", err)
+			return
+		}
+		slog.Info("ensureMappingIndexes: index built", "table", table, "elapsed", time.Since(t))
+	}
 }
 
 // MainDBPath returns the canonical path to client.db for this bundle.
@@ -564,4 +634,12 @@ func placeholders(count int) string {
 	}
 
 	return strings.TrimSuffix(strings.Repeat("?,", count), ",")
+}
+
+func rowPlaceholders(count int) string {
+	if count <= 0 {
+		return ""
+	}
+
+	return strings.TrimSuffix(strings.Repeat("(?),", count), ",")
 }

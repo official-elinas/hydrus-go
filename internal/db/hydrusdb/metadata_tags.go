@@ -5,8 +5,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strconv"
+	"time"
 
 	"golang.org/x/sync/errgroup"
 
@@ -113,6 +115,7 @@ func (b *Bundle) lookupFileTags(
 	fileIDs []int64,
 	currentFileServices map[int64][]currentFileServiceMembership,
 ) (map[int64]metadataTagsPayload, error) {
+	tTotal := time.Now()
 	payloads := map[int64]metadataTagsPayload{}
 	if len(fileIDs) == 0 {
 		return payloads, nil
@@ -151,15 +154,16 @@ func (b *Bundle) lookupFileTags(
 		return payloads, nil
 	}
 
+	t0 := time.Now()
 	mappingTableNames, err := b.lookupSchemaTableNames(ctx, "external_mappings")
 	if err != nil {
 		return nil, err
 	}
-
 	cacheTableNames, err := b.lookupSchemaTableNames(ctx, "external_caches")
 	if err != nil {
 		return nil, err
 	}
+	slog.Debug("lookupFileTags: schema table name lookup", "elapsed", time.Since(t0))
 
 	fileServiceGroups := groupHashIDsByTagCachedFileServiceID(
 		uniqueFileIDs,
@@ -176,6 +180,13 @@ func (b *Bundle) lookupFileTags(
 
 	resultsCh := make(chan pairResult, len(realTagServices)*len(fileServiceGroups))
 
+	slog.Debug("lookupFileTags: starting mapping queries",
+		"file_ids", len(uniqueFileIDs),
+		"real_tag_services", len(realTagServices),
+		"file_service_groups", len(fileServiceGroups),
+	)
+	tMappings := time.Now()
+
 	eg, egCtx := errgroup.WithContext(ctx)
 	eg.SetLimit(readPoolSize)
 
@@ -187,12 +198,14 @@ func (b *Bundle) lookupFileTags(
 			useCombinedFallback := !hasCombinedFileService || fileServiceID == combinedFileService.id
 
 			eg.Go(func() error {
+				tPair := time.Now()
 				conn, err := b.acquireReadConn(egCtx)
 				if err != nil {
 					return err
 				}
 				defer b.releaseReadConn(conn)
 
+				tStorage := time.Now()
 				groupStorageByHashID, err := b.lookupStorageTagServiceMappingsConn(
 					egCtx,
 					conn,
@@ -206,7 +219,13 @@ func (b *Bundle) lookupFileTags(
 				if err != nil {
 					return err
 				}
+				slog.Debug("lookupFileTags: storage mappings",
+					"tag_service_id", tagService.id,
+					"file_service_id", fileServiceID,
+					"elapsed", time.Since(tStorage),
+				)
 
+				tDisplay := time.Now()
 				groupDisplayByHashID, err := b.lookupDisplayTagServiceMappingsConn(
 					egCtx,
 					conn,
@@ -220,6 +239,12 @@ func (b *Bundle) lookupFileTags(
 				if err != nil {
 					return err
 				}
+				slog.Debug("lookupFileTags: display mappings",
+					"tag_service_id", tagService.id,
+					"file_service_id", fileServiceID,
+					"elapsed", time.Since(tDisplay),
+					"pair_total", time.Since(tPair),
+				)
 
 				resultsCh <- pairResult{
 					tagServiceKey:   tagService.serviceKey,
@@ -235,6 +260,7 @@ func (b *Bundle) lookupFileTags(
 		return nil, err
 	}
 	close(resultsCh)
+	slog.Debug("lookupFileTags: mapping queries done", "elapsed", time.Since(tMappings))
 
 	storageByHashID := map[int64]map[string]tagIDStatusSets{}
 	displayByHashID := map[int64]map[string]tagIDStatusSets{}
@@ -260,15 +286,21 @@ func (b *Bundle) lookupFileTags(
 		}
 	}
 
+	deduped := dedupeInt64s(seenTagIDs)
+	slog.Debug("lookupFileTags: resolving tag IDs to strings", "unique_tag_ids", len(deduped))
+	tTagLookup := time.Now()
+
 	tagConn, err := b.acquireReadConn(ctx)
 	if err != nil {
 		return nil, err
 	}
-	tagsByID, err := b.lookupTagsByIDConn(ctx, tagConn, dedupeInt64s(seenTagIDs))
+	tagsByID, err := b.lookupTagsByIDConn(ctx, tagConn, deduped)
 	b.releaseReadConn(tagConn)
 	if err != nil {
 		return nil, err
 	}
+	slog.Debug("lookupFileTags: tag ID resolution done", "elapsed", time.Since(tTagLookup))
+	slog.Debug("lookupFileTags: total", "elapsed", time.Since(tTotal))
 
 	for _, hashID := range uniqueFileIDs {
 		payload := payloads[hashID]
@@ -1035,13 +1067,9 @@ func buildTagServicePayload(
 	}
 }
 
-type queryContexter interface {
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-}
-
-func collectTagIDsFromTableQuerier(
+func collectTagIDsFromTableConn(
 	ctx context.Context,
-	q queryContexter,
+	conn *sql.Conn,
 	fileIDs []int64,
 	schemaName string,
 	tableName string,
@@ -1049,15 +1077,15 @@ func collectTagIDsFromTableQuerier(
 	mappings map[int64]tagIDStatusSets,
 ) error {
 	query := fmt.Sprintf(
-		`SELECT hash_id, tag_id
-		FROM %s.%s
-		WHERE hash_id IN (%s)`,
+		`WITH h(hash_id) AS (VALUES %s)
+		SELECT m.hash_id, m.tag_id
+		FROM h CROSS JOIN %s.%s m USING (hash_id)`,
+		rowPlaceholders(len(fileIDs)),
 		schemaName,
 		tableName,
-		placeholders(len(fileIDs)),
 	)
 
-	rows, err := q.QueryContext(ctx, query, int64Args(fileIDs)...)
+	rows, err := conn.QueryContext(ctx, query, int64Args(fileIDs)...)
 	if err != nil {
 		return fmt.Errorf("query tag mappings %s.%s: %w", schemaName, tableName, err)
 	}
@@ -1124,14 +1152,14 @@ func (b *Bundle) lookupStorageTagServiceMappingsConn(
 		if _, ok := tableSet[q.tableName]; !ok {
 			continue
 		}
-		if err := collectTagIDsFromTableQuerier(ctx, conn, fileIDs, q.schema, q.tableName, q.status, mappings); err != nil {
+		if err := collectTagIDsFromTableConn(ctx, conn, fileIDs, q.schema, q.tableName, q.status, mappings); err != nil {
 			return nil, err
 		}
 	}
 
 	petitionedTableName := fmt.Sprintf("petitioned_mappings_%d", tagService.id)
 	if _, ok := mappingTableNames[petitionedTableName]; ok {
-		if err := collectTagIDsFromTableQuerier(ctx, conn, fileIDs, "external_mappings", petitionedTableName, contentStatusPetitioned, mappings); err != nil {
+		if err := collectTagIDsFromTableConn(ctx, conn, fileIDs, "external_mappings", petitionedTableName, contentStatusPetitioned, mappings); err != nil {
 			return nil, err
 		}
 	}
@@ -1290,7 +1318,7 @@ func (b *Bundle) lookupDisplayTagServiceMappingsConn(
 		currentDisplayTableName := specificDisplayCurrentTableName(fileServiceID, tagService.id)
 		if _, ok := cacheTableNames[currentDisplayTableName]; ok {
 			useFallbackCurrent = false
-			if err := collectTagIDsFromTableQuerier(ctx, conn, fileIDs, "external_caches", currentDisplayTableName, contentStatusCurrent, displayByHashID); err != nil {
+			if err := collectTagIDsFromTableConn(ctx, conn, fileIDs, "external_caches", currentDisplayTableName, contentStatusCurrent, displayByHashID); err != nil {
 				return nil, err
 			}
 		}
@@ -1298,7 +1326,7 @@ func (b *Bundle) lookupDisplayTagServiceMappingsConn(
 		pendingDisplayTableName := specificDisplayPendingTableName(fileServiceID, tagService.id)
 		if _, ok := cacheTableNames[pendingDisplayTableName]; ok {
 			useFallbackPending = false
-			if err := collectTagIDsFromTableQuerier(ctx, conn, fileIDs, "external_caches", pendingDisplayTableName, contentStatusPending, displayByHashID); err != nil {
+			if err := collectTagIDsFromTableConn(ctx, conn, fileIDs, "external_caches", pendingDisplayTableName, contentStatusPending, displayByHashID); err != nil {
 				return nil, err
 			}
 		}
