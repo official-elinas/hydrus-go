@@ -2185,8 +2185,37 @@ func (b *Bundle) ApplyPTRProcessableUpdatesBatch(
 		return coreptrsync.ErrSyncDisabled
 	}
 
-	if len(items) == 0 {
-		return nil
+	for _, item := range items {
+		if err := b.applyPTRProcessableUpdate(ctx, cfg, runToken, item); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// applyPTRProcessableUpdate applies a single PTR update bundle in its own
+// immediate transaction so that the write gate is released between bundles,
+// allowing file imports and other writes to interleave with a running PTR sync.
+func (b *Bundle) applyPTRProcessableUpdate(
+	ctx context.Context,
+	cfg coreptrsync.Config,
+	runToken string,
+	item PTRApplyUpdateBatchItem,
+) error {
+	if !cfg.Enabled {
+		return coreptrsync.ErrSyncDisabled
+	}
+
+	hashHex := strings.ToLower(strings.TrimSpace(item.HashHex))
+	if hashHex == "" {
+		return fmt.Errorf("PTR processable update hash is required")
+	}
+
+	switch item.ContentType {
+	case PTRContentTypeDefinitions, PTRContentTypeMappings:
+	default:
+		return fmt.Errorf("unsupported PTR update content type %d", item.ContentType)
 	}
 
 	return b.WithImmediateTx(ctx, func(tx *ImmediateTx) error {
@@ -2199,46 +2228,21 @@ func (b *Bundle) ApplyPTRProcessableUpdatesBatch(
 			return err
 		}
 
-		hasDefinitions := false
-		hasMappings := false
-		for _, item := range items {
-			switch item.ContentType {
-			case PTRContentTypeDefinitions:
-				hasDefinitions = true
-			case PTRContentTypeMappings:
-				hasMappings = true
-			default:
-				return fmt.Errorf("unsupported PTR update content type %d", item.ContentType)
-			}
+		if err := ensurePTRRepositoryDefinitionTables(ctx, tx, serviceID); err != nil {
+			return err
 		}
 
-		if hasDefinitions || hasMappings {
-			if err := ensurePTRRepositoryDefinitionTables(ctx, tx, serviceID); err != nil {
-				return err
+		switch item.ContentType {
+		case PTRContentTypeDefinitions:
+			if err := applyPTRDefinitionsUpdateTx(ctx, tx, serviceID, hashHex, item.Definitions); err != nil {
+				return fmt.Errorf("apply PTR definitions update %s: %w", hashHex, err)
 			}
-		}
-
-		if hasMappings {
+		case PTRContentTypeMappings:
 			if err := ensurePTRMappingsTables(ctx, tx, serviceID); err != nil {
 				return err
 			}
-		}
-
-		for _, item := range items {
-			hashHex := strings.ToLower(strings.TrimSpace(item.HashHex))
-			if hashHex == "" {
-				return fmt.Errorf("PTR processable update hash is required")
-			}
-
-			switch item.ContentType {
-			case PTRContentTypeDefinitions:
-				if err := applyPTRDefinitionsUpdateTx(ctx, tx, serviceID, hashHex, item.Definitions); err != nil {
-					return fmt.Errorf("apply PTR definitions update %s: %w", hashHex, err)
-				}
-			case PTRContentTypeMappings:
-				if err := applyPTRMappingsUpdateTx(ctx, tx, serviceID, hashHex, item.Mappings); err != nil {
-					return fmt.Errorf("apply PTR mappings update %s: %w", hashHex, err)
-				}
+			if err := applyPTRMappingsUpdateTx(ctx, tx, serviceID, hashHex, item.Mappings); err != nil {
+				return fmt.Errorf("apply PTR mappings update %s: %w", hashHex, err)
 			}
 		}
 
