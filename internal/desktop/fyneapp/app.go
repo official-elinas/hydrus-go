@@ -12,6 +12,7 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
+	"log/slog"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -2510,6 +2511,7 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 	}
 
 	if metadata, ok := p.lookupTileMetadata(fileID); ok {
+		slog.Debug("loadSelectedMetadata: cache hit", "file_id", fileID, "has_tags", len(metadata.Tags) > 0)
 		p.metadataLabel.SetText(formatMetadataDetails(metadata))
 		if len(metadata.Tags) > 0 {
 			p.setRightTagsMetadata(metadata)
@@ -2522,7 +2524,10 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 			}
 			p.tileMetadataMu.Unlock()
 			if !alreadyLoading {
+				slog.Debug("loadSelectedMetadata: dispatching tag load", "file_id", fileID)
 				go p.loadSelectedTags(connection, fileID)
+			} else {
+				slog.Debug("loadSelectedMetadata: tag load already in progress", "file_id", fileID)
 			}
 		}
 		p.renderGrid()
@@ -2530,12 +2535,15 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 		return
 	}
 
+	slog.Debug("loadSelectedMetadata: cache miss, fetching basic metadata", "file_id", fileID)
+
 	go func(connection connectionSnapshot, selectedFileID int64) {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 
 		metadata, err := connection.client.GetBasicFileMetadata(ctx, selectedFileID)
 		if err != nil {
+			slog.Warn("loadSelectedMetadata: basic metadata fetch failed", "file_id", selectedFileID, "err", err)
 			fyne.Do(func() {
 				if !p.isCurrentOperation(connection) {
 					return
@@ -2551,6 +2559,8 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 			})
 			return
 		}
+
+		slog.Debug("loadSelectedMetadata: basic metadata fetched", "file_id", selectedFileID)
 
 		fyne.Do(func() {
 			if !p.isCurrentOperation(connection) {
@@ -2584,6 +2594,11 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 			p.refreshSearchSuggestions()
 		})
 
+		if p.selectedFileID != selectedFileID {
+			slog.Debug("loadSelectedMetadata: file deselected before tag load, skipping", "file_id", selectedFileID)
+			return
+		}
+
 		p.tileMetadataMu.Lock()
 		_, alreadyLoading := p.tileMetadataTagLoads[selectedFileID]
 		if !alreadyLoading {
@@ -2591,7 +2606,10 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 		}
 		p.tileMetadataMu.Unlock()
 		if !alreadyLoading {
+			slog.Debug("loadSelectedMetadata: dispatching tag load", "file_id", selectedFileID)
 			go p.loadSelectedTags(connection, selectedFileID)
+		} else {
+			slog.Debug("loadSelectedMetadata: tag load already in progress", "file_id", selectedFileID)
 		}
 	}(connection, fileID)
 }
@@ -2606,11 +2624,15 @@ func (p *prototype) loadSelectedTags(connection connectionSnapshot, fileID int64
 		p.tileMetadataMu.Unlock()
 	}()
 
+	slog.Debug("loadSelectedTags: fetching tag metadata", "file_id", fileID)
+
 	metadata, err := connection.client.GetFileMetadata(ctx, fileID)
 	if err != nil {
 		if ctx.Err() != nil {
+			slog.Debug("loadSelectedTags: context cancelled", "file_id", fileID)
 			return
 		}
+		slog.Warn("loadSelectedTags: fetch failed", "file_id", fileID, "err", err)
 		fyne.Do(func() {
 			if !p.isCurrentOperation(connection) || p.selectedFileID != fileID {
 				return
@@ -2621,6 +2643,8 @@ func (p *prototype) loadSelectedTags(connection connectionSnapshot, fileID int64
 		return
 	}
 
+	slog.Debug("loadSelectedTags: got tags", "file_id", fileID, "tag_count", len(metadata.Tags))
+
 	p.tileMetadataMu.Lock()
 	cached := p.tileMetadataCache[fileID]
 	cached.Tags = metadata.Tags
@@ -2629,6 +2653,7 @@ func (p *prototype) loadSelectedTags(connection connectionSnapshot, fileID int64
 
 	fyne.Do(func() {
 		if !p.isCurrentOperation(connection) || p.selectedFileID != fileID {
+			slog.Debug("loadSelectedTags: skipping UI update, file no longer selected", "file_id", fileID, "selected", p.selectedFileID)
 			return
 		}
 		p.setRightTagsMetadata(cached)

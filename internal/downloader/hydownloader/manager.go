@@ -41,7 +41,7 @@ const (
 	hydownloaderDatabaseFileName = "hydownloader.db"
 	hydownloaderInitTimeout      = 30 * time.Second
 	hydownloaderShutdownWait     = 10 * time.Second
-	hydownloaderStartupWait      = 20 * time.Second
+	hydownloaderStartupWait      = 120 * time.Second
 )
 
 // Manager supervises an external hydownloader daemon and exposes a stable
