@@ -75,6 +75,7 @@ func NewHandler(
 	mux := http.NewServeMux()
 	mux.Handle("/openapi.json", server.get("/openapi.json", server.handleGetOpenAPISpec))
 	mux.Handle("/docs", server.get("/docs", server.handleGetDocs))
+	mux.Handle("/redoc", server.get("/redoc", server.handleGetRedoc))
 	mux.Handle("/", server.get("/", server.handleWelcome))
 	mux.Handle("/healthz", server.get("/healthz", server.handleHealthz))
 	mux.Handle("/api_version", server.get("/api_version", server.handleAPIVersion))
