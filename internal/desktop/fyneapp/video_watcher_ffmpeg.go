@@ -163,31 +163,28 @@ func playVideoFileInWatcher(ctx context.Context, path string, item daemonclient.
 	if err != nil {
 		return err
 	}
-	audioDone := make(chan error, 1)
-	if hasAudio != nil && *hasAudio {
-		go func() {
-			audioDone <- playVideoAudio(ctx, path)
-		}()
-	} else {
-		close(audioDone)
-	}
+	videoHasAudio := hasAudio != nil && *hasAudio
 
-	if err := streamVideoFrames(ctx, path, watcherVideoMaxDimension, true, func(frame image.Image) {
-		fyne.Do(func() {
-			content.SetFrame(frame)
-		})
-	}); err != nil {
-		return err
-	}
+	for ctx.Err() == nil {
+		audioDone := make(chan error, 1)
+		if videoHasAudio {
+			go func() { audioDone <- playVideoAudio(ctx, path) }()
+		} else {
+			close(audioDone)
+		}
 
-	if audioErr, ok := <-audioDone; ok && audioErr != nil && ctx.Err() == nil {
-		return audioErr
-	}
+		if err := streamVideoFrames(ctx, path, watcherVideoMaxDimension, true, func(frame image.Image) {
+			fyne.Do(func() { content.SetFrame(frame) })
+		}); err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			return err
+		}
 
-	if ctx.Err() == nil {
-		fyne.Do(func() {
-			content.SetStatus("Playback finished. Use arrow keys to navigate or close the watcher.")
-		})
+		if audioErr := <-audioDone; audioErr != nil && ctx.Err() == nil {
+			return audioErr
+		}
 	}
 
 	return nil
@@ -218,7 +215,7 @@ func streamVideoFrames(ctx context.Context, path string, maxDimension int, realt
 		"-vf", fmt.Sprintf("scale=w='min(iw,%d)':h='min(ih,%d)':force_original_aspect_ratio=decrease", maxDimension, maxDimension),
 		"pipe:1",
 	)
-	cmd := exec.CommandContext(ctx, "ffmpeg", args...)
+	cmd := ffmpegutil.HiddenCmd(ctx, "ffmpeg", args...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return fmt.Errorf("open ffmpeg stdout pipe: %w", err)
@@ -256,7 +253,7 @@ func streamVideoFrames(ctx context.Context, path string, maxDimension int, realt
 }
 
 func playVideoAudio(ctx context.Context, path string) error {
-	cmd := exec.CommandContext(
+	cmd := ffmpegutil.HiddenCmd(
 		ctx,
 		"ffplay",
 		"-nostdin",

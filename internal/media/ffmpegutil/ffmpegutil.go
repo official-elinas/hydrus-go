@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"math"
 	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -31,7 +30,7 @@ type probeInfo struct {
 
 // ProbeMediaMetadata returns duration, frame count, and audio-presence hints.
 func ProbeMediaMetadata(ctx context.Context, path string) (durationMS *int64, numFrames *int64, hasAudio *bool, err error) {
-	cmd := exec.CommandContext(
+	cmd := HiddenCmd(
 		ctx,
 		"ffprobe",
 		"-v", "error",
@@ -109,7 +108,7 @@ func ProbeMediaMetadata(ctx context.Context, path string) (durationMS *int64, nu
 
 // ProbeDimensions asks ffprobe for the first video/image stream dimensions.
 func ProbeDimensions(ctx context.Context, path string) (*int64, *int64, error) {
-	cmd := exec.CommandContext(
+	cmd := HiddenCmd(
 		ctx,
 		"ffprobe",
 		"-v", "error",
@@ -145,7 +144,7 @@ func ProbeDimensions(ctx context.Context, path string) (*int64, *int64, error) {
 
 // ProbePrimaryStream returns the ffprobe format name, major brand, and first stream codec/type.
 func ProbePrimaryStream(ctx context.Context, path string) (formatName string, majorBrand string, compatibleBrands string, codecName string, codecType string, err error) {
-	cmd := exec.CommandContext(
+	cmd := HiddenCmd(
 		ctx,
 		"ffprobe",
 		"-v", "error",
@@ -211,7 +210,7 @@ func TranscodePathToPNG(ctx context.Context, path string, maxDimension int, sour
 		filter = "thumbnail," + filter
 	}
 
-	cmd := exec.CommandContext(
+	cmd := HiddenCmd(
 		ctx,
 		"ffmpeg",
 		"-nostdin",
