@@ -617,7 +617,7 @@ func TestNew_GrantsPTRMutationPermissionsThroughBootstrapAuth(t *testing.T) {
 			name:       "pending counts falls through auth",
 			method:     http.MethodGet,
 			path:       "/manage_services/pending_counts",
-			wantStatus: http.StatusServiceUnavailable,
+			wantStatus: http.StatusOK,
 		},
 		{
 			name:       "commit pending falls through auth",
@@ -651,6 +651,70 @@ func TestNew_GrantsPTRMutationPermissionsThroughBootstrapAuth(t *testing.T) {
 				t.Fatalf("%s unexpectedly returned 403 forbidden", tt.path)
 			}
 		})
+	}
+}
+
+type stubDownloaderController struct {
+	activate func() error
+	shutdown func() error
+}
+
+func (s stubDownloaderController) ActivateAutoimport(context.Context) error {
+	if s.activate != nil {
+		return s.activate()
+	}
+	return nil
+}
+
+func (s stubDownloaderController) CheckCallbackURLReachability() {
+}
+
+func (s stubDownloaderController) Shutdown(context.Context) error {
+	if s.shutdown != nil {
+		return s.shutdown()
+	}
+	return nil
+}
+
+func TestApp_ActivateDownloaderAutoimportAfterReady(t *testing.T) {
+	originalWait := waitForDaemonReadyFn
+	defer func() { waitForDaemonReadyFn = originalWait }()
+
+	calledWait := false
+	calledActivate := false
+	waitForDaemonReadyFn = func(ctx context.Context, listenAddr string) error {
+		calledWait = true
+		if listenAddr != "127.0.0.1:45869" {
+			t.Fatalf("listenAddr = %q, want 127.0.0.1:45869", listenAddr)
+		}
+		if ctx.Err() != nil {
+			t.Fatalf("wait context already canceled: %v", ctx.Err())
+		}
+		return nil
+	}
+
+	application := &App{
+		cfg: config.Config{
+			ListenAddr:      "127.0.0.1:45869",
+			ShutdownTimeout: 3 * time.Second,
+		},
+		downloaderManager: stubDownloaderController{activate: func() error {
+			if !calledWait {
+				t.Fatal("ActivateAutoimport called before waitForDaemonReady")
+			}
+			calledActivate = true
+			return nil
+		}},
+	}
+
+	if err := application.activateDownloaderAutoimportAfterReady(); err != nil {
+		t.Fatalf("activateDownloaderAutoimportAfterReady() error = %v", err)
+	}
+	if !calledWait {
+		t.Fatal("waitForDaemonReady was not called")
+	}
+	if !calledActivate {
+		t.Fatal("ActivateAutoimport was not called")
 	}
 }
 
@@ -1224,6 +1288,223 @@ func TestApp_DBBackedImportURLRoundTrip(t *testing.T) {
 	}
 	if knownURLs[0] != server.URL+"/image.png" || knownURLs[1] != server.URL+"/redirect" {
 		t.Fatalf("known_urls = %v, want redirected and requested URLs", knownURLs)
+	}
+}
+
+func TestApp_DBBackedHydrusClientMutationRoundTrip(t *testing.T) {
+	dbDir := filepath.Join(t.TempDir(), "fresh-bundle")
+	sourcePath := writeAppPNGSourceFile(t, t.TempDir(), "app-hydrus-api-import.png", 16, 24)
+
+	cfg := config.Config{
+		ListenAddr:                 "127.0.0.1:0",
+		DBDir:                      dbDir,
+		EnableFreshClientBootstrap: true,
+		BootstrapTimeout:           time.Minute,
+		AccessKey:                  strings.Repeat("d", 64),
+		AccessName:                 "test-client",
+		LogLevel:                   "error",
+		ShutdownTimeout:            time.Second,
+		AllowNonLocalConnections:   false,
+		EnableCORS:                 false,
+	}
+
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	application, err := New(context.Background(), cfg, logger)
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	defer application.closeResources()
+
+	addFileReq := httptest.NewRequest(
+		http.MethodPost,
+		"/add_files/add_file",
+		strings.NewReader(fmt.Sprintf(`{"path":%q}`, sourcePath)),
+	)
+	addFileReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	addFileReq.Header.Set("Content-Type", "application/json")
+	addFileRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(addFileRR, addFileReq)
+
+	if addFileRR.Code != http.StatusOK {
+		t.Fatalf("add_file status = %d, want %d", addFileRR.Code, http.StatusOK)
+	}
+
+	var addFilePayload map[string]any
+	decodeAppJSON(t, addFileRR.Body.Bytes(), &addFilePayload)
+	if got := int(addFilePayload["status"].(float64)); got != 1 {
+		t.Fatalf("add_file status payload = %d, want 1", got)
+	}
+	hashHex := addFilePayload["hash"].(string)
+
+	servicesReq := httptest.NewRequest(http.MethodGet, "/get_services", nil)
+	servicesReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	servicesRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(servicesRR, servicesReq)
+
+	if servicesRR.Code != http.StatusOK {
+		t.Fatalf("get_services status = %d, want %d", servicesRR.Code, http.StatusOK)
+	}
+
+	var servicesPayload map[string]any
+	decodeAppJSON(t, servicesRR.Body.Bytes(), &servicesPayload)
+	localTags := servicesPayload["local_tags"].([]any)
+	myTagsServiceKey := ""
+	for _, rawService := range localTags {
+		servicePayload := rawService.(map[string]any)
+		if servicePayload["name"] == "my tags" {
+			myTagsServiceKey = servicePayload["service_key"].(string)
+			break
+		}
+	}
+	if myTagsServiceKey == "" {
+		t.Fatalf("local_tags = %v, want my tags service", localTags)
+	}
+
+	associateReq := httptest.NewRequest(
+		http.MethodPost,
+		"/add_urls/associate_url",
+		strings.NewReader(fmt.Sprintf(`{"hash":%q,"urls_to_add":["https://example.com/post/1"]}`, hashHex)),
+	)
+	associateReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	associateReq.Header.Set("Content-Type", "application/json")
+	associateRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(associateRR, associateReq)
+
+	if associateRR.Code != http.StatusOK {
+		t.Fatalf("associate_url status = %d, want %d", associateRR.Code, http.StatusOK)
+	}
+
+	addTagsReq := httptest.NewRequest(
+		http.MethodPost,
+		"/add_tags/add_tags",
+		strings.NewReader(fmt.Sprintf(`{"hash":%q,"service_keys_to_tags":{%q:["creator:alice"]}}`, hashHex, myTagsServiceKey)),
+	)
+	addTagsReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	addTagsReq.Header.Set("Content-Type", "application/json")
+	addTagsRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(addTagsRR, addTagsReq)
+
+	if addTagsRR.Code != http.StatusOK {
+		t.Fatalf("add_tags status = %d, want %d", addTagsRR.Code, http.StatusOK)
+	}
+	if addTagsRR.Body.Len() != 0 {
+		t.Fatalf("add_tags body len = %d, want 0", addTagsRR.Body.Len())
+	}
+
+	setNotesReq := httptest.NewRequest(
+		http.MethodPost,
+		"/add_notes/set_notes",
+		strings.NewReader(fmt.Sprintf(`{"hash":%q,"notes":{"artist commentary":"hello from hydrus-go"}}`, hashHex)),
+	)
+	setNotesReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	setNotesReq.Header.Set("Content-Type", "application/json")
+	setNotesRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(setNotesRR, setNotesReq)
+
+	if setNotesRR.Code != http.StatusOK {
+		t.Fatalf("set_notes status = %d, want %d", setNotesRR.Code, http.StatusOK)
+	}
+
+	setFileTimeReq := httptest.NewRequest(
+		http.MethodPost,
+		"/edit_times/set_time",
+		strings.NewReader(fmt.Sprintf(`{"hash":%q,"timestamp_type":1,"timestamp":20.123}`, hashHex)),
+	)
+	setFileTimeReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	setFileTimeReq.Header.Set("Content-Type", "application/json")
+	setFileTimeRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(setFileTimeRR, setFileTimeReq)
+
+	if setFileTimeRR.Code != http.StatusOK {
+		t.Fatalf("set file time status = %d, want %d", setFileTimeRR.Code, http.StatusOK)
+	}
+
+	setDomainTimeReq := httptest.NewRequest(
+		http.MethodPost,
+		"/edit_times/set_time",
+		strings.NewReader(fmt.Sprintf(`{"hash":%q,"timestamp_type":0,"timestamp":30.123,"domain":"example.com"}`, hashHex)),
+	)
+	setDomainTimeReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	setDomainTimeReq.Header.Set("Content-Type", "application/json")
+	setDomainTimeRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(setDomainTimeRR, setDomainTimeReq)
+
+	if setDomainTimeRR.Code != http.StatusOK {
+		t.Fatalf("set domain time status = %d, want %d", setDomainTimeRR.Code, http.StatusOK)
+	}
+
+	metadataReq := httptest.NewRequest(
+		http.MethodGet,
+		"/get_files/file_metadata?hashes="+url.QueryEscape(`[`+"\""+hashHex+"\""+`]`)+"&detailed_url_information=true&include_notes=true&include_milliseconds=true",
+		nil,
+	)
+	metadataReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	metadataRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(metadataRR, metadataReq)
+
+	if metadataRR.Code != http.StatusOK {
+		t.Fatalf("metadata status = %d, want %d", metadataRR.Code, http.StatusOK)
+	}
+
+	var metadataPayload map[string]any
+	decodeAppJSON(t, metadataRR.Body.Bytes(), &metadataPayload)
+	metadataRows := metadataPayload["metadata"].([]any)
+	metadataRow := metadataRows[0].(map[string]any)
+
+	knownURLs := metadataRow["known_urls"].([]any)
+	if len(knownURLs) != 1 || knownURLs[0] != "https://example.com/post/1" {
+		t.Fatalf("known_urls = %v, want [https://example.com/post/1]", knownURLs)
+	}
+
+	notes := metadataRow["notes"].(map[string]any)
+	if notes["artist commentary"] != "hello from hydrus-go" {
+		t.Fatalf("notes[artist commentary] = %v, want hello from hydrus-go", notes["artist commentary"])
+	}
+
+	timeModifiedDetails := metadataRow["time_modified_details"].(map[string]any)
+	if got := timeModifiedDetails["local"]; got != 20.123 {
+		t.Fatalf("time_modified_details[local] = %v, want 20.123", got)
+	}
+	if got := timeModifiedDetails["example.com"]; got != 30.123 {
+		t.Fatalf("time_modified_details[example.com] = %v, want 30.123", got)
+	}
+
+	tags := metadataRow["tags"].(map[string]any)
+	foundCurrentTag := false
+	for _, rawService := range tags {
+		serviceTags := rawService.(map[string]any)
+		if serviceTags["name"] != "my tags" {
+			continue
+		}
+		storageTags := serviceTags["storage_tags"].(map[string]any)
+		currentTags := storageTags["0"].([]any)
+		if len(currentTags) == 1 && currentTags[0] == "creator:alice" {
+			foundCurrentTag = true
+		}
+	}
+	if !foundCurrentTag {
+		t.Fatalf("tags payload = %v, want my tags current creator:alice", tags)
+	}
+
+	forceCommitReq := httptest.NewRequest(http.MethodPost, "/manage_database/force_commit", nil)
+	forceCommitReq.Header.Set("Hydrus-Client-API-Access-Key", cfg.AccessKey)
+	forceCommitRR := httptest.NewRecorder()
+
+	application.server.Handler.ServeHTTP(forceCommitRR, forceCommitReq)
+
+	if forceCommitRR.Code != http.StatusOK {
+		t.Fatalf("force_commit status = %d, want %d", forceCommitRR.Code, http.StatusOK)
+	}
+	if forceCommitRR.Body.Len() != 0 {
+		t.Fatalf("force_commit body len = %d, want 0", forceCommitRR.Body.Len())
 	}
 }
 

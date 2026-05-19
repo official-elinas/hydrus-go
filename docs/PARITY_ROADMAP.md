@@ -1,6 +1,6 @@
 # hydrus-go parity roadmap
 
-Last updated: 2026-04-28
+Last updated: 2026-05-04
 
 ## Goal
 
@@ -21,18 +21,19 @@ The following are now confirmed working or intentionally present:
 - DB-backed `GET /get_files/file_metadata` with a meaningful first full/default slice
 - serialized writable DB transactions via `BEGIN IMMEDIATE`
 - managed `client_files` placement for daemon-owned imports
-- public thin-client recent browse, search, content, thumbnail, import, trash, and tag-mutation APIs
-- Fyne desktop prototype for connect/browse/search/import/trash/selected-image preview
+- public thin-client recent browse, search, content, thumbnail, import, trash, downloader queue/status, and tag-mutation APIs
+- Fyne desktop prototype for connect/browse/search/import/trash plus broader still-image preview, video poster previews, and FFmpeg-backed in-app video playback
 - desktop search and sorting using daemon-backed predicates and sort modes
 - daemon-owned anonymous PTR status, manual sync trigger, and definition/content application
 - real anonymous PTR sync-out/upload flow for pending mappings, with real-time pending-count visibility
+- daemon-owned external hydownloader supervision with URL/subscription queueing and Hydrus Client API autoimport compatibility
 
 The following are explicitly **not** at parity yet:
 
 - no complex daemon-side search logic (unions, negations, complex groupings)
 - no broader repository mutation flows (petitions, review-services, advanced metadata)
-- desktop still lacks downloader/subscription/parsing workflows
-- no native in-app video playback
+- no native-Go downloader/parser/subscription parity beyond the current external hydownloader bridge
+- no audio-capable full media-player parity beyond the current FFmpeg-backed in-app frame-stream watcher
 
 ## Highest-priority parity gaps
 
@@ -92,7 +93,25 @@ Why this matters:
 - true PTR parity is bidirectional for normal tag-repository use
 - the user explicitly called this out as a must-have parity target
 
-### 5. File lifecycle and metadata parity gaps
+### 5. Downloader and media hardening
+
+Current state:
+
+- hydrusd can now supervise an external hydownloader instance, queue URL/subscription work, and receive autoimported files back through the Hydrus Client API compatibility bridge
+- the desktop watcher can now render FFmpeg-backed in-app video playback and broader still-image previews
+
+Missing parity:
+
+- broader hydownloader management UX beyond the current queue/status/API slice
+- stronger end-to-end downloader/parser/gallery coverage against real sites
+- richer in-app media playback features such as audio, seek/pause controls, and packaging of runtime dependencies
+
+Why this matters:
+
+- the downloader system now exists in practice, but it still needs hardening before it feels workstation-complete
+- media viewing is no longer blocked outright, but it is not yet equal to a full native player experience
+
+### 6. File lifecycle and metadata parity gaps
 
 Important remaining gaps after the four items above:
 
@@ -128,7 +147,7 @@ These are ranked by how much real Hydrus usage they unlock.
 
 - more Hydrus-like dense multi-pane layout refinements
 - advanced review/service-management pages
-- downloader/subscription workflows
+- downloader/subscription workflow polish beyond the new external hydownloader bridge
 
 ## Recommended implementation order
 
@@ -136,8 +155,8 @@ These are ranked by how much real Hydrus usage they unlock.
    - add support for union, negation, and complex groupings
 2. **Add repository petition flows**
    - support for removing/petitioning tags through the PTR
-3. **Add native in-app video playback**
-   - resolve the biggest remaining media-viewer gap
+3. **Harden the new hydownloader and media slices**
+	- verify external downloader supervision, importer behavior, and FFmpeg-backed watcher UX under real workloads
 4. **Iterate on UI density and workstation workflows**
    - moving the desktop closer to full Hydrus workstation parity
 

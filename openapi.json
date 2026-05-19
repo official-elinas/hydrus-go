@@ -332,12 +332,26 @@
       },
       "AddTagsRequest": {
         "type": "object",
-        "description": "Narrow current implementation: one service only, one action only, and only CONTENT_UPDATE_PEND (2) is supported.",
+        "description": "Current implementation supports local current-tag writes via service_keys_to_tags or service_names_to_tags, plus PTR pending-add staging through service_keys_to_actions_to_tags with CONTENT_UPDATE_PEND (2).",
         "properties": {
           "hash": { "type": "string" },
           "hashes": { "type": "array", "items": { "type": "string" } },
           "file_id": { "type": "integer", "format": "int64" },
           "file_ids": { "type": "array", "items": { "type": "integer", "format": "int64" } },
+          "service_keys_to_tags": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
+          "service_names_to_tags": {
+            "type": "object",
+            "additionalProperties": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
+          },
           "service_keys_to_actions_to_tags": {
             "type": "object",
             "additionalProperties": {
@@ -349,7 +363,6 @@
             }
           }
         },
-        "required": ["service_keys_to_actions_to_tags"],
         "additionalProperties": false
       },
       "AddTagsResponse": {
@@ -588,6 +601,325 @@
         }
       }
     },
+    "/add_files/add_file": {
+      "post": {
+        "tags": ["imports", "hydrus-api"],
+        "summary": "Hydrus-compatible add_file import",
+        "description": "Accepts either a JSON local-path request or a raw application/octet-stream body, matching the common hydrus-api client shapes used by hydownloader.",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "path": { "type": "string" },
+                  "delete_after_successful_import": { "type": "boolean" },
+                  "file_service_keys": { "type": "array", "items": { "type": "string" } },
+                  "deleted_file_service_keys": { "type": "array", "items": { "type": "string" } }
+                },
+                "required": ["path"]
+              }
+            },
+            "application/octet-stream": {
+              "schema": { "type": "string", "format": "binary" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Hydrus-style add_file result",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ResponseMeta" },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "status": { "type": "integer" },
+                        "hash": { "type": "string" },
+                        "note": { "type": "string" }
+                      },
+                      "required": ["status", "note"]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "description": "Invalid add_file request", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "413": { "description": "Upload exceeds body limit", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/add_urls/associate_url": {
+      "post": {
+        "tags": ["hydrus-api", "urls"],
+        "summary": "Hydrus-compatible URL association",
+        "description": "Attaches one or more known URLs to existing files. Current implementation supports add-only URL writes.",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "hash": { "type": "string" },
+                  "hashes": { "type": "array", "items": { "type": "string" } },
+                  "file_id": { "type": "integer", "format": "int64" },
+                  "file_ids": { "type": "array", "items": { "type": "integer", "format": "int64" } },
+                  "url_to_add": { "type": "string" },
+                  "urls_to_add": { "type": "array", "items": { "type": "string" } }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "URLs associated successfully" },
+          "400": { "description": "Invalid associate_url request", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "404": { "description": "Target file not found", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/add_notes/set_notes": {
+      "post": {
+        "tags": ["hydrus-api", "notes"],
+        "summary": "Hydrus-compatible note mutation",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "hash": { "type": "string" },
+                  "file_id": { "type": "integer", "format": "int64" },
+                  "notes": { "type": "object", "additionalProperties": { "type": "string" } }
+                },
+                "required": ["notes"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Final note payload",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ResponseMeta" },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "notes": { "type": "object", "additionalProperties": { "type": "string" } }
+                      },
+                      "required": ["notes"]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": { "description": "Invalid set_notes request", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "404": { "description": "Target file not found", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/edit_times/set_time": {
+      "post": {
+        "tags": ["hydrus-api", "times"],
+        "summary": "Hydrus-compatible timestamp mutation",
+        "description": "Current implementation supports modified-file and modified-domain timestamps.",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "hash": { "type": "string" },
+                  "hashes": { "type": "array", "items": { "type": "string" } },
+                  "file_id": { "type": "integer", "format": "int64" },
+                  "file_ids": { "type": "array", "items": { "type": "integer", "format": "int64" } },
+                  "timestamp_type": { "type": "integer" },
+                  "timestamp": { "type": "number" },
+                  "timestamp_ms": { "type": "integer", "format": "int64" },
+                  "domain": { "type": "string" }
+                },
+                "required": ["timestamp_type"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Timestamp updated successfully" },
+          "400": { "description": "Invalid set_time request", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "404": { "description": "Target file not found", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/v1/downloader/status": {
+      "get": {
+        "tags": ["downloader"],
+        "summary": "Hydownloader supervisor status",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "responses": {
+          "200": {
+            "description": "Downloader status",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ResponseMeta" },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "downloader": {
+                          "type": "object",
+                          "properties": {
+                            "enabled": { "type": "boolean" },
+                            "configured": { "type": "boolean" },
+                            "running": { "type": "boolean" },
+                            "root": { "type": "string" },
+                            "base_url": { "type": "string" },
+                            "autoimport": { "type": "boolean" },
+                            "autoimport_jobs_paused": { "type": "boolean" },
+                            "urls_queued": { "type": "integer", "format": "int64" },
+                            "subscriptions_due": { "type": "integer", "format": "int64" },
+                            "subscriptions_paused": { "type": "boolean" },
+                            "urls_paused": { "type": "boolean" },
+                            "subscription_worker_status": { "type": "string" },
+                            "url_worker_status": { "type": "string" },
+                            "autoimport_worker_status": { "type": "string" },
+                            "subscription_worker_last_update_time": { "type": "number" },
+                            "url_worker_last_update_time": { "type": "number" },
+                            "autoimport_worker_last_update_time": { "type": "number" },
+                            "last_error": { "type": "string" }
+                          },
+                          "required": ["enabled", "configured", "running", "autoimport"]
+                        }
+                      },
+                      "required": ["downloader"]
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "501": { "description": "Hydownloader integration disabled", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/v1/downloader/downloaders": {
+      "get": {
+        "tags": ["downloader"],
+        "summary": "Hydownloader subscription downloaders",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "responses": {
+          "200": {
+            "description": "Supported hydownloader subscription downloaders",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "allOf": [
+                    { "$ref": "#/components/schemas/ResponseMeta" },
+                    {
+                      "type": "object",
+                      "properties": {
+                        "downloaders": {
+                          "type": "object",
+                          "additionalProperties": { "type": "string" }
+                        }
+                      },
+                      "required": ["downloaders"]
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/downloader/url": {
+      "post": {
+        "tags": ["downloader"],
+        "summary": "Queue hydownloader single URL job",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "url": { "type": "string" },
+                  "priority": { "type": "integer", "format": "int64" },
+                  "ignore_anchor": { "type": "boolean" },
+                  "additional_data": { "type": "string" },
+                  "metadata_only": { "type": "boolean" },
+                  "overwrite_existing": { "type": "boolean" },
+                  "filter": { "type": "string" },
+                  "max_files": { "type": "integer", "format": "int64" },
+                  "paused": { "type": "boolean" },
+                  "autoimport": { "type": "boolean" }
+                },
+                "required": ["url"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "URL queued", "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/ResponseMeta" }, { "type": "object", "properties": { "queued": { "type": "boolean" } }, "required": ["queued"] }] } } } },
+          "400": { "description": "Invalid downloader URL request", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "501": { "description": "Hydownloader integration disabled", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/v1/downloader/subscription": {
+      "post": {
+        "tags": ["downloader"],
+        "summary": "Queue hydownloader subscription",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "downloader": { "type": "string" },
+                  "keywords": { "type": "string" },
+                  "additional_data": { "type": "string" },
+                  "check_interval": { "type": "integer", "format": "int64" },
+                  "priority": { "type": "integer", "format": "int64" },
+                  "paused": { "type": "boolean" },
+                  "filter": { "type": "string" },
+                  "abort_after": { "type": "integer", "format": "int64" },
+                  "max_files_initial": { "type": "integer", "format": "int64" },
+                  "max_files_regular": { "type": "integer", "format": "int64" },
+                  "worker_id": { "type": "string" },
+                  "autoimport": { "type": "boolean" }
+                },
+                "required": ["downloader", "keywords", "check_interval"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Subscription queued", "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/ResponseMeta" }, { "type": "object", "properties": { "queued": { "type": "boolean" } }, "required": ["queued"] }] } } } },
+          "400": { "description": "Invalid downloader subscription request", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "501": { "description": "Hydownloader integration disabled", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
     "/get_files/file_metadata": {
       "get": {
         "tags": ["metadata"],
@@ -781,15 +1113,15 @@
     "/add_tags/add_tags": {
       "post": {
         "tags": ["tags", "ptr"],
-        "summary": "Stage PTR pending-add mappings",
-        "description": "Current narrow implementation: exactly one service and only CONTENT_UPDATE_PEND (2) are supported.",
+        "summary": "Hydrus-compatible tag mutation and PTR pending staging",
+        "description": "Supports local current-tag writes through `service_keys_to_tags` or `service_names_to_tags`, plus the existing PTR pending-add path through `service_keys_to_actions_to_tags` with CONTENT_UPDATE_PEND (2).",
         "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
         "requestBody": {
           "required": true,
           "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AddTagsRequest" } } }
         },
         "responses": {
-          "200": { "description": "Pending mappings staged", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AddTagsResponse" } } } },
+          "200": { "description": "Local tags written or PTR pending mappings staged", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/AddTagsResponse" } } } },
           "400": { "description": "Invalid add-tags request", "content": { "text/plain": { "schema": { "type": "string" } } } },
           "503": { "description": "PTR staging unavailable", "content": { "text/plain": { "schema": { "type": "string" } } } }
         }
@@ -847,6 +1179,17 @@
           "400": { "description": "PTR disabled; status payload returned", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PTRStatusResponse" } } } },
           "503": { "description": "PTR unavailable; status payload returned", "content": { "application/json": { "schema": { "$ref": "#/components/schemas/PTRStatusResponse" } } } },
           "501": { "description": "PTR trigger unavailable", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
+    "/manage_database/force_commit": {
+      "post": {
+        "tags": ["database", "hydrus-api"],
+        "summary": "Hydrus-compatible force commit",
+        "description": "Current implementation is a synchronous no-op compatibility response because hydrus-go commits writes immediately.",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "responses": {
+          "200": { "description": "Commit forced or already durable" }
         }
       }
     },

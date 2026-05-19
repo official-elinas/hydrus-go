@@ -10,3 +10,4 @@
 *.prof
 .DS_Store
 image-tests/
+/db/

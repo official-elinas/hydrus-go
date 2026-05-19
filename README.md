@@ -30,7 +30,8 @@ This repository currently provides the following early migration slices:
 - public local-path import, trash, and tag-mutation endpoints for thin-client-driven library testing
 - daemon-owned anonymous PTR sync foundations, remote snapshot persistence, real `/update` download plus local repository-update registration, existing-DB restart/continuation handling, batched local repository-update finalization, and daemon status APIs that now distinguish local backlog completion from true up-to-date state
 - real-time PTR pending-count visibility and commit support across the daemon, daemonclient, and desktop prototype
-- an initial Fyne-based desktop prototype for `hydrusd`, including selected JPEG/PNG/GIF original preview, incremental recent loading, a more resizable split-shell layout, daemon-backed search/sorting, and PTR status/manual sync/pending-count visibility
+- an external hydownloader supervision bridge owned by `hydrusd`, including queue/status endpoints and the Hydrus Client API mutation slice that `hydownloader-importer` expects
+- an initial Fyne-based desktop prototype for `hydrusd`, including broader still-image preview, selected video poster previews, FFmpeg/FFplay-backed in-app video playback in the watcher, incremental recent loading, a more resizable split-shell layout, daemon-backed search/sorting, and PTR status/manual sync/pending-count visibility
 - real `hydrusd --listen host:port` runtime overrides for temporary LAN testing
 - explicit Linux/Windows desktop build targets, including a Windows GUI-subsystem executable for Explorer launches
 - a native-Go fresh Hydrus client bundle bootstrap for empty or missing DB directories, with plain `hydrusd` now seeding `./db` by default and verified end-to-end through live smoke testing
@@ -60,12 +61,20 @@ Machine-readable API reference:
   - `GET /get_service`
   - `GET /get_files/file_metadata`
   - `GET /service/ptr/status`
+  - `GET /v1/downloader/status`
+  - `GET /v1/downloader/downloaders`
   - `GET /v1/library/recent`
   - `GET /v1/library/search`
   - `GET /v1/files/content`
   - `GET /v1/files/thumbnail`
   - `GET /v1/tags/autocomplete`
   - `GET /manage_services/pending_counts`
+  - `POST /add_files/add_file`
+  - `POST /add_urls/associate_url`
+  - `POST /add_notes/set_notes`
+  - `POST /edit_times/set_time`
+  - `POST /v1/downloader/url`
+  - `POST /v1/downloader/subscription`
   - `POST /service/ptr/sync`
   - `POST /v1/files/trash`
   - `POST /v1/import/local_file`
@@ -73,6 +82,7 @@ Machine-readable API reference:
   - `POST /v1/import/upload`
   - `POST /add_tags/add_tags`
   - `POST /manage_services/commit_pending`
+  - `POST /manage_database/force_commit`
   - `POST /manage_database/integrity_check`
 
 Protected endpoints accept either of these credentials as headers:
@@ -241,16 +251,16 @@ This is still a migration milestone, not feature parity.
 
 Important current limitations:
 - search is currently a narrow slice focused on AND-tags, daemon-backed `system:` predicates (`size`, `width`, `height`, `favorite`, `resolution`), and server-side sort modes; complex union/negation logic plus other system predicates are still pending daemon-side support, and unsupported desktop terms are currently ignored rather than applied as local fallback filters
-- the desktop grid now uses client-local thumbnail generation from daemon-served originals instead of fetching daemon thumbnail bytes over the LAN; unsupported or oversized originals may still show no preview
+- the desktop grid now prefers daemon thumbnail bytes and falls back to client-local generation from originals; unsupported or oversized originals can still fail when neither direct decode nor the local FFmpeg fallback succeeds
 - PTR sync now supports definitions/content application and pending mapping staging/commit, and daemon status now distinguishes local backlog completion from true up-to-date state, but broader petition/review-services flows are still missing
-- selected-file original preview currently supports JPEG/PNG/GIF only and is intentionally bounded to 16 MiB payloads, 8192px maximum dimension, and 16,000,000 decoded pixels
+- selected-file preview now supports direct or FFmpeg-backed conversion for broader still-image formats plus video poster previews, and it is intentionally bounded to 16 MiB payloads, 8192px maximum dimension, and 16,000,000 decoded pixels
 - selected-file preview is cached in memory, but refresh/reconnect cycles still redownload the same original over LAN while testing
 - `GET /get_files/file_metadata` parity is still incomplete; this slice does not yet implement exact thumbnail-dimension parity
-- import-time still-image enrichment is currently bounded to the Go JPEG/PNG decode path; animated-media/blurhash parity is still pending
+- import-time media handling now covers broader MIME detection plus FFmpeg-backed dimension/thumbnail fallbacks for additional still-image and video formats, but richer animated-media/audio/blurhash parity is still pending
 - no public batch import flow yet
 - no public permanent delete flow yet
-- no native in-app video playback; video files show a placeholder message in the watcher
-- full downloader/parser/subscription parity is still missing
+- in-app video playback currently depends on local `ffmpeg`, `ffprobe`, and `ffplay` binaries; richer controls and hardware-accelerated playback are still pending
+- native-Go downloader/parser/subscription parity is still missing, but `hydrusd` now uses external hydownloader as its downloader system when enabled and exposes the Hydrus Client API mutation slice that `hydownloader-importer` needs (`add_file`, `associate_url`, local `add_tags`, `set_notes`, `set_time`, `force_commit`)
 
 
 The point of this slice is to lock down daemon startup, auth, DB bundle access,
@@ -419,6 +429,15 @@ This bootstrap currently targets the Go toolchain declared in `go.mod`
 - `HYDRUS_GO_DB_DIR` (optional path to a Hydrus client DB directory; when this is unset and bootstrap remains enabled, `hydrusd` defaults to `./db`)
 - `HYDRUS_GO_ENABLE_FRESH_CLIENT_BOOTSTRAP` (optional explicit override; plain `hydrusd` currently defaults to enabled bootstrap)
 - `HYDRUS_GO_BOOTSTRAP_TIMEOUT` (default: `2m`)
+- `HYDRUS_GO_ENABLE_HYDOWNLOADER` (default: `false`; opt-in external hydownloader supervision)
+- `HYDRUS_GO_HYDOWNLOADER_ROOT` (required when hydownloader integration is enabled)
+- `HYDRUS_GO_HYDOWNLOADER_HOST` (default: `127.0.0.1`)
+- `HYDRUS_GO_HYDOWNLOADER_PORT` (default: `53211`)
+- `HYDRUS_GO_HYDOWNLOADER_ACCESS_KEY` (optional; generated if empty)
+- `HYDRUS_GO_PUBLIC_API_URL` (optional explicit callback URL for hydownloader importer patching; use this when `HYDRUS_GO_LISTEN_ADDR` is a bind address like `0.0.0.0:...` rather than a real callback host)
+- `HYDRUS_GO_HYDOWNLOADER_AUTOIMPORT` (default: `true`; let hydownloader autoimport into hydrus-go through the compatibility API)
+- `HYDRUS_GO_HYDOWNLOADER_DAEMON_BIN` (default: `hydownloader-daemon`)
+- `HYDRUS_GO_HYDOWNLOADER_TOOLS_BIN` (default: `hydownloader-tools`)
 - `HYDRUS_GO_ENABLE_PTR_SYNC` (default: `false`; opt-in only, matching Hydrus' “never connect until you tell it to” stance)
 - `HYDRUS_GO_PTR_HOST` (default: `ptr.hydrus.network`)
 - `HYDRUS_GO_PTR_PORT` (default: `45871`)

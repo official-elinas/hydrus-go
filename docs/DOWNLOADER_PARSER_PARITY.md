@@ -1,13 +1,39 @@
 # downloader and parser parity plan
 
-Last updated: 2026-04-26
+Last updated: 2026-05-04
 
 ## Current gap
 
-`hydrus-go` still has no downloader, parser, watcher, or subscription system.
-The current daemon can import local/uploaded files, browse recent files, expose
-metadata, and run the early PTR sync path, but it cannot yet turn a gallery
-query or URL into downloaded files and tags.
+`hydrus-go` now has a daemon-owned **external hydownloader integration path**,
+but it still does not have a native-Go downloader/parser/subscription system.
+
+What changed on 2026-05-04 is the first practical **hydownloader bridge**:
+
+- the daemon now exposes the Hydrus Client API mutation slice that
+  `hydownloader-importer` expects today:
+  - `POST /add_files/add_file`
+  - `POST /add_urls/associate_url`
+  - local `POST /add_tags/add_tags`
+  - `POST /add_notes/set_notes`
+  - `POST /edit_times/set_time`
+- `POST /manage_database/force_commit`
+
+- `hydrusd` now also has an external hydownloader supervision slice:
+  - opt-in config through `HYDRUS_GO_ENABLE_HYDOWNLOADER` and related root/bin settings
+  - root initialization via `hydownloader-tools init-db`
+  - config/import-job patching so hydownloader autoimports back into `hydrus-go`
+  - queue/status endpoints:
+    - `GET /v1/downloader/status`
+    - `GET /v1/downloader/downloaders`
+    - `POST /v1/downloader/url`
+    - `POST /v1/downloader/subscription`
+
+That means `hydrus-go` can now use external `hydownloader` as its downloader
+system in the current daemon-first architecture: it can supervise and queue the
+external downloader from `hydrusd`, and it can act as the Hydrus-side import
+target for `hydownloader-importer`. What remains out of scope for this specific
+slice is a native-Go reimplementation of hydownloader's downloader jobs,
+gallery traversal, subscriptions, or parser execution.
 
 ## Python Hydrus systems to port
 

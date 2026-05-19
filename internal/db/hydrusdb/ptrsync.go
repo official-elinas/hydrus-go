@@ -229,7 +229,13 @@ func (b *Bundle) ListPTRPendingMappingsForCommit(
 		return nil, err
 	}
 
-	service, ok, err := lookupServiceByKeyTx(ctx, b.conn, targetServiceKey)
+	conn, err := b.acquireReadConn(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer b.releaseReadConn(conn)
+
+	service, ok, err := lookupServiceByKeyTx(ctx, conn, targetServiceKey)
 	if err != nil {
 		return nil, err
 	}
@@ -237,7 +243,7 @@ func (b *Bundle) ListPTRPendingMappingsForCommit(
 		return nil, fmt.Errorf("PTR service key %q is unavailable", targetServiceKey)
 	}
 
-	serviceID, err := lookupServiceIDByKeyTx(ctx, b.conn, targetServiceKey)
+	serviceID, err := lookupServiceIDByKeyTx(ctx, conn, targetServiceKey)
 	if err != nil {
 		return nil, err
 	}
@@ -254,7 +260,7 @@ func (b *Bundle) ListPTRPendingMappingsForCommit(
 		serviceID,
 	)
 
-	rows, err := b.conn.QueryContext(ctx, query)
+	rows, err := conn.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("query PTR pending mappings for commit: %w", err)
 	}
@@ -316,7 +322,13 @@ func (b *Bundle) CountPTRPendingMappings(
 		return coreptrsync.PendingInfo{}, err
 	}
 
-	serviceID, err := lookupServiceIDByKeyTx(ctx, b.conn, targetServiceKey)
+	conn, err := b.acquireReadConn(ctx)
+	if err != nil {
+		return coreptrsync.PendingInfo{}, err
+	}
+	defer b.releaseReadConn(conn)
+
+	serviceID, err := lookupServiceIDByKeyTx(ctx, conn, targetServiceKey)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return coreptrsync.PendingInfo{}, fmt.Errorf("%w: %s", coreptrsync.ErrPTRServiceNotFound, targetServiceKey)
@@ -325,7 +337,7 @@ func (b *Bundle) CountPTRPendingMappings(
 	}
 
 	var count int64
-	row := b.conn.QueryRowContext(
+	row := conn.QueryRowContext(
 		ctx,
 		fmt.Sprintf(`SELECT COUNT(*) FROM external_mappings.pending_mappings_%d`, serviceID),
 	)
@@ -1230,6 +1242,26 @@ func ensurePTRMappingsTables(ctx context.Context, tx *ImmediateTx, serviceID int
 			)`,
 			serviceID,
 		),
+		fmt.Sprintf(
+			`CREATE INDEX IF NOT EXISTS external_mappings.current_mappings_%d_hash_id_idx ON current_mappings_%d (hash_id)`,
+			serviceID,
+			serviceID,
+		),
+		fmt.Sprintf(
+			`CREATE INDEX IF NOT EXISTS external_mappings.deleted_mappings_%d_hash_id_idx ON deleted_mappings_%d (hash_id)`,
+			serviceID,
+			serviceID,
+		),
+		fmt.Sprintf(
+			`CREATE INDEX IF NOT EXISTS external_mappings.pending_mappings_%d_hash_id_idx ON pending_mappings_%d (hash_id)`,
+			serviceID,
+			serviceID,
+		),
+		fmt.Sprintf(
+			`CREATE INDEX IF NOT EXISTS external_mappings.petitioned_mappings_%d_hash_id_idx ON petitioned_mappings_%d (hash_id)`,
+			serviceID,
+			serviceID,
+		),
 	}
 
 	for _, statement := range tables {
@@ -1552,6 +1584,16 @@ func upsertPTRSyncState(
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
+			seedDownloadedCount, seedErr := queryPTRDownloadedUpdateCount(ctx, tx, serviceID)
+			if seedErr != nil {
+				return fmt.Errorf("seed ptr_sync_state downloaded count: %w", seedErr)
+			}
+
+			seedDownloadedBytes, seedErr := queryPTRDownloadedUpdateBytes(ctx, tx, serviceID)
+			if seedErr != nil {
+				return fmt.Errorf("seed ptr_sync_state downloaded bytes: %w", seedErr)
+			}
+
 			nowMS := time.Now().UTC().UnixMilli()
 			if _, insertErr := tx.ExecContext(
 				ctx,
@@ -1582,8 +1624,8 @@ func upsertPTRSyncState(
 				0,
 				nil,
 				0,
-				0,
-				0,
+				seedDownloadedCount,
+				seedDownloadedBytes,
 				0,
 				0,
 				0,
@@ -1926,7 +1968,13 @@ func (b *Bundle) GetPTRNextUpdateDue(
 		return 0, nil
 	}
 
-	serviceID, err := lookupServiceIDByKeyTx(ctx, b.conn, coreptrsync.DaemonServiceKeyHex())
+	conn, err := b.acquireReadConn(ctx)
+	if err != nil {
+		return 0, err
+	}
+	defer b.releaseReadConn(conn)
+
+	serviceID, err := lookupServiceIDByKeyTx(ctx, conn, coreptrsync.DaemonServiceKeyHex())
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return 0, nil
@@ -1935,7 +1983,7 @@ func (b *Bundle) GetPTRNextUpdateDue(
 		return 0, err
 	}
 
-	row := b.conn.QueryRowContext(
+	row := conn.QueryRowContext(
 		ctx,
 		`SELECT next_update_due FROM main.ptr_sync_remote_state WHERE service_id = ?`,
 		serviceID,
@@ -1951,6 +1999,38 @@ func (b *Bundle) GetPTRNextUpdateDue(
 	}
 
 	return nextUpdateDue, nil
+}
+
+// HasPTRCurrentMappings returns true when the PTR daemon service exists and its
+// current_mappings table is non-empty.
+func (b *Bundle) HasPTRCurrentMappings(ctx context.Context) (bool, error) {
+	conn, err := b.acquireReadConn(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer b.releaseReadConn(conn)
+
+	serviceID, err := lookupServiceIDByKeyTx(ctx, conn, coreptrsync.DaemonServiceKeyHex())
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+
+	row := conn.QueryRowContext(
+		ctx,
+		fmt.Sprintf(`SELECT COUNT(*) FROM external_mappings.current_mappings_%d LIMIT 1`, serviceID),
+	)
+	var count int64
+	if err := row.Scan(&count); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, fmt.Errorf("query PTR current mappings presence: %w", err)
+	}
+
+	return count > 0, nil
 }
 
 func defaultPTRSyncStatus(cfg coreptrsync.Config) coreptrsync.Status {
@@ -2105,8 +2185,37 @@ func (b *Bundle) ApplyPTRProcessableUpdatesBatch(
 		return coreptrsync.ErrSyncDisabled
 	}
 
-	if len(items) == 0 {
-		return nil
+	for _, item := range items {
+		if err := b.applyPTRProcessableUpdate(ctx, cfg, runToken, item); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// applyPTRProcessableUpdate applies a single PTR update bundle in its own
+// immediate transaction so that the write gate is released between bundles,
+// allowing file imports and other writes to interleave with a running PTR sync.
+func (b *Bundle) applyPTRProcessableUpdate(
+	ctx context.Context,
+	cfg coreptrsync.Config,
+	runToken string,
+	item PTRApplyUpdateBatchItem,
+) error {
+	if !cfg.Enabled {
+		return coreptrsync.ErrSyncDisabled
+	}
+
+	hashHex := strings.ToLower(strings.TrimSpace(item.HashHex))
+	if hashHex == "" {
+		return fmt.Errorf("PTR processable update hash is required")
+	}
+
+	switch item.ContentType {
+	case PTRContentTypeDefinitions, PTRContentTypeMappings:
+	default:
+		return fmt.Errorf("unsupported PTR update content type %d", item.ContentType)
 	}
 
 	return b.WithImmediateTx(ctx, func(tx *ImmediateTx) error {
@@ -2119,46 +2228,21 @@ func (b *Bundle) ApplyPTRProcessableUpdatesBatch(
 			return err
 		}
 
-		hasDefinitions := false
-		hasMappings := false
-		for _, item := range items {
-			switch item.ContentType {
-			case PTRContentTypeDefinitions:
-				hasDefinitions = true
-			case PTRContentTypeMappings:
-				hasMappings = true
-			default:
-				return fmt.Errorf("unsupported PTR update content type %d", item.ContentType)
-			}
+		if err := ensurePTRRepositoryDefinitionTables(ctx, tx, serviceID); err != nil {
+			return err
 		}
 
-		if hasDefinitions || hasMappings {
-			if err := ensurePTRRepositoryDefinitionTables(ctx, tx, serviceID); err != nil {
-				return err
+		switch item.ContentType {
+		case PTRContentTypeDefinitions:
+			if err := applyPTRDefinitionsUpdateTx(ctx, tx, serviceID, hashHex, item.Definitions); err != nil {
+				return fmt.Errorf("apply PTR definitions update %s: %w", hashHex, err)
 			}
-		}
-
-		if hasMappings {
+		case PTRContentTypeMappings:
 			if err := ensurePTRMappingsTables(ctx, tx, serviceID); err != nil {
 				return err
 			}
-		}
-
-		for _, item := range items {
-			hashHex := strings.ToLower(strings.TrimSpace(item.HashHex))
-			if hashHex == "" {
-				return fmt.Errorf("PTR processable update hash is required")
-			}
-
-			switch item.ContentType {
-			case PTRContentTypeDefinitions:
-				if err := applyPTRDefinitionsUpdateTx(ctx, tx, serviceID, hashHex, item.Definitions); err != nil {
-					return fmt.Errorf("apply PTR definitions update %s: %w", hashHex, err)
-				}
-			case PTRContentTypeMappings:
-				if err := applyPTRMappingsUpdateTx(ctx, tx, serviceID, hashHex, item.Mappings); err != nil {
-					return fmt.Errorf("apply PTR mappings update %s: %w", hashHex, err)
-				}
+			if err := applyPTRMappingsUpdateTx(ctx, tx, serviceID, hashHex, item.Mappings); err != nil {
+				return fmt.Errorf("apply PTR mappings update %s: %w", hashHex, err)
 			}
 		}
 
@@ -3052,7 +3136,13 @@ func (b *Bundle) LoadPTRStoredUpdateBody(
 		return nil, 0, false, fmt.Errorf("normalize PTR update hash %q: %w", hashHex, err)
 	}
 
-	serviceID, err := lookupServiceIDByKeyTx(ctx, b.conn, coreptrsync.DaemonServiceKeyHex())
+	conn, err := b.acquireReadConn(ctx)
+	if err != nil {
+		return nil, 0, false, err
+	}
+	defer b.releaseReadConn(conn)
+
+	serviceID, err := lookupServiceIDByKeyTx(ctx, conn, coreptrsync.DaemonServiceKeyHex())
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, 0, false, nil
@@ -3062,7 +3152,7 @@ func (b *Bundle) LoadPTRStoredUpdateBody(
 	}
 
 	_, _, repositoryProcessedTableName := generatePTRRepositoryTableNames(serviceID)
-	row := b.conn.QueryRowContext(
+	row := conn.QueryRowContext(
 		ctx,
 		fmt.Sprintf(`SELECT mime, body FROM %s rp JOIN external_master.hashes h USING (hash_id) WHERE h.hash = ? AND body IS NOT NULL LIMIT 1`, repositoryProcessedTableName),
 		hashBytes,

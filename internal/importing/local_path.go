@@ -60,6 +60,7 @@ func (i *Importer) ImportLocalPath(
 	}
 
 	stillImageMetadata := detectStillImageImportMetadata(sourcePath, mimeEnum)
+	videoMetadata := detectVideoImportMetadata(sourcePath, mimeEnum)
 
 	importedAtMS := time.Now().UTC().UnixMilli()
 	var fileModifiedAtMS *int64
@@ -76,6 +77,9 @@ func (i *Importer) ImportLocalPath(
 		Height:              stillImageMetadata.Height,
 		PixelHashHex:        stillImageMetadata.PixelHashHex,
 		HasTransparency:     stillImageMetadata.HasTransparency,
+		Duration:            videoMetadata.Duration,
+		NumFrames:           videoMetadata.NumFrames,
+		HasAudio:            videoMetadata.HasAudio,
 		ImportedAtMS:        importedAtMS,
 		FileModifiedAtMS:    fileModifiedAtMS,
 		LocalFileServiceKey: strings.TrimSpace(request.LocalFileServiceKey),
@@ -151,10 +155,23 @@ func detectLocalImportMIME(path string) (int, error) {
 	}
 
 	if mimeEnum, ok := mimes.FromMIMEType(http.DetectContentType(buffer[:n])); ok {
+		if !importNeedsVerifiedMediaBytes(mimeEnum) {
+			return mimeEnum, nil
+		}
+		if detected, ok := detectImportMIMEWithFFmpeg(path); ok {
+			return detected, nil
+		}
+		return 0, &fileimport.RequestError{Message: fmt.Sprintf("local file path %q has an unsupported or unverified media payload", path)}
+	}
+
+	if mimeEnum, ok := detectImportMIMEWithFFmpeg(path); ok {
 		return mimeEnum, nil
 	}
 
 	if mimeEnum, ok := mimes.FromExtension(filepath.Ext(path)); ok {
+		if importNeedsVerifiedMediaBytes(mimeEnum) {
+			return 0, &fileimport.RequestError{Message: fmt.Sprintf("local file path %q has an unsupported or unverified media payload", path)}
+		}
 		return mimeEnum, nil
 	}
 
@@ -163,9 +180,18 @@ func detectLocalImportMIME(path string) (int, error) {
 	}
 }
 
+func importNeedsVerifiedMediaBytes(mimeEnum int) bool {
+	switch mimeEnum {
+	case 9, 14, 18, 20, 21, 25, 26, 27, 42, 47, 56, 61, 63, 65, 70, 85:
+		return true
+	default:
+		return false
+	}
+}
+
 func supportsDecodeConfigDimensions(mimeEnum int) bool {
 	switch mimeEnum {
-	case 1, 2, 3:
+	case 1, 2, 3, 4, 23, 33, 34:
 		return true
 	default:
 		return false

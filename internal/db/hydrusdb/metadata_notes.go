@@ -2,11 +2,20 @@ package hydrusdb
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 )
 
 func (b *Bundle) lookupFileNotes(
 	ctx context.Context,
+	fileIDs []int64,
+) (map[int64]map[string]string, error) {
+	return b.lookupFileNotesConn(ctx, b.conn, fileIDs)
+}
+
+func (b *Bundle) lookupFileNotesConn(
+	ctx context.Context,
+	conn *sql.Conn,
 	fileIDs []int64,
 ) (map[int64]map[string]string, error) {
 	notesByHashID := map[int64]map[string]string{}
@@ -47,7 +56,7 @@ func (b *Bundle) lookupFileNotes(
 		placeholders(len(uniqueFileIDs)),
 	)
 
-	rows, err := b.conn.QueryContext(ctx, query, int64Args(uniqueFileIDs)...)
+	rows, err := conn.QueryContext(ctx, query, int64Args(uniqueFileIDs)...)
 	if err != nil {
 		return nil, fmt.Errorf("query file notes: %w", err)
 	}

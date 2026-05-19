@@ -1,6 +1,6 @@
 # NEAR PARITY TRIAGE
 
-**Last Updated**: 2026-04-28  
+**Last Updated**: 2026-05-04  
 **Context**: This document is a code-grounded triage snapshot for getting `hydrus-go` to **near practical parity** under severe time pressure. `hydrus-go` is a **conversion**, not a 1:1 PyQt translation. When this document disagrees with older docs, **current code wins**.
 
 ## What is definitely working now
@@ -12,7 +12,7 @@
 - The still-image watcher path is now re-verified: it stays an in-app resizable window, supports arrow-key and mouse-wheel previous/next navigation, and keeps the selected gallery tile highlight tied to the current preview selection.
 - The daemon now has a local-library search foundation that supports AND-tag queries, `system:` predicates (`size`, `width`, `height`, `favorite`, `resolution`), and server-side sort modes (`import_oldest`, `size_desc`, `size_asc`). Unsupported desktop search terms are currently ignored rather than applied as UI-local fallback filters.
 - PTR pending-state visibility exists end-to-end: DB counts, manager/store/API layers, daemonclient, and Fyne pending-count labeling are all wired.
-- The biggest remaining practical gaps are **complex daemon-side search logic** (unions/negations), **broader search/repository mutation parity**, and **native in-app video playback**.
+- The biggest remaining practical gaps are **complex daemon-side search logic** (unions/negations), **broader search/repository mutation parity**, and **hardening the new external hydownloader + FFmpeg-backed media slices**.
 
 ## 12-item parity checklist
 
@@ -20,7 +20,7 @@
 |---|---|---|---|---|
 | 1 | Verify full PTR sync + persists / does not re-download / how to know when done | **Done** | Anonymous PTR sync-in persists state, reuses already-stored update artifacts when present, tracks processed definition/content counts, and sets `IsComplete` only when idle with no pending download/process work and no last error. The branch now also has direct test coverage for completed-sync persistence across restart, artifact reuse, retry wakeup/backoff, shutdown lease cleanup, and PTR-applied mapping searchability after reopen. | `internal/ptrsync/manager.go`, `internal/db/hydrusdb/ptrsync.go`, `internal/app/app_test.go`, `internal/ptrsync/manager_test.go`, `internal/db/hydrusdb/ptrsync_test.go` |
 | 2 | PTR commit tag features for imported files | **Partial** | Pending mapping staging and commit upload are real. The current path supports narrow PTR pending-add workflows and remote commit of those pending mappings. It is not yet broad Hydrus repository parity: no full petition/review-services flow, no broader mutation model, no richer pending-state UI. | `internal/api/httpapi/ptr_pending.go`, `internal/ptrsync/client.go`, `internal/db/hydrusdb/ptrsync.go`, `internal/core/ptrsync/types.go` |
-| 3 | Full image and video watcher on double click, native to Fyne | **Partial** | Double-click opens a resizable in-app watcher window for still images. The watcher now supports arrow-key and mouse-wheel navigation across the current gallery ordering and keeps the selected tile visibly highlighted in the grid. Video is still explicitly not implemented; the app shows a fallback message for video MIME types instead of playing them. | `internal/desktop/fyneapp/tile.go`, `internal/desktop/fyneapp/watcher.go`, `internal/desktop/fyneapp/app.go`, `internal/desktop/fyneapp/tile_test.go`, `internal/desktop/fyneapp/watcher_test.go`, `internal/desktop/fyneapp/app_metadata_test.go` |
+| 3 | Full image and video watcher on double click, native to Fyne | **Partial** | Double-click opens a resizable in-app watcher window for still images and now has an FFmpeg-backed in-app frame-stream path for common video containers. Still-image previews are broader through direct decode or FFmpeg fallback. The remaining gap is richer media-player behavior such as audio, seek/pause controls, and bundled runtime dependencies. | `internal/desktop/fyneapp/tile.go`, `internal/desktop/fyneapp/app.go`, `internal/desktop/fyneapp/video_watcher_ffmpeg.go`, `internal/desktop/fyneapp/tile_test.go`, `internal/desktop/fyneapp/app_metadata_test.go` |
 | 4 | Popup tag editor with autocomplete and tag metadata display | **Done** | The popup loads selected-file metadata, renders current tags, offers local + daemon-backed autocomplete suggestions, stages pending mappings, and commits pending mappings. | `internal/desktop/fyneapp/app.go`, `internal/api/httpapi/tags.go`, `internal/db/hydrusdb/tag_suggestions.go` |
 | 5 | Hashes match image tags and artist-first gallery label | **Done** | The desktop metadata/tag lookups are keyed by `file_id`, and gallery labels prioritize `creator:` / `artist:` / `person:` / `studio:` before series/character, then hash fallback. No mismatch bug is evident in the current code path. | `internal/desktop/fyneapp/app.go`, `internal/desktop/fyneapp/app_metadata_test.go` |
 | 6 | Hydrus-like tags on the left when an image is selected | **Done** | The left pane contains a dedicated selected-file tags section populated from daemon metadata and rendered as rich text. | `internal/desktop/fyneapp/app.go` |
@@ -49,16 +49,16 @@
 
 - Broaden daemon-side search from the current tag-first local-file slice into fuller Hydrus-like server-side search semantics: complex union/negation/grouping logic, remaining `system:` predicates (`favorite`, `resolution`, `local`, `trashed`, `deleted`), and name-based sorting.
 - Broaden the desktop search path from the current explicit/exact-tag and supported-system daemon slice into fuller daemon-first search semantics as the backend grows; unsupported terms are currently ignored rather than handled locally.
-- Keep the now-verified still-image watcher path stable, and treat native in-app video playback as the remaining media-viewer gap rather than reopening still-image QA without a concrete regression.
+- Keep the now-broadened FFmpeg-backed watcher path stable, and treat richer audio/control/runtime packaging as the remaining media-viewer gap rather than reopening still-image QA without a concrete regression.
 
 ## Ruthless 1.5-week critical path
 
-### Day 0 decision: choose the video strategy immediately
+### Day 0 decision: harden the current video strategy immediately
 
 This is the highest-risk item on the list.
 
-- **If native in-app video playback is a hard requirement for near parity**, decide now on the integration path and accept the dependency cost. Fyne core does not give video playback for free.
-- **If near parity can ship with still-image watcher + explicit video limitation**, do that deliberately and spend the week on search and repository workflows instead.
+- The current branch already chose an FFmpeg-backed in-app frame-stream path.
+- The immediate question is now whether that path is sufficient for the target scope, or whether audio-capable media-player integration is required before calling the watcher complete.
 
 If this decision slips, item **#3** will slip.
 
@@ -83,12 +83,12 @@ If this decision slips, item **#3** will slip.
 
 **Why this is second**: it directly advances item **#2** and reduces the biggest remaining mismatch between “I can tag locally” and “I can contribute through the PTR”.
 
-### Phase C — Days 7–9: media watcher parity decision execution
+### Phase C — Days 7–9: media watcher hardening
 
 **Goal**: close item **#3** as far as the chosen strategy allows.
 
-- If the decision was **native video inside Fyne**, implement the chosen integration path and prove one supported video format end-to-end.
-- If the decision was **defer native video**, keep the still-image watcher solid, polish zoom/fit/resizing behavior if needed, and make the explicit limitation text intentional rather than accidental.
+- Keep the FFmpeg-backed in-app watcher path working across the common container set already under test.
+- Decide whether audio/seek/control/runtime packaging is required for the target milestone or can remain a documented limitation.
 
 **Why this is third**: still-image watcher parity is already present; video is the only missing part of the media-viewer slice.
 

@@ -65,3 +65,26 @@ func TestMediaTileDoubleTapped(t *testing.T) {
 		t.Fatalf("double tap callback count = %d, want 1", called)
 	}
 }
+
+func TestMediaTileTapped(t *testing.T) {
+	tile := newMediaTile()
+	called := 0
+
+	tile.SetData(
+		"title",
+		"subtitle",
+		nil,
+		"Loading",
+		false,
+		func() {
+			called++
+		},
+		nil,
+	)
+
+	tile.Tapped(&fyne.PointEvent{})
+
+	if called != 1 {
+		t.Fatalf("tap callback count = %d, want 1", called)
+	}
+}

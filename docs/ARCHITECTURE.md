@@ -161,7 +161,7 @@ adds:
 
 - daemon-local hashing and MIME detection for `POST /v1/import/local_file`
 - runtime write enablement through a separate writable bundle when available
-- best-effort managed thumbnail generation for imported JPEG/PNG/GIF still images
+- best-effort managed thumbnail generation for imported still images and a broader FFmpeg-backed media subset
 - best-effort JPEG/PNG import-time `pixel_hash` and `has_transparency` enrichment so those metadata fields round-trip immediately after daemon-owned imports
 
 The project now also has the first thin-client-oriented browse surface:
@@ -194,10 +194,11 @@ The planned desktop direction is now:
 - the first client milestone stays closer to a simple image-browser shell than to full Hydrus workstation parity
 - the prototype is specifically meant to exercise `hydrusd` browse/add/trash behavior, selected-file metadata, and original-file serving, not to be a general-purpose Hydrus replacement yet
 
-The current selected-file preview behavior is intentionally narrow:
+The current selected-file preview behavior is intentionally bounded rather than unlimited:
 
-- the desktop client uses `GET /v1/files/content` for selected JPEG/PNG/GIF items only
+- the desktop client uses `GET /v1/files/content` for selected still images and video poster previews, using direct decode or local FFmpeg conversion depending on media type
 - preview requests are bounded to 16 MiB payloads, 8192px maximum dimension, and 16,000,000 decoded pixels
+- the watcher now also has an FFmpeg/FFplay-backed in-app path for supported video MIME values when `ffmpeg`, `ffprobe`, and `ffplay` are available locally
 - those limits are deliberate thin-client safety rails so manual LAN testing can validate original-file serving without turning the prototype into an unrestricted media viewer
 
 The runtime storage/DB model for this phase is:
@@ -212,7 +213,7 @@ The deeper Hydrus client-core behaviors are still pending:
 
 - full media-result metadata parity, especially exact thumbnail sizing semantics and remaining edge-case behavior around metadata payloads
 - broader DB-backed import orchestration beyond the current local-path/upload slices, especially richer batch flows and further import metadata capture beyond the initial JPEG/PNG `pixel_hash`/`has_transparency` slice
-- thumbnail generation for additional media types beyond the current JPEG/PNG/GIF still-image subset
+- thumbnail generation, metadata enrichment, and viewer polish for media types beyond the current direct-decode/FFmpeg-backed slice
 - file serving and broader managed file-store lifecycle behavior
 - search/tagging engine behavior
 - richer stateful background processing

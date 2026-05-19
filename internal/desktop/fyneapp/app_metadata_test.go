@@ -3,8 +3,15 @@
 package fyneapp
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"image"
+	"image/color"
+	"image/png"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -123,7 +130,7 @@ func TestPrototypeShellText(t *testing.T) {
 	if defaultStatusText != "Ready. Connect to hydrusd to start validation." {
 		t.Fatalf("defaultStatusText = %q, want production status text", defaultStatusText)
 	}
-	if defaultPreviewText != "Select an image to preview." {
+	if defaultPreviewText != "Select an image or video to preview." {
 		t.Fatalf("defaultPreviewText = %q, want compact preview text", defaultPreviewText)
 	}
 	if defaultMetadataText != "Select a file from the grid to inspect daemon-backed metadata." {
@@ -472,6 +479,18 @@ func TestPTRPollingRetryHelpers(t *testing.T) {
 			t.Fatalf("ptrPollingErrorStatusText() = %q, want %q", got, want)
 		}
 	})
+
+	t.Run("classifies timeout and cancellation as transient ptr status errors", func(t *testing.T) {
+		if !isTransientPTRStatusRequestError(context.DeadlineExceeded) {
+			t.Fatal("isTransientPTRStatusRequestError(deadline) = false, want true")
+		}
+		if !isTransientPTRStatusRequestError(context.Canceled) {
+			t.Fatal("isTransientPTRStatusRequestError(canceled) = false, want true")
+		}
+		if isTransientPTRStatusRequestError(errors.New("temporary network failure")) {
+			t.Fatal("isTransientPTRStatusRequestError(network failure) = true, want false")
+		}
+	})
 }
 
 func TestNativeWatcherFallbackMessage(t *testing.T) {
@@ -481,8 +500,21 @@ func TestNativeWatcherFallbackMessage(t *testing.T) {
 		}
 	})
 
+	t.Run("supports ffmpeg-backed still images without fallback", func(t *testing.T) {
+		if got := nativeWatcherFallbackMessage("image/avif"); got != "" {
+			t.Fatalf("nativeWatcherFallbackMessage(image/avif) = %q, want empty string", got)
+		}
+	})
+
 	t.Run("explains native video limitation in app", func(t *testing.T) {
 		got := nativeWatcherFallbackMessage("video/mp4")
+		if supportsNativeVideoPlayback() {
+			if got != "" {
+				t.Fatalf("nativeWatcherFallbackMessage(video/mp4) = %q, want empty string when playback is available", got)
+			}
+			return
+		}
+
 		if got == "" || !strings.Contains(got, "Native video playback") {
 			t.Fatalf("nativeWatcherFallbackMessage(video/mp4) = %q, want native video explanation", got)
 		}
@@ -588,6 +620,78 @@ func TestResetConnectionAttemptState(t *testing.T) {
 
 	if len(p.tileMetadataCache) != 1 {
 		t.Fatalf("len(tileMetadataCache) = %d, want 1", len(p.tileMetadataCache))
+	}
+}
+
+func TestBuildSelectedPreviewResource_FFmpegFallbacks(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg is required for preview fallback tests")
+	}
+
+	t.Run("renders avif still image into a previewable PNG resource", func(t *testing.T) {
+		payload := writeFFmpegPreviewFixture(t, ".avif")
+		resource, err := buildSelectedPreviewResource(context.Background(), payload, "image/avif", 7)
+		if err != nil {
+			t.Fatalf("buildSelectedPreviewResource(avif) error = %v", err)
+		}
+
+		decoded, _, err := image.Decode(bytes.NewReader(resource.Content()))
+		if err != nil {
+			t.Fatalf("image.Decode(resource avif) error = %v", err)
+		}
+		if decoded.Bounds().Dx() != 4 || decoded.Bounds().Dy() != 4 {
+			t.Fatalf("decoded avif preview size = %dx%d, want 4x4", decoded.Bounds().Dx(), decoded.Bounds().Dy())
+		}
+	})
+
+	tests := []struct {
+		name string
+		ext  string
+		mime string
+	}{
+		{name: "mp4", ext: ".mp4", mime: "video/mp4"},
+		{name: "m4v", ext: ".m4v", mime: "video/mp4"},
+		{name: "webm", ext: ".webm", mime: "video/webm"},
+		{name: "mkv", ext: ".mkv", mime: "video/x-matroska"},
+		{name: "mov", ext: ".mov", mime: "video/quicktime"},
+		{name: "avi", ext: ".avi", mime: "video/x-msvideo"},
+		{name: "flv", ext: ".flv", mime: "video/x-flv"},
+		{name: "wmv", ext: ".wmv", mime: "video/x-ms-wmv"},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run("renders "+tt.name+" poster frame for selected preview", func(t *testing.T) {
+			payload := writeFFmpegVideoPreviewFixture(t, tt.ext)
+			resource, err := buildSelectedPreviewResource(context.Background(), payload, tt.mime, 8)
+			if err != nil {
+				t.Fatalf("buildSelectedPreviewResource(%s) error = %v", tt.mime, err)
+			}
+
+			decoded, _, err := image.Decode(bytes.NewReader(resource.Content()))
+			if err != nil {
+				t.Fatalf("image.Decode(resource %s poster) error = %v", tt.mime, err)
+			}
+			if decoded.Bounds().Dx() != 4 || decoded.Bounds().Dy() != 4 {
+				t.Fatalf("decoded %s poster size = %dx%d, want 4x4", tt.mime, decoded.Bounds().Dx(), decoded.Bounds().Dy())
+			}
+		})
+
+		t.Run("streams at least one frame for "+tt.name+" playback", func(t *testing.T) {
+			path := writeFFmpegVideoFixturePath(t, tt.ext)
+			frameCount := 0
+			err := streamVideoFrames(context.Background(), path, watcherVideoMaxDimension, false, func(img image.Image) {
+				if img != nil {
+					frameCount++
+				}
+			})
+			if err != nil {
+				t.Fatalf("streamVideoFrames(%s) error = %v", tt.ext, err)
+			}
+			if frameCount == 0 {
+				t.Fatalf("frameCount = 0, want at least one frame for %s", tt.ext)
+			}
+		})
 	}
 }
 
@@ -1127,6 +1231,86 @@ func TestUpdateActionStateEnablesPTRSyncWhenDisabledButAvailable(t *testing.T) {
 	}
 }
 
+func TestShouldPrefetchTileMetadata(t *testing.T) {
+	t.Run("skips selected file", func(t *testing.T) {
+		p := &prototype{selectedFileID: 7}
+		if p.shouldPrefetchTileMetadata(7) {
+			t.Fatal("shouldPrefetchTileMetadata(selected) = true, want false")
+		}
+	})
+
+	t.Run("skips prefetch while ptr sync is running", func(t *testing.T) {
+		p := &prototype{
+			ptrStatusLoaded: true,
+			ptrStatus: coreptrsync.Status{
+				Phase:     coreptrsync.PhaseSyncing,
+				IsRunning: true,
+			},
+		}
+		if p.shouldPrefetchTileMetadata(9) {
+			t.Fatal("shouldPrefetchTileMetadata(ptr running) = true, want false")
+		}
+	})
+
+	t.Run("allows non-selected prefetch when ptr is idle", func(t *testing.T) {
+		p := &prototype{
+			selectedFileID:  7,
+			ptrStatusLoaded: true,
+			ptrStatus: coreptrsync.Status{
+				Phase:     coreptrsync.PhaseIdle,
+				IsRunning: false,
+			},
+		}
+		if !p.shouldPrefetchTileMetadata(9) {
+			t.Fatal("shouldPrefetchTileMetadata(idle) = false, want true")
+		}
+	})
+
+	t.Run("allows prefetch when ptr status has not loaded yet", func(t *testing.T) {
+		p := &prototype{selectedFileID: 7}
+		if !p.shouldPrefetchTileMetadata(9) {
+			t.Fatal("shouldPrefetchTileMetadata(unloaded status) = false, want true")
+		}
+	})
+}
+
+func TestEnsureTileMetadataSkipsSelectedAndPTRRunning(t *testing.T) {
+	item := daemonclient.RecentItem{FileID: 11}
+
+	t.Run("selected file is never queued for tile prefetch", func(t *testing.T) {
+		p := &prototype{
+			client:            daemonclient.New(),
+			connected:         true,
+			selectedFileID:    item.FileID,
+			tileMetadataCache: map[int64]daemonclient.FileMetadata{},
+			tileMetadataLoads: map[int64]struct{}{},
+		}
+
+		p.ensureTileMetadata(item)
+
+		if len(p.tileMetadataLoads) != 0 {
+			t.Fatalf("len(tileMetadataLoads) = %d, want 0", len(p.tileMetadataLoads))
+		}
+	})
+
+	t.Run("ptr sync blocks tile prefetch queueing", func(t *testing.T) {
+		p := &prototype{
+			client:            daemonclient.New(),
+			connected:         true,
+			ptrStatusLoaded:   true,
+			ptrStatus:         coreptrsync.Status{Phase: coreptrsync.PhaseSyncing, IsRunning: true},
+			tileMetadataCache: map[int64]daemonclient.FileMetadata{},
+			tileMetadataLoads: map[int64]struct{}{},
+		}
+
+		p.ensureTileMetadata(item)
+
+		if len(p.tileMetadataLoads) != 0 {
+			t.Fatalf("len(tileMetadataLoads) = %d, want 0", len(p.tileMetadataLoads))
+		}
+	})
+}
+
 func TestIsDaemonCapableSort(t *testing.T) {
 	if !isDaemonCapableSort(gallerySortNewest) {
 		t.Error("expected gallerySortNewest to be daemon capable")
@@ -1423,4 +1607,87 @@ func assertRecentItemOrder(t *testing.T, items []daemonclient.RecentItem, want [
 			t.Fatalf("items[%d].FileID = %d, want %d", index, items[index].FileID, fileID)
 		}
 	}
+}
+
+func writeFFmpegPreviewFixture(t *testing.T, ext string) []byte {
+	t.Helper()
+
+	dir := t.TempDir()
+	inputPath := filepath.Join(dir, "input.png")
+	outputPath := filepath.Join(dir, "output"+ext)
+
+	file, err := os.Create(inputPath)
+	if err != nil {
+		t.Fatalf("Create(input.png) error = %v", err)
+	}
+	imageData := image.NewRGBA(image.Rect(0, 0, 4, 4))
+	for y := 0; y < 4; y++ {
+		for x := 0; x < 4; x++ {
+			imageData.Set(x, y, color.RGBA{R: 25, G: 50, B: 75, A: 255})
+		}
+	}
+	if err := png.Encode(file, imageData); err != nil {
+		file.Close()
+		t.Fatalf("png.Encode(input) error = %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("Close(input.png) error = %v", err)
+	}
+
+	cmd := exec.Command("ffmpeg", "-nostdin", "-v", "error", "-y", "-i", inputPath, outputPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg convert %q error = %v\n%s", ext, err, string(output))
+	}
+
+	payload, err := os.ReadFile(outputPath)
+	if err != nil {
+		t.Fatalf("ReadFile(output%s) error = %v", ext, err)
+	}
+
+	return payload
+}
+
+func writeFFmpegVideoPreviewFixture(t *testing.T, ext string) []byte {
+	t.Helper()
+	path := writeFFmpegVideoFixturePath(t, ext)
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(video output%s) error = %v", ext, err)
+	}
+
+	return payload
+}
+
+func writeFFmpegVideoFixturePath(t *testing.T, ext string) string {
+	t.Helper()
+
+	dir := t.TempDir()
+	outputPath := filepath.Join(dir, "output"+ext)
+	args := []string{
+		"ffmpeg",
+		"-nostdin",
+		"-v", "error",
+		"-y",
+		"-f", "lavfi",
+		"-i", "color=c=#336699:s=4x4:d=1",
+	}
+	switch ext {
+	case ".webm":
+		args = append(args, "-c:v", "libvpx-vp9", "-pix_fmt", "yuv420p")
+	case ".avi":
+		args = append(args, "-c:v", "mpeg4", "-pix_fmt", "yuv420p")
+	case ".flv":
+		args = append(args, "-c:v", "flv", "-pix_fmt", "yuv420p")
+	case ".wmv":
+		args = append(args, "-c:v", "wmv2", "-pix_fmt", "yuv420p")
+	default:
+		args = append(args, "-c:v", "libx264", "-pix_fmt", "yuv420p")
+	}
+	args = append(args, outputPath)
+	cmd := exec.Command(args[0], args[1:]...)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg video fixture %q error = %v\n%s", ext, err, string(output))
+	}
+
+	return outputPath
 }

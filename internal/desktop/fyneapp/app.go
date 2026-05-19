@@ -12,6 +12,7 @@ import (
 	_ "image/gif"
 	_ "image/jpeg"
 	_ "image/png"
+	"log/slog"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -28,41 +29,49 @@ import (
 	"fyne.io/fyne/v2/theme"
 	"fyne.io/fyne/v2/widget"
 
+	coredownloader "github.com/official-elinas/hydrus-go/internal/core/downloader"
+	"github.com/official-elinas/hydrus-go/internal/core/clientsessions"
 	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
+	"github.com/official-elinas/hydrus-go/internal/core/mimes"
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
 	"github.com/official-elinas/hydrus-go/internal/desktop/daemonclient"
+	"github.com/official-elinas/hydrus-go/internal/media/ffmpegutil"
+	_ "golang.org/x/image/bmp"
+	_ "golang.org/x/image/tiff"
+	_ "golang.org/x/image/webp"
 )
 
 const (
-	prefsDaemonURLKey         = "daemon_url"
-	prefsAccessKeyKey         = "access_key"
-	recentPageLimit           = 120
-	recentLoadTick            = 200 * time.Millisecond
-	ptrPollTick               = time.Second
-	ptrPollErrorLimit         = 3
-	previewByteLimit          = 16 << 20
-	previewPixelLimit         = 16_000_000
-	previewMaxDimension       = 8192
-	gridThumbnailMaxDimension = 256
-	watcherByteLimit          = 64 << 20
-	watcherPixelLimit         = 64_000_000
-	watcherMaxDimension       = 16384
-	tagSuggestionLimit        = 20
-	defaultDaemonURL          = "http://127.0.0.1:45869"
-	desktopWindowTitle        = "hydrus-go curation cockpit"
-	desktopHeaderTitle        = "Hydrus Go"
-	desktopHeaderSubtitle     = "Daemon-backed browse, import, search, and PTR"
-	desktopIntroText          = "Daemon-first cockpit for validating Hydrus workflows through hydrusd."
-	defaultStatusText         = "Ready. Connect to hydrusd to start validation."
-	defaultMetadataText       = "Select a file from the grid to inspect daemon-backed metadata."
-	defaultPreviewText        = "Select an image to preview."
-	defaultTagsText           = "Select a file to inspect tag metadata."
-	gallerySortNewest         = "Date: newest"
-	gallerySortOldest         = "Date: oldest"
-	gallerySortNameAZ         = "Name: A–Z"
-	gallerySortNameZA         = "Name: Z–A"
-	gallerySortSizeDesc       = "Size: largest"
-	gallerySortSizeAsc        = "Size: smallest"
+	prefsDaemonURLKey           = "daemon_url"
+	prefsAccessKeyKey           = "access_key"
+	recentPageLimit             = 120
+	recentLoadTick              = 200 * time.Millisecond
+	ptrPollTick                 = time.Second
+	ptrPollErrorLimit           = 3
+	previewByteLimit            = 16 << 20
+	previewPixelLimit           = 16_000_000
+	previewMaxDimension         = 8192
+	gridThumbnailMaxDimension   = 256
+	tileMetadataConcurrentLimit = 4
+	watcherByteLimit            = 64 << 20
+	watcherPixelLimit           = 64_000_000
+	watcherMaxDimension         = 16384
+	tagSuggestionLimit          = 20
+	defaultDaemonURL            = "http://127.0.0.1:45869"
+	desktopWindowTitle          = "hydrus-go curation cockpit"
+	desktopHeaderTitle          = "Hydrus Go"
+	desktopHeaderSubtitle       = "Daemon-backed browse, import, search, and PTR"
+	desktopIntroText            = "Daemon-first cockpit for validating Hydrus workflows through hydrusd."
+	defaultStatusText           = "Ready. Connect to hydrusd to start validation."
+	defaultMetadataText         = "Select a file from the grid to inspect daemon-backed metadata."
+	defaultPreviewText          = "Select an image or video to preview."
+	defaultTagsText             = "Select a file to inspect tag metadata."
+	gallerySortNewest           = "Date: newest"
+	gallerySortOldest           = "Date: oldest"
+	gallerySortNameAZ           = "Name: A–Z"
+	gallerySortNameZA           = "Name: Z–A"
+	gallerySortSizeDesc         = "Size: largest"
+	gallerySortSizeAsc          = "Size: smallest"
 )
 
 var gallerySortModes = []string{
@@ -127,7 +136,7 @@ type prototype struct {
 	ptrStatusLabel    *widget.Label
 	ptrHeadlineLabel  *widget.Label
 	ptrPendingLabel   *widget.Label
-	ptrProgressBar    *widget.ProgressBarInfinite
+	ptrProgressBar    *widget.ProgressBar
 	queueList         *widget.List
 	gridHost          *fyne.Container
 	gridWrap          *widget.GridWrap
@@ -157,6 +166,7 @@ type prototype struct {
 	thumbnailCacheM       sync.Mutex
 	tileMetadataCache     map[int64]daemonclient.FileMetadata
 	tileMetadataLoads     map[int64]struct{}
+	tileMetadataTagLoads  map[int64]struct{}
 	tileMetadataGen       uint64
 	tileMetadataMu        sync.Mutex
 	previewRequestID      uint64
@@ -174,6 +184,11 @@ type prototype struct {
 	importQueue        []importQueueEntry
 	importQueueRunning bool
 	selectedQueueIndex int
+
+	sessions        []clientsessions.Session
+	activeSessionID int64
+	sessionTabs     *container.DocTabs
+	tabSwitching    bool
 }
 
 type connectionSnapshot struct {
@@ -203,6 +218,7 @@ func newPrototype() *prototype {
 		thumbnailLoads:       map[int64]struct{}{},
 		tileMetadataCache:    map[int64]daemonclient.FileMetadata{},
 		tileMetadataLoads:    map[int64]struct{}{},
+		tileMetadataTagLoads: map[int64]struct{}{},
 	}
 
 	p.connectionLabel = widget.NewLabel("")
@@ -231,10 +247,10 @@ func newPrototype() *prototype {
 	p.statusBarLabel.Wrapping = fyne.TextTruncate
 	p.ptrHeadlineLabel = widget.NewLabelWithStyle("PTR sync: offline", fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
 	p.ptrStatusLabel = widget.NewLabel("PTR sync status: offline")
-	p.ptrStatusLabel.Wrapping = fyne.TextTruncate
+	p.ptrStatusLabel.Wrapping = fyne.TextWrapWord
 	p.ptrPendingLabel = widget.NewLabel("Pending PTR mappings: offline")
-	p.ptrPendingLabel.Wrapping = fyne.TextTruncate
-	p.ptrProgressBar = widget.NewProgressBarInfinite()
+	p.ptrPendingLabel.Wrapping = fyne.TextWrapWord
+	p.ptrProgressBar = widget.NewProgressBar()
 	p.ptrProgressBar.Hide()
 	p.queueList = widget.NewList(
 		p.importQueueLength,
@@ -270,6 +286,27 @@ func newPrototype() *prototype {
 	p.searchSuggestionsList.HideSeparators = true
 	p.searchSuggestionsList.Hide()
 	p.gridHost = container.NewMax()
+	p.sessionTabs = container.NewDocTabs()
+	p.sessionTabs.OnClosed = func(tab *container.TabItem) {
+		for _, s := range p.sessions {
+			if s.Name == tab.Text {
+				p.closeSearchSession(s)
+				return
+			}
+		}
+	}
+	p.sessionTabs.OnSelected = func(tab *container.TabItem) {
+		if p.tabSwitching {
+			return
+		}
+		for _, s := range p.sessions {
+			if s.Name == tab.Text {
+				p.activateSession(s)
+				return
+			}
+		}
+	}
+	p.sessionTabs.SetTabLocation(container.TabLocationTop)
 
 	p.connectButton = widget.NewButton("Connect", p.showConnectDialog)
 	p.refreshButton = widget.NewButton("Refresh", func() {
@@ -284,6 +321,7 @@ func newPrototype() *prototype {
 	p.searchEntry.OnChanged = func(value string) {
 		p.galleryFilterQuery = strings.TrimSpace(value)
 		p.refreshSearchSuggestions()
+		p.persistActiveSession()
 		if p.galleryUsesDaemonSearch() {
 			p.reloadGallery(p.selectedFileID, "Updated library search results from hydrusd.")
 			return
@@ -298,6 +336,7 @@ func newPrototype() *prototype {
 
 		oldMode := p.gallerySortMode
 		p.gallerySortMode = value
+		p.persistActiveSession()
 
 		if p.galleryUsesDaemonSearch() || isDaemonCapableSort(oldMode) || isDaemonCapableSort(value) {
 			p.reloadGallery(p.selectedFileID, "Updated library sort from hydrusd.")
@@ -635,7 +674,7 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		widget.NewLabelWithStyle("Sort grid", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		p.gallerySortSelect,
 		p.searchHintLabel,
-		p.searchSuggestionsList,
+		newMinSizeBox(p.searchSuggestionsList, fyne.NewSize(0, 200)),
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Import queue", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		queueHelp,
@@ -674,7 +713,8 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		leftSplit,
 	)
 
-	galleryDetailSplit := container.NewHSplit(container.NewPadded(p.gridHost), detailPaneHost)
+	galleryWithTabs := container.NewBorder(p.sessionTabs, nil, nil, nil, container.NewPadded(p.gridHost))
+	galleryDetailSplit := container.NewHSplit(galleryWithTabs, detailPaneHost)
 	galleryDetailSplit.SetOffset(0.50)
 
 	mainSplit := container.NewHSplit(queuePane, galleryDetailSplit)
@@ -718,6 +758,7 @@ func (p *prototype) buildMainMenu() *fyne.MainMenu {
 	)
 
 	pagesMenu := fyne.NewMenu("Pages",
+		fyne.NewMenuItem("New Tab", p.newSearchSession),
 		fyne.NewMenuItem("Reload Current View", func() {
 			p.reloadGallery(p.selectedFileID, "Refreshed the current library view from hydrusd.")
 		}),
@@ -843,13 +884,19 @@ func (p *prototype) showPTRWindow() {
 		compactControlRow(p.ptrRefreshButton, p.ptrSyncButton),
 		nil,
 		nil,
-		container.NewPadded(container.NewVBox(
-			p.ptrHeadlineLabel,
-			p.ptrProgressBar,
-			widget.NewSeparator(),
-			p.ptrStatusLabel,
-			widget.NewSeparator(),
-			p.ptrPendingLabel,
+		container.NewPadded(container.NewBorder(
+			container.NewVBox(
+				p.ptrHeadlineLabel,
+				p.ptrProgressBar,
+				widget.NewSeparator(),
+			),
+			container.NewVBox(
+				widget.NewSeparator(),
+				p.ptrPendingLabel,
+			),
+			nil,
+			nil,
+			container.NewVScroll(p.ptrStatusLabel),
 		)),
 	)
 
@@ -904,7 +951,7 @@ func (p *prototype) showEditTagsDialog() {
 		suggestionList.UnselectAll()
 	}
 
-	suggestionHint := widget.NewLabel("Suggestions come from the currently loaded tags for this file.")
+	suggestionHint := widget.NewLabel("Type a tag prefix to search the PTR tag repository.")
 	suggestionHint.Wrapping = fyne.TextWrapWord
 
 	statusLabel := widget.NewLabel("Load current metadata to inspect tags before staging pending PTR mappings.")
@@ -921,15 +968,11 @@ func (p *prototype) showEditTagsDialog() {
 	commitButton.Disable()
 
 	suggestions := []string{}
-	localSuggestions := []string{}
+	existingTags := map[string]struct{}{}
 	activeSuggestionRequestID := uint64(0)
-	renderSuggestions := func(next []string) {
+	renderSuggestions := func(next []string, hint string) {
 		suggestions = append([]string(nil), next...)
-		if len(suggestions) == 0 {
-			suggestionHint.SetText("No local suggestions are available for the selected file yet.")
-		} else {
-			suggestionHint.SetText("Click a suggestion to add it to the staging input.")
-		}
+		suggestionHint.SetText(hint)
 
 		suggestionList.Length = func() int { return len(suggestions) }
 		suggestionList.UpdateItem = func(id widget.ListItemID, item fyne.CanvasObject) {
@@ -945,6 +988,7 @@ func (p *prototype) showEditTagsDialog() {
 			button.SetText(tag)
 			button.OnTapped = func() {
 				entry.SetText(appendTagEditorInput(entry.Text, tag))
+				entry.FocusGained()
 			}
 			button.Enable()
 		}
@@ -954,15 +998,14 @@ func (p *prototype) showEditTagsDialog() {
 	refreshSuggestions := func() {
 		prefix := currentTagEditorPrefix(entry.Text)
 		if prefix == "" {
-			renderSuggestions(localSuggestions)
+			renderSuggestions(nil, "Type a tag prefix to search the PTR tag repository.")
 			return
 		}
 
-		filteredLocal := filterTagSuggestions(localSuggestions, prefix)
 		activeSuggestionRequestID++
 		requestID := activeSuggestionRequestID
 
-		go func(connection connectionSnapshot, prefix string, filteredLocal []string, requestID uint64) {
+		go func(connection connectionSnapshot, prefix string, existing map[string]struct{}, requestID uint64) {
 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 			defer cancel()
 
@@ -974,14 +1017,25 @@ func (p *prototype) showEditTagsDialog() {
 
 				if err != nil {
 					if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
-						renderSuggestions(filteredLocal)
+						renderSuggestions(nil, "Autocomplete unavailable. Enter tags manually.")
 					}
 					return
 				}
 
-				renderSuggestions(mergeTagSuggestions(filteredLocal, remoteSuggestions))
+				filtered := remoteSuggestions[:0]
+				for _, t := range remoteSuggestions {
+					if _, already := existing[strings.TrimSpace(t)]; !already {
+						filtered = append(filtered, t)
+					}
+				}
+
+				if len(filtered) == 0 {
+					renderSuggestions(nil, fmt.Sprintf("No new tags matching %q.", prefix))
+				} else {
+					renderSuggestions(filtered, fmt.Sprintf("%d suggestion(s) for %q — click to stage.", len(filtered), prefix))
+				}
 			})
-		}(connection, prefix, filteredLocal, requestID)
+		}(connection, prefix, existingTags, requestID)
 	}
 
 	updateStageButton := func() {
@@ -1030,8 +1084,8 @@ func (p *prototype) showEditTagsDialog() {
 					statusLabel.SetText("Could not load metadata from hydrusd.")
 					metadataLabel.SetText("Could not load selected-file metadata from hydrusd.\n\n" + err.Error())
 					tagsLabel.SetText("Could not load tag metadata from hydrusd.")
-					localSuggestions = nil
-					renderSuggestions(nil)
+					existingTags = map[string]struct{}{}
+					renderSuggestions(nil, "Type a tag prefix to search the PTR tag repository.")
 					setBusy(false)
 					commitButton.Disable()
 					return
@@ -1039,7 +1093,7 @@ func (p *prototype) showEditTagsDialog() {
 
 				metadataLabel.SetText(formatMetadataDetails(metadata))
 				tagsLabel.SetText(formatTagMetadata(metadata))
-				localSuggestions = collectTagEditorSuggestions(metadata)
+				existingTags = collectExistingTagSet(metadata)
 				refreshSuggestions()
 				statusLabel.SetText("Loaded selected-file metadata. Stage tags to create pending PTR mappings or commit existing pending mappings.")
 				setBusy(false)
@@ -1157,11 +1211,12 @@ func (p *prototype) showEditTagsDialog() {
 				nil,
 				nil,
 				nil,
-				container.NewVBox(
-					entry,
-					widget.NewSeparator(),
-					suggestionHint,
-					container.NewVScroll(suggestionList),
+				container.NewBorder(
+					container.NewVBox(entry, widget.NewSeparator(), suggestionHint, widget.NewSeparator()),
+					nil,
+					nil,
+					nil,
+					suggestionList,
 				),
 			),
 		)),
@@ -1300,6 +1355,7 @@ func (p *prototype) connectToDaemon(baseURL string, accessKey string) {
 			p.startImportQueueProcessor()
 			p.setStatus(fmt.Sprintf("Connected to hydrusd and loaded %d recent files.", len(page.Items)))
 			p.fetchPTRStatus()
+			go p.loadSearchSessions(candidate)
 		})
 	}(attemptID, wasConnected)
 }
@@ -1371,7 +1427,11 @@ func (p *prototype) showURLImportDialog() {
 	referralEntry := widget.NewEntry()
 	referralEntry.SetPlaceHolder("Optional referral URL")
 
-	statusLabel := widget.NewLabel("Download a direct file URL and import it through hydrusd.")
+	modeOptions := []string{"Hydownloader queue", "Direct file import"}
+	modeSelect := widget.NewSelect(modeOptions, nil)
+	modeSelect.SetSelected(modeOptions[0])
+
+	statusLabel := widget.NewLabel("Queue a gallery/post URL through hydownloader, or import one direct file URL through hydrusd.")
 	statusLabel.Wrapping = fyne.TextWrapWord
 
 	window := p.app.NewWindow("Import URL")
@@ -1379,6 +1439,7 @@ func (p *prototype) showURLImportDialog() {
 	window.SetPadded(true)
 
 	form := widget.NewForm(
+		widget.NewFormItem("Mode", modeSelect),
 		widget.NewFormItem("URL", urlEntry),
 		widget.NewFormItem("Referral URL", referralEntry),
 	)
@@ -1391,12 +1452,39 @@ func (p *prototype) showURLImportDialog() {
 			return
 		}
 
-		statusLabel.SetText("Importing URL through hydrusd...")
+		selectedMode := modeSelect.Selected
+		if selectedMode == modeOptions[0] {
+			statusLabel.SetText("Queueing URL through hydownloader...")
+		} else {
+			statusLabel.SetText("Importing URL through hydrusd...")
+		}
 		form.Disable()
 
-		go func(connection connectionSnapshot, rawURL string, referralURL string) {
+		go func(connection connectionSnapshot, rawURL string, referralURL string, selectedMode string) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 			defer cancel()
+
+			if selectedMode == modeOptions[0] {
+				err := connection.client.QueueDownloaderURL(ctx, coredownloader.URLRequest{URL: rawURL})
+				fyne.Do(func() {
+					if !p.isCurrentOperation(connection) {
+						window.Close()
+						return
+					}
+
+					if err != nil {
+						form.Enable()
+						statusLabel.SetText("Hydownloader queue request failed.")
+						dialog.ShowError(err, window)
+						return
+					}
+
+					message := "Queued URL through hydownloader. Files will appear after hydownloader finishes downloading and autoimporting them."
+					p.setStatus(message)
+					window.Close()
+				})
+				return
+			}
 
 			result, err := connection.client.ImportURL(ctx, fileimport.URLRequest{
 				URL:         rawURL,
@@ -1420,7 +1508,7 @@ func (p *prototype) showURLImportDialog() {
 				p.setStatus(fmt.Sprintf("Imported URL into file_id %d through hydrusd.", result.FileID))
 				window.Close()
 			})
-		}(connection, trimmedURL, strings.TrimSpace(referralEntry.Text))
+		}(connection, trimmedURL, strings.TrimSpace(referralEntry.Text), selectedMode)
 	}
 	form.OnCancel = func() {
 		window.Close()
@@ -2157,6 +2245,7 @@ func (p *prototype) applyRecentItems(items []daemonclient.RecentItem, preferredF
 		p.tileMetadataGen++
 		p.tileMetadataCache = map[int64]daemonclient.FileMetadata{}
 		p.tileMetadataLoads = map[int64]struct{}{}
+		p.tileMetadataTagLoads = map[int64]struct{}{}
 		p.tileMetadataMu.Unlock()
 	}
 
@@ -2263,7 +2352,9 @@ func (p *prototype) ensureGridWrap() {
 				resource,
 				overlay,
 				recentItem.FileID == p.selectedFileID,
-				nil,
+				func() {
+					p.selectFile(recentItem.FileID)
+				},
 				func() {
 					p.selectFile(recentItem.FileID)
 					p.openNativeWatcherForFile(recentItem.FileID)
@@ -2274,7 +2365,7 @@ func (p *prototype) ensureGridWrap() {
 				p.ensurePreviewResource(recentItem)
 			}
 
-			if !hasMetadata {
+			if !hasMetadata && gallerySortRequiresMetadata(p.gallerySortMode) {
 				p.ensureTileMetadata(recentItem)
 			}
 		},
@@ -2371,8 +2462,8 @@ func (p *prototype) selectFile(fileID int64) {
 	p.renderGrid()
 	p.updateActionState()
 	p.metadataLabel.SetText("Loading selected-file metadata from hydrusd...")
-	p.setRightTagsText("Loading tag metadata from hydrusd...")
-	p.setLeftTagsText("Loading selected-file tags from hydrusd...")
+	p.setRightTagsText("Loading selected-file tag metadata from hydrusd...")
+	p.setLeftTagsText("Loading selected-file tag metadata from hydrusd...")
 	p.loadSelectedPreview(fileID)
 	p.loadSelectedMetadata(fileID)
 }
@@ -2409,7 +2500,7 @@ func (p *prototype) loadSelectedPreview(fileID int64) {
 		defer cancel()
 		defer p.finishPreviewRequest(requestID)
 
-		payload, err := connection.client.FetchFileContent(ctx, item, previewByteLimit)
+		payload, err := connection.client.FetchSelectedPreview(ctx, item)
 		if err != nil {
 			if ctx.Err() != nil || !p.isCurrentPreviewRequest(requestID) {
 				return
@@ -2436,7 +2527,8 @@ func (p *prototype) loadSelectedPreview(fileID int64) {
 			return
 		}
 
-		if err := validateSelectedPreviewPayload(payload); err != nil {
+		resource, err := buildSelectedPreviewResource(ctx, payload, item.MIME, item.FileID)
+		if err != nil {
 			fyne.Do(func() {
 				if !p.isCurrentOperation(connection) || !p.isCurrentPreviewRequest(requestID) || p.selectedFileID != item.FileID {
 					return
@@ -2446,11 +2538,6 @@ func (p *prototype) loadSelectedPreview(fileID int64) {
 			})
 			return
 		}
-
-		resource := fyne.NewStaticResource(
-			fmt.Sprintf("file-%d-original", item.FileID),
-			payload,
-		)
 		p.storeSelectedPreview(item, resource)
 
 		fyne.Do(func() {
@@ -2469,12 +2556,40 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 		return
 	}
 
+	if metadata, ok := p.lookupTileMetadata(fileID); ok {
+		slog.Debug("loadSelectedMetadata: cache hit", "file_id", fileID, "has_tags", len(metadata.Tags) > 0)
+		p.metadataLabel.SetText(formatMetadataDetails(metadata))
+		if len(metadata.Tags) > 0 {
+			p.setRightTagsMetadata(metadata)
+			p.setLeftTagsMetadata(metadata)
+		} else {
+			p.tileMetadataMu.Lock()
+			_, alreadyLoading := p.tileMetadataTagLoads[fileID]
+			if !alreadyLoading {
+				p.tileMetadataTagLoads[fileID] = struct{}{}
+			}
+			p.tileMetadataMu.Unlock()
+			if !alreadyLoading {
+				slog.Debug("loadSelectedMetadata: dispatching tag load", "file_id", fileID)
+				go p.loadSelectedTags(connection, fileID)
+			} else {
+				slog.Debug("loadSelectedMetadata: tag load already in progress", "file_id", fileID)
+			}
+		}
+		p.renderGrid()
+		p.refreshSearchSuggestions()
+		return
+	}
+
+	slog.Debug("loadSelectedMetadata: cache miss, fetching basic metadata", "file_id", fileID)
+
 	go func(connection connectionSnapshot, selectedFileID int64) {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 
-		metadata, err := connection.client.GetFileMetadata(ctx, selectedFileID)
+		metadata, err := connection.client.GetBasicFileMetadata(ctx, selectedFileID)
 		if err != nil {
+			slog.Warn("loadSelectedMetadata: basic metadata fetch failed", "file_id", selectedFileID, "err", err)
 			fyne.Do(func() {
 				if !p.isCurrentOperation(connection) {
 					return
@@ -2485,11 +2600,13 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 				}
 
 				p.metadataLabel.SetText("Could not load metadata from hydrusd.\n\n" + err.Error())
-				p.setRightTagsText("Could not load tag metadata from hydrusd.")
-				p.setLeftTagsText("Could not load selected-file tags from hydrusd.")
+				p.setRightTagsText("Could not load selected-file tag metadata from hydrusd.")
+				p.setLeftTagsText("Could not load selected-file tag metadata from hydrusd.")
 			})
 			return
 		}
+
+		slog.Debug("loadSelectedMetadata: basic metadata fetched", "file_id", selectedFileID)
 
 		fyne.Do(func() {
 			if !p.isCurrentOperation(connection) {
@@ -2501,16 +2618,94 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 			}
 
 			p.tileMetadataMu.Lock()
-			p.tileMetadataCache[selectedFileID] = metadata
+			cached := p.tileMetadataCache[selectedFileID]
+			cached.FileID = metadata.FileID
+			cached.Hash = metadata.Hash
+			cached.MIME = metadata.MIME
+			cached.Size = metadata.Size
+			cached.Width = metadata.Width
+			cached.Height = metadata.Height
+			cached.IsLocal = metadata.IsLocal
+			cached.IsTrashed = metadata.IsTrashed
+			cached.IsDeleted = metadata.IsDeleted
+			p.tileMetadataCache[selectedFileID] = cached
 			p.tileMetadataMu.Unlock()
 
-			p.metadataLabel.SetText(formatMetadataDetails(metadata))
-			p.setRightTagsMetadata(metadata)
-			p.setLeftTagsMetadata(metadata)
+			p.metadataLabel.SetText(formatMetadataDetails(cached))
+			if len(cached.Tags) > 0 {
+				p.setRightTagsMetadata(cached)
+				p.setLeftTagsMetadata(cached)
+			}
 			p.renderGrid()
 			p.refreshSearchSuggestions()
 		})
+
+		if p.selectedFileID != selectedFileID {
+			slog.Debug("loadSelectedMetadata: file deselected before tag load, skipping", "file_id", selectedFileID)
+			return
+		}
+
+		p.tileMetadataMu.Lock()
+		_, alreadyLoading := p.tileMetadataTagLoads[selectedFileID]
+		if !alreadyLoading {
+			p.tileMetadataTagLoads[selectedFileID] = struct{}{}
+		}
+		p.tileMetadataMu.Unlock()
+		if !alreadyLoading {
+			slog.Debug("loadSelectedMetadata: dispatching tag load", "file_id", selectedFileID)
+			go p.loadSelectedTags(connection, selectedFileID)
+		} else {
+			slog.Debug("loadSelectedMetadata: tag load already in progress", "file_id", selectedFileID)
+		}
 	}(connection, fileID)
+}
+
+func (p *prototype) loadSelectedTags(connection connectionSnapshot, fileID int64) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	defer func() {
+		p.tileMetadataMu.Lock()
+		delete(p.tileMetadataTagLoads, fileID)
+		p.tileMetadataMu.Unlock()
+	}()
+
+	slog.Debug("loadSelectedTags: fetching tag metadata", "file_id", fileID)
+
+	metadata, err := connection.client.GetFileMetadata(ctx, fileID)
+	if err != nil {
+		if ctx.Err() != nil {
+			slog.Debug("loadSelectedTags: context cancelled", "file_id", fileID)
+			return
+		}
+		slog.Warn("loadSelectedTags: fetch failed", "file_id", fileID, "err", err)
+		fyne.Do(func() {
+			if !p.isCurrentOperation(connection) || p.selectedFileID != fileID {
+				return
+			}
+			p.setRightTagsText("Could not load selected-file tag metadata from hydrusd.")
+			p.setLeftTagsText("Could not load selected-file tag metadata from hydrusd.")
+		})
+		return
+	}
+
+	slog.Debug("loadSelectedTags: got tags", "file_id", fileID, "tag_count", len(metadata.Tags))
+
+	p.tileMetadataMu.Lock()
+	cached := p.tileMetadataCache[fileID]
+	cached.Tags = metadata.Tags
+	p.tileMetadataCache[fileID] = cached
+	p.tileMetadataMu.Unlock()
+
+	fyne.Do(func() {
+		if !p.isCurrentOperation(connection) || p.selectedFileID != fileID {
+			slog.Debug("loadSelectedTags: skipping UI update, file no longer selected", "file_id", fileID, "selected", p.selectedFileID)
+			return
+		}
+		p.setRightTagsMetadata(cached)
+		p.setLeftTagsMetadata(cached)
+		p.refreshSearchSuggestions()
+	})
 }
 
 func (p *prototype) openNativeWatcherForFile(fileID int64) {
@@ -2525,6 +2720,11 @@ func (p *prototype) openNativeWatcherForFile(fileID int64) {
 	}
 
 	title := fmt.Sprintf("Watcher • file_id %d", item.FileID)
+	if (strings.HasPrefix(strings.ToLower(strings.TrimSpace(item.MIME)), "video/") || strings.TrimSpace(strings.ToLower(item.MIME)) == "video") && supportsNativeVideoPlayback() {
+		p.openNativeVideoWatcherForFile(fileID, item, title)
+		return
+	}
+
 	if message := nativeWatcherFallbackMessage(item.MIME); message != "" {
 		p.presentWatcherWindow(title, newWatcherMessageContent(item.MIME, message))
 		return
@@ -2564,7 +2764,8 @@ func (p *prototype) openNativeWatcherForFile(fileID int64) {
 			return
 		}
 
-		if err := validateNativeWatcherPayload(payload); err != nil {
+		resource, err := buildNativeWatcherResource(ctx, payload, item.MIME, item.FileID)
+		if err != nil {
 			fyne.Do(func() {
 				if !p.isCurrentOperation(connection) || !p.isCurrentWatcherRequest(requestID) {
 					return
@@ -2574,11 +2775,6 @@ func (p *prototype) openNativeWatcherForFile(fileID int64) {
 			})
 			return
 		}
-
-		resource := fyne.NewStaticResource(
-			fmt.Sprintf("file-%d-watcher", item.FileID),
-			payload,
-		)
 
 		fyne.Do(func() {
 			if !p.isCurrentOperation(connection) || !p.isCurrentWatcherRequest(requestID) {
@@ -2916,9 +3112,27 @@ func (p *prototype) clearTileMetadataLoad(fileID int64, generation uint64) {
 	delete(p.tileMetadataLoads, fileID)
 }
 
+func (p *prototype) shouldPrefetchTileMetadata(fileID int64) bool {
+	if fileID <= 0 || fileID == p.selectedFileID {
+		return false
+	}
+
+	p.stateMu.RLock()
+	defer p.stateMu.RUnlock()
+
+	if !p.ptrStatusLoaded {
+		return true
+	}
+
+	return !p.ptrStatus.IsRunning
+}
+
 func (p *prototype) ensureTileMetadata(item daemonclient.RecentItem) {
 	connection := p.currentConnection()
 	if !connection.connected || connection.client == nil {
+		return
+	}
+	if !p.shouldPrefetchTileMetadata(item.FileID) {
 		return
 	}
 
@@ -2933,15 +3147,19 @@ func (p *prototype) ensureTileMetadata(item daemonclient.RecentItem) {
 		p.tileMetadataMu.Unlock()
 		return
 	}
+	if len(p.tileMetadataLoads) >= tileMetadataConcurrentLimit {
+		p.tileMetadataMu.Unlock()
+		return
+	}
 
 	p.tileMetadataLoads[item.FileID] = struct{}{}
 	p.tileMetadataMu.Unlock()
 
 	go func(connection connectionSnapshot, item daemonclient.RecentItem, generation uint64) {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 
-		metadata, err := connection.client.GetFileMetadata(ctx, item.FileID)
+		metadata, err := connection.client.GetBasicFileMetadata(ctx, item.FileID)
 		if err != nil {
 			p.clearTileMetadataLoad(item.FileID, generation)
 			return
@@ -2959,7 +3177,20 @@ func (p *prototype) ensureTileMetadata(item daemonclient.RecentItem) {
 		}
 
 		delete(p.tileMetadataLoads, item.FileID)
-		p.tileMetadataCache[item.FileID] = metadata
+		cached := p.tileMetadataCache[item.FileID]
+		if cached.FileID == 0 {
+			cached.FileID = metadata.FileID
+			cached.Hash = metadata.Hash
+			cached.MIME = metadata.MIME
+			cached.Size = metadata.Size
+			cached.Width = metadata.Width
+			cached.Height = metadata.Height
+			cached.IsLocal = metadata.IsLocal
+			cached.IsTrashed = metadata.IsTrashed
+			cached.IsDeleted = metadata.IsDeleted
+		}
+		cached.Ratings = metadata.Ratings
+		p.tileMetadataCache[item.FileID] = cached
 		p.tileMetadataMu.Unlock()
 
 		fyne.Do(func() {
@@ -3165,7 +3396,7 @@ func newWatcherLoadingContent(mime string) fyne.CanvasObject {
 
 func newWatcherImageContent(item daemonclient.RecentItem, resource fyne.Resource) fyne.CanvasObject {
 	imageViewer := canvas.NewImageFromResource(resource)
-	imageViewer.FillMode = canvas.ImageFillOriginal
+	imageViewer.FillMode = canvas.ImageFillContain
 	imageViewer.ScaleMode = canvas.ImageScaleSmooth
 
 	headline := widget.NewLabelWithStyle(
@@ -3175,9 +3406,9 @@ func newWatcherImageContent(item daemonclient.RecentItem, resource fyne.Resource
 	)
 	headline.Wrapping = fyne.TextTruncate
 
-	footerText := "Original-size image viewer. Resize the window or use mouse wheel / arrow keys to navigate."
+	footerText := "Resizable image viewer. Resize the window or use mouse wheel / arrow keys to navigate."
 	if item.Width != nil && item.Height != nil {
-		footerText = fmt.Sprintf("Original-size image viewer • %dx%d • use mouse wheel / arrow keys to navigate.", *item.Width, *item.Height)
+		footerText = fmt.Sprintf("Resizable image viewer • %dx%d • use mouse wheel / arrow keys to navigate.", *item.Width, *item.Height)
 	}
 	footer := widget.NewLabel(footerText)
 	footer.Wrapping = fyne.TextWrapWord
@@ -3231,28 +3462,91 @@ func (p *prototype) setStatus(text string) {
 }
 
 func supportsSelectedPreviewMime(mime string) bool {
-	switch strings.TrimSpace(strings.ToLower(mime)) {
-	case "image/gif", "image/jpeg", "image/png":
-		return true
-	default:
-		return false
-	}
+	normalized := strings.TrimSpace(strings.ToLower(mime))
+	return strings.HasPrefix(normalized, "image/") || normalized == "image" || strings.HasPrefix(normalized, "video/") || normalized == "video"
 }
 
 func nativeWatcherFallbackMessage(mime string) string {
 	normalized := strings.TrimSpace(strings.ToLower(mime))
-	if supportsSelectedPreviewMime(normalized) {
+	if strings.HasPrefix(normalized, "image/") || normalized == "image" {
 		return ""
 	}
 
-	if strings.HasPrefix(normalized, "video/") {
+	if strings.HasPrefix(normalized, "video/") || normalized == "video" {
+		if supportsNativeVideoPlayback() {
+			return ""
+		}
 		return "Native video playback is not yet bundled in this prototype.\n\nThis build keeps viewing inside the app, but core Fyne does not provide a built-in in-app video player."
 	}
 
 	return fmt.Sprintf("Viewer not available for %s.", mime)
 }
 
+func buildSelectedPreviewResource(ctx context.Context, payload []byte, mime string, fileID int64) (fyne.Resource, error) {
+	return buildBoundedPreviewResource(
+		ctx,
+		payload,
+		mime,
+		fmt.Sprintf("file-%d-original", fileID),
+		previewMaxDimension,
+		previewPixelLimit,
+		true,
+	)
+}
+
+func buildNativeWatcherResource(ctx context.Context, payload []byte, mime string, fileID int64) (fyne.Resource, error) {
+	return buildBoundedPreviewResource(
+		ctx,
+		payload,
+		mime,
+		fmt.Sprintf("file-%d-watcher", fileID),
+		watcherMaxDimension,
+		watcherPixelLimit,
+		false,
+	)
+}
+
+func buildBoundedPreviewResource(ctx context.Context, payload []byte, mime string, name string, maxDimension int, pixelLimit int64, allowVideoPoster bool) (fyne.Resource, error) {
+	normalized := strings.TrimSpace(strings.ToLower(mime))
+	sourceIsVideo := strings.HasPrefix(normalized, "video/") || normalized == "video"
+	if sourceIsVideo && !allowVideoPoster {
+		return nil, fmt.Errorf("video previews require the native watcher playback path")
+	}
+	if !strings.HasPrefix(normalized, "image/") && normalized != "image" && !sourceIsVideo {
+		return nil, fmt.Errorf("viewer not available for %s", mime)
+	}
+
+	if err := validatePreviewPayloadBounds(payload, maxDimension, pixelLimit); err == nil {
+		return fyne.NewStaticResource(name, payload), nil
+	}
+
+	pngPayload, err := ffmpegutil.TranscodeBytesToPNG(
+		ctx,
+		payload,
+		previewInputExtForMime(normalized),
+		maxDimension,
+		sourceIsVideo,
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := validatePreviewPayloadBounds(pngPayload, maxDimension, pixelLimit); err != nil {
+		return nil, err
+	}
+
+	return fyne.NewStaticResource(name, pngPayload), nil
+}
+
 func validateSelectedPreviewPayload(payload []byte) error {
+	return validatePreviewPayloadBounds(payload, previewMaxDimension, previewPixelLimit)
+}
+
+func validateNativeWatcherPayload(payload []byte) error {
+	return validatePreviewPayloadBounds(payload, watcherMaxDimension, watcherPixelLimit)
+}
+
+func validatePreviewPayloadBounds(payload []byte, maxDimension int, pixelLimit int64) error {
 	config, _, err := image.DecodeConfig(bytes.NewReader(payload))
 	if err != nil {
 		return fmt.Errorf("decode image config: %w", err)
@@ -3262,60 +3556,35 @@ func validateSelectedPreviewPayload(payload []byte) error {
 		return fmt.Errorf("decoded image dimensions were invalid")
 	}
 
-	if config.Width > previewMaxDimension || config.Height > previewMaxDimension {
+	if config.Width > maxDimension || config.Height > maxDimension {
 		return fmt.Errorf(
 			"decoded image dimensions %dx%d exceed the preview limit of %dx%d",
 			config.Width,
 			config.Height,
-			previewMaxDimension,
-			previewMaxDimension,
+			maxDimension,
+			maxDimension,
 		)
 	}
 
 	pixels := int64(config.Width) * int64(config.Height)
-	if pixels > previewPixelLimit {
+	if pixels > pixelLimit {
 		return fmt.Errorf(
 			"decoded image dimensions %dx%d exceed the preview limit of %d pixels",
 			config.Width,
 			config.Height,
-			previewPixelLimit,
+			pixelLimit,
 		)
 	}
 
 	return nil
 }
 
-func validateNativeWatcherPayload(payload []byte) error {
-	config, _, err := image.DecodeConfig(bytes.NewReader(payload))
-	if err != nil {
-		return fmt.Errorf("decode image config: %w", err)
+func previewInputExtForMime(mime string) string {
+	if mimeEnum, ok := mimes.FromMIMEType(mime); ok {
+		return mimes.Lookup(mimeEnum).Ext
 	}
 
-	if config.Width <= 0 || config.Height <= 0 {
-		return fmt.Errorf("decoded image dimensions were invalid")
-	}
-
-	if config.Width > watcherMaxDimension || config.Height > watcherMaxDimension {
-		return fmt.Errorf(
-			"decoded image dimensions %dx%d exceed the watcher limit of %dx%d",
-			config.Width,
-			config.Height,
-			watcherMaxDimension,
-			watcherMaxDimension,
-		)
-	}
-
-	pixels := int64(config.Width) * int64(config.Height)
-	if pixels > watcherPixelLimit {
-		return fmt.Errorf(
-			"decoded image dimensions %dx%d exceed the watcher limit of %d pixels",
-			config.Width,
-			config.Height,
-			watcherPixelLimit,
-		)
-	}
-
-	return nil
+	return ""
 }
 
 func formatMetadataDetails(metadata daemonclient.FileMetadata) string {
@@ -3388,44 +3657,43 @@ func formatTagMetadataSegments(metadata daemonclient.FileMetadata) []widget.Rich
 				continue
 			}
 
-			segments = append(
-				segments,
-				&widget.TextSegment{
-					Text:  metadataTagStatusLabel(statusKey) + ": ",
-					Style: widget.RichTextStyleInline,
-				},
-			)
+			segments = append(segments, &widget.TextSegment{
+				Text:  metadataTagStatusLabel(statusKey) + ": ",
+				Style: widget.RichTextStyleInline,
+			})
 
-			for tagIndex, tag := range serviceTags {
-				if tagIndex > 0 {
-					segments = append(
-						segments,
-						&widget.TextSegment{
-							Text:  ", ",
-							Style: widget.RichTextStyleInline,
-						},
-					)
+			type colorRun struct {
+				color fyne.ThemeColorName
+				tags  []string
+			}
+			var runs []colorRun
+			for _, tag := range serviceTags {
+				c := metadataTagColorName(tag)
+				if len(runs) > 0 && runs[len(runs)-1].color == c {
+					runs[len(runs)-1].tags = append(runs[len(runs)-1].tags, tag)
+				} else {
+					runs = append(runs, colorRun{color: c, tags: []string{tag}})
 				}
-
-				segments = append(
-					segments,
-					&widget.TextSegment{
-						Text: tag,
-						Style: widget.RichTextStyle{
-							Inline:    true,
-							ColorName: metadataTagColorName(tag),
-						},
-					},
-				)
 			}
 
-			segments = append(
-				segments,
-				&widget.TextSegment{
-					Text:  "\n",
-					Style: widget.RichTextStyleInline,
-				},
-			)
+			for runIndex, run := range runs {
+				text := strings.Join(run.tags, ", ")
+				if runIndex < len(runs)-1 {
+					text += ", "
+				}
+				segments = append(segments, &widget.TextSegment{
+					Text: text,
+					Style: widget.RichTextStyle{
+						Inline:    true,
+						ColorName: run.color,
+					},
+				})
+			}
+
+			segments = append(segments, &widget.TextSegment{
+				Text:  "\n",
+				Style: widget.RichTextStyleInline,
+			})
 		}
 	}
 
@@ -3630,7 +3898,7 @@ func (p *prototype) fetchPTRStatus() {
 	p.updateActionState()
 
 	go func(connection connectionSnapshot, requestID uint64) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
 		var wg sync.WaitGroup
@@ -3656,6 +3924,12 @@ func (p *prototype) fetchPTRStatus() {
 			}
 
 			if statusErr != nil {
+				if isTransientPTRStatusRequestError(statusErr) {
+					p.setStatus("PTR status refresh timed out. Retrying on next refresh.")
+					p.updateActionState()
+					return
+				}
+
 				p.setPTRVisualState("PTR sync: status fetch failed", false)
 				p.ptrStatusLabel.SetText(fmt.Sprintf("Status fetch failed: %v", statusErr))
 				p.ptrPendingLabel.SetText("Pending PTR mappings: unavailable")
@@ -3696,7 +3970,7 @@ func (p *prototype) triggerPTRSync() {
 	p.updateActionState()
 
 	go func(connection connectionSnapshot, requestID uint64) {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 		defer cancel()
 
 		status, err := connection.client.TriggerPTRSync(ctx)
@@ -3788,6 +4062,10 @@ func (p *prototype) pollPTRStatusUntilSettled(connection connectionSnapshot, req
 			status, err := connection.client.GetPTRStatus(ctx)
 			cancel()
 			if err != nil {
+				if isTransientPTRStatusRequestError(err) {
+					continue
+				}
+
 				consecutiveErrors++
 				shouldContinue := shouldContinuePTRPollingAfterError(consecutiveErrors)
 				fyne.Do(func() {
@@ -3842,7 +4120,16 @@ func (p *prototype) pollPTRStatusUntilSettled(connection connectionSnapshot, req
 }
 
 func (p *prototype) renderPTRStatus(status coreptrsync.Status) {
-	p.setPTRVisualState(ptrHeadlineText(status), status.IsRunning || status.Phase == coreptrsync.PhaseSyncing)
+	running := status.IsRunning || status.Phase == coreptrsync.PhaseSyncing
+	p.setPTRVisualState(ptrHeadlineText(status), running)
+	if running {
+		total := status.DownloadedUpdateCount + status.PendingDownloadCount
+		if total > 0 {
+			p.ptrProgressBar.SetValue(float64(status.DownloadedUpdateCount) / float64(total))
+		} else {
+			p.ptrProgressBar.SetValue(0)
+		}
+	}
 	p.ptrStatusLabel.SetText(formatPTRStatus(status))
 	p.updateActionState()
 }
@@ -3894,11 +4181,10 @@ func (p *prototype) setPTRVisualState(headline string, running bool) {
 	p.ptrHeadlineLabel.SetText(headline)
 	if running {
 		p.ptrProgressBar.Show()
-		p.ptrProgressBar.Start()
 		return
 	}
 
-	p.ptrProgressBar.Stop()
+	p.ptrProgressBar.SetValue(0)
 	p.ptrProgressBar.Hide()
 }
 
@@ -3925,6 +4211,10 @@ func ptrHeadlineText(status coreptrsync.Status) string {
 
 func shouldContinuePTRPollingAfterError(consecutiveErrors int) bool {
 	return consecutiveErrors < ptrPollErrorLimit
+}
+
+func isTransientPTRStatusRequestError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }
 
 func ptrPollingErrorStatusText(err error, consecutiveErrors int) string {
@@ -4536,6 +4826,20 @@ func collectTagEditorSuggestions(metadata daemonclient.FileMetadata) []string {
 
 	sort.Strings(suggestions)
 	return suggestions
+}
+
+func collectExistingTagSet(metadata daemonclient.FileMetadata) map[string]struct{} {
+	set := map[string]struct{}{}
+	for _, service := range metadata.Tags {
+		for _, tags := range metadataTagPreferredTagsByStatus(service) {
+			for _, tag := range tags {
+				if normalized := strings.TrimSpace(tag); normalized != "" {
+					set[normalized] = struct{}{}
+				}
+			}
+		}
+	}
+	return set
 }
 
 func shortCredential(value string) string {

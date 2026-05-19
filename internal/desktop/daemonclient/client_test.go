@@ -12,10 +12,12 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	coredownloader "github.com/official-elinas/hydrus-go/internal/core/downloader"
 	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
 )
@@ -405,6 +407,64 @@ func TestClientMutationRequests(t *testing.T) {
 		}
 	})
 
+	t.Run("gets downloader status through session-backed request", func(t *testing.T) {
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("f", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodGet, "/v1/downloader/status")
+				assertHeader(t, r, "Hydrus-Client-API-Access-Key", "")
+				assertHeader(t, r, "Hydrus-Client-API-Session-Key", "session-downloader")
+				return jsonResponse(t, r, http.StatusOK, map[string]any{
+					"downloader": map[string]any{
+						"enabled": true,
+						"configured": true,
+						"running": true,
+						"autoimport": true,
+						"urls_queued": 3,
+					},
+				}), nil
+			}),
+		)
+		client.sessionKey = "session-downloader"
+
+		status, err := client.GetDownloaderStatus(context.Background())
+		if err != nil {
+			t.Fatalf("GetDownloaderStatus() error = %v", err)
+		}
+		if !status.Running || status.URLsQueued != 3 {
+			t.Fatalf("status = %#v, want running with queued count 3", status)
+		}
+	})
+
+	t.Run("queues downloader URL through session-backed JSON request", func(t *testing.T) {
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("f", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodPost, "/v1/downloader/url")
+				assertHeader(t, r, "Hydrus-Client-API-Access-Key", "")
+				assertHeader(t, r, "Hydrus-Client-API-Session-Key", "session-downloader")
+				assertHeader(t, r, "Content-Type", "application/json")
+
+				var payload map[string]any
+				decodeJSONBody(t, r, &payload)
+				if payload["url"] != "https://example.com/post/1" {
+					t.Fatalf("payload[url] = %v, want https://example.com/post/1", payload["url"])
+				}
+
+				return jsonResponse(t, r, http.StatusOK, map[string]any{"queued": true}), nil
+			}),
+		)
+		client.sessionKey = "session-downloader"
+
+		if err := client.QueueDownloaderURL(context.Background(), coredownloader.URLRequest{URL: "https://example.com/post/1"}); err != nil {
+			t.Fatalf("QueueDownloaderURL() error = %v", err)
+		}
+	})
+
 	t.Run("uploads file through session-backed multipart request", func(t *testing.T) {
 		sourcePath := filepath.Join(t.TempDir(), "upload.png")
 		if err := os.WriteFile(sourcePath, []byte("png-bytes"), 0o644); err != nil {
@@ -586,6 +646,32 @@ func TestClientGenerateGridThumbnail(t *testing.T) {
 		return buf.Bytes()
 	}
 
+	encodeFFmpegStill := func(t *testing.T, ext string) []byte {
+		t.Helper()
+		if _, err := exec.LookPath("ffmpeg"); err != nil {
+			t.Skip("ffmpeg is required for this fallback test")
+		}
+
+		dir := t.TempDir()
+		inputPath := filepath.Join(dir, "input.png")
+		if err := os.WriteFile(inputPath, encodePNG(t, 4), 0o644); err != nil {
+			t.Fatalf("WriteFile(input.png) error = %v", err)
+		}
+
+		outputPath := filepath.Join(dir, "output"+ext)
+		cmd := exec.Command("ffmpeg", "-nostdin", "-v", "error", "-y", "-i", inputPath, outputPath)
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("ffmpeg convert %q error = %v\n%s", ext, err, string(output))
+		}
+
+		payload, err := os.ReadFile(outputPath)
+		if err != nil {
+			t.Fatalf("ReadFile(output%s) error = %v", ext, err)
+		}
+
+		return payload
+	}
+
 	t.Run("rejects items without content URLs", func(t *testing.T) {
 		client := New()
 		_, err := client.GenerateGridThumbnail(context.Background(), RecentItem{FileID: 5}, 64)
@@ -633,6 +719,64 @@ func TestClientGenerateGridThumbnail(t *testing.T) {
 		}
 	})
 
+	t.Run("prefers daemon thumbnail bytes when available", func(t *testing.T) {
+		img := image.NewNRGBA(image.Rect(0, 0, 2, 2))
+		for y := 0; y < 2; y++ {
+			for x := 0; x < 2; x++ {
+				img.Set(x, y, color.NRGBA{R: uint8(40 + x), G: uint8(80 + y), B: 120, A: 255})
+			}
+		}
+		var thumbnailBuf bytes.Buffer
+		if err := png.Encode(&thumbnailBuf, img); err != nil {
+			t.Fatalf("png.Encode() error = %v", err)
+		}
+		thumbnailBytes := thumbnailBuf.Bytes()
+		contentCalls := 0
+
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("9", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				switch r.URL.Path {
+				case "/v1/files/thumbnail":
+					assertMethodAndPath(t, r, http.MethodGet, "/v1/files/thumbnail")
+					assertHeader(t, r, "Hydrus-Client-API-Access-Key", "")
+					assertHeader(t, r, "Hydrus-Client-API-Session-Key", "thumb-session")
+					assertQueryValue(t, r.URL, "file_id", "91")
+					return bytesResponse(r, http.StatusOK, thumbnailBytes), nil
+				case "/v1/files/content":
+					contentCalls++
+					return bytesResponse(r, http.StatusInternalServerError, []byte("should not fetch original")), nil
+				default:
+					t.Fatalf("unexpected path %q", r.URL.Path)
+					return nil, nil
+				}
+			}),
+		)
+		client.sessionKey = "thumb-session"
+
+		payload, err := client.GenerateGridThumbnail(context.Background(), RecentItem{
+			FileID:       91,
+			ContentURL:   "/v1/files/content?file_id=91",
+			ThumbnailURL: "/v1/files/thumbnail?file_id=91",
+		}, 2)
+		if err != nil {
+			t.Fatalf("GenerateGridThumbnail() error = %v", err)
+		}
+		if contentCalls != 0 {
+			t.Fatalf("contentCalls = %d, want 0", contentCalls)
+		}
+
+		decoded, _, err := image.Decode(bytes.NewReader(payload))
+		if err != nil {
+			t.Fatalf("image.Decode() error = %v", err)
+		}
+		if decoded.Bounds().Dx() != 2 || decoded.Bounds().Dy() != 2 {
+			t.Fatalf("daemon thumbnail size = %dx%d, want 2x2", decoded.Bounds().Dx(), decoded.Bounds().Dy())
+		}
+	})
+
 	t.Run("returns error when daemon request fails", func(t *testing.T) {
 		client := newClientWithRoundTripper(
 			t,
@@ -652,6 +796,39 @@ func TestClientGenerateGridThumbnail(t *testing.T) {
 		}, 64)
 		if err == nil {
 			t.Fatal("GenerateGridThumbnail() error = nil, want error")
+		}
+	})
+
+	t.Run("falls back to ffmpeg for unsupported still-image payloads", func(t *testing.T) {
+		originalBytes := encodeFFmpegStill(t, ".avif")
+
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("9", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				assertMethodAndPath(t, r, http.MethodGet, "/v1/files/content")
+				assertQueryValue(t, r.URL, "file_id", "93")
+				return bytesResponse(r, http.StatusOK, originalBytes), nil
+			}),
+		)
+		client.sessionKey = "thumb-session"
+
+		payload, err := client.GenerateGridThumbnail(context.Background(), RecentItem{
+			FileID:     93,
+			MIME:       "image/avif",
+			ContentURL: "/v1/files/content?file_id=93",
+		}, 2)
+		if err != nil {
+			t.Fatalf("GenerateGridThumbnail() error = %v", err)
+		}
+
+		decoded, _, err := image.Decode(bytes.NewReader(payload))
+		if err != nil {
+			t.Fatalf("image.Decode() error = %v", err)
+		}
+		if decoded.Bounds().Dx() != 2 || decoded.Bounds().Dy() != 2 {
+			t.Fatalf("fallback thumbnail size = %dx%d, want 2x2", decoded.Bounds().Dx(), decoded.Bounds().Dy())
 		}
 	})
 }
@@ -752,6 +929,95 @@ func TestClientFetchFileContent(t *testing.T) {
 
 		if !strings.Contains(err.Error(), "exceeded 8 bytes") {
 			t.Fatalf("FetchFileContent() error = %v, want size limit error", err)
+		}
+	})
+}
+
+func TestClientFetchSelectedPreview(t *testing.T) {
+	t.Run("prefers daemon thumbnail bytes when available", func(t *testing.T) {
+		img := image.NewNRGBA(image.Rect(0, 0, 2, 2))
+		for y := 0; y < 2; y++ {
+			for x := 0; x < 2; x++ {
+				img.Set(x, y, color.NRGBA{R: uint8(40 + x), G: uint8(80 + y), B: 120, A: 255})
+			}
+		}
+		var thumbnailBuf bytes.Buffer
+		if err := png.Encode(&thumbnailBuf, img); err != nil {
+			t.Fatalf("png.Encode() error = %v", err)
+		}
+		thumbnailBytes := thumbnailBuf.Bytes()
+		contentCalls := 0
+
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("2", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				switch r.URL.Path {
+				case "/v1/files/thumbnail":
+					assertMethodAndPath(t, r, http.MethodGet, "/v1/files/thumbnail")
+					assertQueryValue(t, r.URL, "file_id", "96")
+					return bytesResponse(r, http.StatusOK, thumbnailBytes), nil
+				case "/v1/files/content":
+					contentCalls++
+					return bytesResponse(r, http.StatusOK, []byte("should-not-be-used")), nil
+				default:
+					t.Fatalf("unexpected path %q", r.URL.Path)
+					return nil, nil
+				}
+			}),
+		)
+		client.sessionKey = "preview-session"
+
+		payload, err := client.FetchSelectedPreview(context.Background(), RecentItem{
+			FileID:       96,
+			ContentURL:   "/v1/files/content?file_id=96",
+			ThumbnailURL: "/v1/files/thumbnail?file_id=96",
+		})
+		if err != nil {
+			t.Fatalf("FetchSelectedPreview() error = %v", err)
+		}
+		if contentCalls != 0 {
+			t.Fatalf("contentCalls = %d, want 0", contentCalls)
+		}
+		if string(payload) != string(thumbnailBytes) {
+			t.Fatalf("FetchSelectedPreview() bytes = %q, want thumbnail bytes", payload)
+		}
+	})
+
+	t.Run("falls back to original content when thumbnail is unavailable", func(t *testing.T) {
+		contentBytes := []byte("managed-original-bytes")
+
+		client := newClientWithRoundTripper(
+			t,
+			"http://daemon.test",
+			strings.Repeat("2", 64),
+			roundTripFunc(func(r *http.Request) (*http.Response, error) {
+				switch r.URL.Path {
+				case "/v1/files/thumbnail":
+					return textResponse(r, http.StatusNotFound, "missing thumbnail"), nil
+				case "/v1/files/content":
+					assertMethodAndPath(t, r, http.MethodGet, "/v1/files/content")
+					assertQueryValue(t, r.URL, "file_id", "97")
+					return bytesResponse(r, http.StatusOK, contentBytes), nil
+				default:
+					t.Fatalf("unexpected path %q", r.URL.Path)
+					return nil, nil
+				}
+			}),
+		)
+		client.sessionKey = "preview-session"
+
+		payload, err := client.FetchSelectedPreview(context.Background(), RecentItem{
+			FileID:       97,
+			ContentURL:   "/v1/files/content?file_id=97",
+			ThumbnailURL: "/v1/files/thumbnail?file_id=97",
+		})
+		if err != nil {
+			t.Fatalf("FetchSelectedPreview() error = %v", err)
+		}
+		if string(payload) != string(contentBytes) {
+			t.Fatalf("FetchSelectedPreview() bytes = %q, want original bytes", payload)
 		}
 	})
 }

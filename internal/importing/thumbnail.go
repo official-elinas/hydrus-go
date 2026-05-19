@@ -7,10 +7,16 @@ import (
 	"image"
 	"image/png"
 	"os"
+	"strings"
 
+	"github.com/official-elinas/hydrus-go/internal/core/mimes"
+	"github.com/official-elinas/hydrus-go/internal/media/ffmpegutil"
 	"github.com/official-elinas/hydrus-go/internal/storage/clientfiles"
 
+	_ "golang.org/x/image/bmp"
 	xdraw "golang.org/x/image/draw"
+	_ "golang.org/x/image/tiff"
+	_ "golang.org/x/image/webp"
 )
 
 const managedThumbnailMaxDimension = 256
@@ -29,7 +35,7 @@ func (i *Importer) ensureManagedThumbnail(
 		return nil
 	}
 
-	thumbnailPath, cleanup, err := writeThumbnailTempFile(ctx, sourcePath)
+	thumbnailPath, cleanup, err := writeThumbnailTempFile(ctx, sourcePath, mimeEnum)
 	if err != nil {
 		return err
 	}
@@ -92,6 +98,7 @@ func (i *Importer) placeManagedThumbnail(
 func writeThumbnailTempFile(
 	ctx context.Context,
 	sourcePath string,
+	mimeEnum int,
 ) (string, func(), error) {
 	if err := ctx.Err(); err != nil {
 		return "", func() {}, fmt.Errorf("start thumbnail generation: %w", err)
@@ -102,41 +109,54 @@ func writeThumbnailTempFile(
 		return "", func() {}, fmt.Errorf("stat thumbnail source: %w", err)
 	}
 
-	file, err := os.Open(sourcePath)
+	if supportsDirectThumbnailDecode(mimeEnum) {
+		file, err := os.Open(sourcePath)
+		if err != nil {
+			return "", func() {}, fmt.Errorf("open thumbnail source: %w", err)
+		}
+		defer file.Close()
+
+		sourceImage, _, err := image.Decode(file)
+		if err == nil {
+			if err := ctx.Err(); err != nil {
+				return "", func() {}, fmt.Errorf("thumbnail generation canceled: %w", err)
+			}
+
+			thumbnail := resizeThumbnailToFit(sourceImage, managedThumbnailMaxDimension)
+			tempFile, err := os.CreateTemp("", "hydrus-go-thumbnail-*.png")
+			if err != nil {
+				return "", func() {}, fmt.Errorf("create thumbnail temp file: %w", err)
+			}
+
+			tempPath := tempFile.Name()
+			cleanup := func() {
+				_ = os.Remove(tempPath)
+			}
+
+			if err := png.Encode(tempFile, thumbnail); err != nil {
+				_ = tempFile.Close()
+				cleanup()
+				return "", func() {}, fmt.Errorf("encode thumbnail png: %w", err)
+			}
+
+			if err := tempFile.Close(); err != nil {
+				cleanup()
+				return "", func() {}, fmt.Errorf("close thumbnail temp file: %w", err)
+			}
+
+			if err := os.Chtimes(tempPath, sourceInfo.ModTime(), sourceInfo.ModTime()); err != nil {
+				cleanup()
+				return "", func() {}, fmt.Errorf("preserve thumbnail timestamp: %w", err)
+			}
+
+			return tempPath, cleanup, nil
+		}
+	}
+
+	sourceIsVideo := strings.HasPrefix(strings.ToLower(strings.TrimSpace(mimes.Lookup(mimeEnum).Mimetype)), "video/")
+	tempPath, cleanup, err := ffmpegutil.TranscodePathToPNG(ctx, sourcePath, managedThumbnailMaxDimension, sourceIsVideo)
 	if err != nil {
-		return "", func() {}, fmt.Errorf("open thumbnail source: %w", err)
-	}
-	defer file.Close()
-
-	sourceImage, _, err := image.Decode(file)
-	if err != nil {
-		return "", func() {}, fmt.Errorf("decode thumbnail source: %w", err)
-	}
-
-	if err := ctx.Err(); err != nil {
-		return "", func() {}, fmt.Errorf("thumbnail generation canceled: %w", err)
-	}
-
-	thumbnail := resizeThumbnailToFit(sourceImage, managedThumbnailMaxDimension)
-	tempFile, err := os.CreateTemp("", "hydrus-go-thumbnail-*.png")
-	if err != nil {
-		return "", func() {}, fmt.Errorf("create thumbnail temp file: %w", err)
-	}
-
-	tempPath := tempFile.Name()
-	cleanup := func() {
-		_ = os.Remove(tempPath)
-	}
-
-	if err := png.Encode(tempFile, thumbnail); err != nil {
-		_ = tempFile.Close()
-		cleanup()
-		return "", func() {}, fmt.Errorf("encode thumbnail png: %w", err)
-	}
-
-	if err := tempFile.Close(); err != nil {
-		cleanup()
-		return "", func() {}, fmt.Errorf("close thumbnail temp file: %w", err)
+		return "", func() {}, err
 	}
 
 	if err := os.Chtimes(tempPath, sourceInfo.ModTime(), sourceInfo.ModTime()); err != nil {
@@ -178,9 +198,13 @@ func resizeThumbnailToFit(source image.Image, maxDimension int) image.Image {
 
 func supportsGeneratedThumbnail(mimeEnum int) bool {
 	switch mimeEnum {
-	case 1, 2, 3:
+	case 1, 2, 3, 4, 9, 14, 18, 20, 21, 23, 25, 26, 27, 33, 34, 42, 47, 56, 61, 63, 65, 70, 85:
 		return true
 	default:
 		return false
 	}
+}
+
+func supportsDirectThumbnailDecode(mimeEnum int) bool {
+	return supportsDecodeConfigDimensions(mimeEnum)
 }

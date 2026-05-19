@@ -3,7 +3,9 @@ package importing
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
@@ -99,7 +101,7 @@ func TestImporterImportUpload(t *testing.T) {
 		}
 	})
 
-	t.Run("imports uploaded file through original filename extension fallback", func(t *testing.T) {
+	t.Run("rejects uploaded fake video bytes that only match by filename extension", func(t *testing.T) {
 		dir, _ := createImportTestBundle(t)
 
 		bundle, err := hydrusdb.OpenWritable(context.Background(), dir)
@@ -126,9 +128,47 @@ func TestImporterImportUpload(t *testing.T) {
 			[]byte("fake mp4 bytes for upload extension fallback"),
 		)
 
-		result, err := importer.ImportUpload(context.Background(), fileimport.UploadRequest{
+		_, err = importer.ImportUpload(context.Background(), fileimport.UploadRequest{
 			StagedPath: stagedPath,
 			Filename:   "clip.mp4",
+		})
+		var requestError *fileimport.RequestError
+		if !errorAs(t, err, &requestError) {
+			t.Fatalf("ImportUpload() error = %T, want *fileimport.RequestError", err)
+		}
+		if !strings.Contains(err.Error(), "unsupported or unverified media payload") {
+			t.Fatalf("ImportUpload() error = %v, want unsupported or unverified media payload", err)
+		}
+	})
+
+	t.Run("imports uploaded avif without filename extension via ffprobe fallback", func(t *testing.T) {
+		if _, err := exec.LookPath("ffmpeg"); err != nil {
+			t.Skip("ffmpeg is required for AVIF upload detection fallback")
+		}
+
+		dir, _ := createImportTestBundle(t)
+
+		bundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if bundle != nil {
+				if err := bundle.Close(); err != nil {
+					t.Fatalf("Close() error = %v", err)
+				}
+			}
+		}()
+
+		importer, err := NewDefaultImporter(bundle, dir)
+		if err != nil {
+			t.Fatalf("NewDefaultImporter() error = %v", err)
+		}
+
+		stagedPath := writeFFmpegStillImageSourceFile(t, t.TempDir(), "staged-upload.avif", 18, 12)
+		result, err := importer.ImportUpload(context.Background(), fileimport.UploadRequest{
+			StagedPath: stagedPath,
+			Filename:   "hydrus-api-upload",
 		})
 		if err != nil {
 			t.Fatalf("ImportUpload() error = %v", err)
@@ -149,17 +189,13 @@ func TestImporterImportUpload(t *testing.T) {
 			}
 		}()
 
-		rows, err := readBundle.GetMetadata(context.Background(), filemetadata.Request{
-			FileIDs:                    []int64{result.FileID},
-			OnlyReturnBasicInformation: true,
-		})
+		rows, err := readBundle.GetMetadata(context.Background(), filemetadata.Request{FileIDs: []int64{result.FileID}, OnlyReturnBasicInformation: true})
 		if err != nil {
 			t.Fatalf("GetMetadata() error = %v", err)
 		}
 
-		row := rows[0]
-		if row["mime"] != "video/mp4" {
-			t.Fatalf("row[mime] = %v, want video/mp4", row["mime"])
+		if got := rows[0]["mime"]; got != "image/avif" {
+			t.Fatalf("row[mime] = %v, want image/avif", got)
 		}
 	})
 

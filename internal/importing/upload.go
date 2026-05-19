@@ -63,6 +63,7 @@ func (i *Importer) ImportUpload(
 	}
 
 	stillImageMetadata := detectStillImageImportMetadata(stagedPath, mimeEnum)
+	videoMetadata := detectVideoImportMetadata(stagedPath, mimeEnum)
 	importedAtMS := time.Now().UTC().UnixMilli()
 
 	result, err := i.ImportPreparedFile(ctx, PreparedFile{
@@ -75,6 +76,9 @@ func (i *Importer) ImportUpload(
 		Height:              stillImageMetadata.Height,
 		PixelHashHex:        stillImageMetadata.PixelHashHex,
 		HasTransparency:     stillImageMetadata.HasTransparency,
+		Duration:            videoMetadata.Duration,
+		NumFrames:           videoMetadata.NumFrames,
+		HasAudio:            videoMetadata.HasAudio,
 		ImportedAtMS:        importedAtMS,
 		FileModifiedAtMS:    fileModifiedAtMS,
 		LocalFileServiceKey: strings.TrimSpace(request.LocalFileServiceKey),
@@ -168,10 +172,23 @@ func detectUploadImportMIME(stagedPath string, filename string) (int, error) {
 	}
 
 	if mimeEnum, ok := mimes.FromMIMEType(http.DetectContentType(buffer[:n])); ok {
+		if !importNeedsVerifiedMediaBytes(mimeEnum) {
+			return mimeEnum, nil
+		}
+		if detected, ok := detectImportMIMEWithFFmpeg(stagedPath); ok {
+			return detected, nil
+		}
+		return 0, &fileimport.RequestError{Message: fmt.Sprintf("%s has an unsupported or unverified media payload", describeUploadFilename(filename))}
+	}
+
+	if mimeEnum, ok := detectImportMIMEWithFFmpeg(stagedPath); ok {
 		return mimeEnum, nil
 	}
 
 	if mimeEnum, ok := mimes.FromExtension(filepath.Ext(sanitizeUploadFilename(filename))); ok {
+		if importNeedsVerifiedMediaBytes(mimeEnum) {
+			return 0, &fileimport.RequestError{Message: fmt.Sprintf("%s has an unsupported or unverified media payload", describeUploadFilename(filename))}
+		}
 		return mimeEnum, nil
 	}
 

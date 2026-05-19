@@ -273,4 +273,6 @@ func clearDaemonEnv(t *testing.T) {
 	t.Setenv("HYDRUS_GO_SHUTDOWN_TIMEOUT", "")
 	t.Setenv("HYDRUS_GO_ALLOW_NON_LOCAL_CONNECTIONS", "")
 	t.Setenv("HYDRUS_GO_ENABLE_CORS", "")
+	t.Setenv("HYDRUS_GO_ENABLE_HYDOWNLOADER", "")
+	t.Setenv("HYDRUS_GO_HYDOWNLOADER_ROOT", "")
 }

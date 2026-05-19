@@ -3,12 +3,14 @@ package importing
 import (
 	"context"
 	"errors"
+	"fmt"
 	"image"
 	"image/color"
 	"image/gif"
 	"image/jpeg"
 	"image/png"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -187,6 +189,38 @@ func TestImporterImportLocalPath(t *testing.T) {
 				width:     14,
 				height:    11,
 				writeFile: writeGIFSourceFile,
+			},
+			{
+				name:      "bmp",
+				fileName:  "import.bmp",
+				wantMIME:  "image/bmp",
+				width:     16,
+				height:    9,
+				writeFile: writeFFmpegStillImageSourceFile,
+			},
+			{
+				name:      "tiff",
+				fileName:  "import.tiff",
+				wantMIME:  "image/tiff",
+				width:     17,
+				height:    10,
+				writeFile: writeFFmpegStillImageSourceFile,
+			},
+			{
+				name:      "webp",
+				fileName:  "import.webp",
+				wantMIME:  "image/webp",
+				width:     19,
+				height:    13,
+				writeFile: writeFFmpegStillImageSourceFile,
+			},
+			{
+				name:      "avif",
+				fileName:  "import.avif",
+				wantMIME:  "image/avif",
+				width:     20,
+				height:    14,
+				writeFile: writeFFmpegStillImageSourceFile,
 			},
 		}
 
@@ -443,7 +477,7 @@ func TestImporterImportLocalPath(t *testing.T) {
 		assertManagedThumbnailImage(t, thumbnailPath, 32, 20)
 	})
 
-	t.Run("imports a video-like path through extension fallback", func(t *testing.T) {
+	t.Run("rejects fake video bytes that only match by extension", func(t *testing.T) {
 		dir, _ := createImportTestBundle(t)
 
 		bundle, err := hydrusdb.OpenWritable(context.Background(), dir)
@@ -468,6 +502,120 @@ func TestImporterImportLocalPath(t *testing.T) {
 			[]byte("fake mp4 bytes for extension fallback"),
 		)
 
+		_, err = importer.ImportLocalPath(context.Background(), fileimport.Request{Path: sourcePath})
+		var requestError *fileimport.RequestError
+		if !errorAs(t, err, &requestError) {
+			t.Fatalf("ImportLocalPath() error = %T, want *fileimport.RequestError", err)
+		}
+		if !strings.Contains(err.Error(), "unsupported or unverified media payload") {
+			t.Fatalf("ImportLocalPath() error = %v, want unsupported or unverified media payload", err)
+		}
+	})
+
+	t.Run("imports actual common video containers with dimensions and thumbnails", func(t *testing.T) {
+		if _, err := exec.LookPath("ffmpeg"); err != nil {
+			t.Skip("ffmpeg is required for common video container import tests")
+		}
+
+		tests := []struct {
+			name     string
+			fileName string
+			wantMIME string
+		}{
+			{name: "mp4", fileName: "clip.mp4", wantMIME: "video/mp4"},
+			{name: "flv", fileName: "clip.flv", wantMIME: "video/x-flv"},
+			{name: "wmv", fileName: "clip.wmv", wantMIME: "video/x-ms-wmv"},
+		}
+
+		for _, tt := range tests {
+			tt := tt
+			t.Run(tt.name, func(t *testing.T) {
+				dir, _ := createImportTestBundle(t)
+
+				bundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+				if err != nil {
+					t.Fatalf("OpenWritable() error = %v", err)
+				}
+				defer func() {
+					if err := bundle.Close(); err != nil {
+						t.Fatalf("Close() error = %v", err)
+					}
+				}()
+
+				importer, err := NewDefaultImporter(bundle, dir)
+				if err != nil {
+					t.Fatalf("NewDefaultImporter() error = %v", err)
+				}
+
+				sourcePath := writeFFmpegVideoSourceFile(t, t.TempDir(), tt.fileName, 8, 6)
+				result, err := importer.ImportLocalPath(context.Background(), fileimport.Request{Path: sourcePath})
+				if err != nil {
+					t.Fatalf("ImportLocalPath() error = %v", err)
+				}
+
+				readBundle, err := hydrusdb.Open(context.Background(), dir)
+				if err != nil {
+					t.Fatalf("Open() error = %v", err)
+				}
+				defer func() {
+					if err := readBundle.Close(); err != nil {
+						t.Fatalf("Close() error = %v", err)
+					}
+				}()
+
+				rows, err := readBundle.GetMetadata(context.Background(), filemetadata.Request{FileIDs: []int64{result.FileID}, OnlyReturnBasicInformation: true})
+				if err != nil {
+					t.Fatalf("GetMetadata() error = %v", err)
+				}
+				row := rows[0]
+				if row["mime"] != tt.wantMIME {
+					t.Fatalf("row[mime] = %v, want %s", row["mime"], tt.wantMIME)
+				}
+				if row["width"] != int64(8) || row["height"] != int64(6) {
+					t.Fatalf("row width/height = %v/%v, want 8/6", row["width"], row["height"])
+				}
+				if got := row["has_audio"]; got != false {
+					t.Fatalf("row[has_audio] = %v, want false", got)
+				}
+				duration, ok := row["duration"].(int64)
+				if !ok || duration <= 0 {
+					t.Fatalf("row[duration] = %v, want positive int64", row["duration"])
+				}
+				frames, ok := row["num_frames"].(int64)
+				if !ok || frames <= 0 {
+					t.Fatalf("row[num_frames] = %v, want positive int64", row["num_frames"])
+				}
+
+				layout := mustImportTestLayout(t, dir)
+				thumbnailPath := mustResolveManagedThumbnailPath(t, layout, result.Hash)
+				assertManagedThumbnailImage(t, thumbnailPath, 8, 6)
+			})
+		}
+	})
+
+	t.Run("imports audio-first mp4 as video with audio metadata", func(t *testing.T) {
+		if _, err := exec.LookPath("ffmpeg"); err != nil {
+			t.Skip("ffmpeg is required for audio-first mp4 import test")
+		}
+
+		dir, _ := createImportTestBundle(t)
+
+		bundle, err := hydrusdb.OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		importer, err := NewDefaultImporter(bundle, dir)
+		if err != nil {
+			t.Fatalf("NewDefaultImporter() error = %v", err)
+		}
+
+		sourcePath := writeFFmpegAVSourceFile(t, t.TempDir(), "audio-first.mp4", 8, 6)
 		result, err := importer.ImportLocalPath(context.Background(), fileimport.Request{Path: sourcePath})
 		if err != nil {
 			t.Fatalf("ImportLocalPath() error = %v", err)
@@ -483,27 +631,16 @@ func TestImporterImportLocalPath(t *testing.T) {
 			}
 		}()
 
-		rows, err := readBundle.GetMetadata(context.Background(), filemetadata.Request{
-			FileIDs:                    []int64{result.FileID},
-			OnlyReturnBasicInformation: true,
-		})
+		rows, err := readBundle.GetMetadata(context.Background(), filemetadata.Request{FileIDs: []int64{result.FileID}, OnlyReturnBasicInformation: true})
 		if err != nil {
 			t.Fatalf("GetMetadata() error = %v", err)
 		}
-
 		row := rows[0]
 		if row["mime"] != "video/mp4" {
 			t.Fatalf("row[mime] = %v, want video/mp4", row["mime"])
 		}
-
-		if row["width"] != nil || row["height"] != nil {
-			t.Fatalf("row width/height = %v/%v, want nil/nil", row["width"], row["height"])
-		}
-
-		layout := mustImportTestLayout(t, dir)
-		thumbnailPath := mustResolveManagedThumbnailPath(t, layout, result.Hash)
-		if _, err := os.Stat(thumbnailPath); !os.IsNotExist(err) {
-			t.Fatalf("thumbnail stat err = %v, want not exists", err)
+		if got := row["has_audio"]; got != true {
+			t.Fatalf("row[has_audio] = %v, want true", got)
 		}
 	})
 
@@ -680,6 +817,104 @@ func writeGIFSourceFile(
 	}
 
 	return path
+}
+
+func writeFFmpegStillImageSourceFile(
+	t *testing.T,
+	dir string,
+	name string,
+	width int,
+	height int,
+) string {
+	t.Helper()
+
+	inputPath := writePNGSourceFile(t, dir, name+".png", width, height)
+	outputPath := filepath.Join(dir, name)
+	cmd := exec.Command(
+		"ffmpeg",
+		"-nostdin",
+		"-v", "error",
+		"-y",
+		"-i", inputPath,
+		outputPath,
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg convert %q error = %v\n%s", name, err, string(output))
+	}
+
+	return outputPath
+}
+
+func writeFFmpegVideoSourceFile(
+	t *testing.T,
+	dir string,
+	name string,
+	width int,
+	height int,
+) string {
+	t.Helper()
+
+	outputPath := filepath.Join(dir, name)
+	args := []string{
+		"ffmpeg",
+		"-nostdin",
+		"-v", "error",
+		"-y",
+		"-f", "lavfi",
+		"-i", fmt.Sprintf("color=c=#336699:s=%dx%d:d=1", width, height),
+	}
+	switch filepath.Ext(name) {
+	case ".webm":
+		args = append(args, "-c:v", "libvpx-vp9", "-pix_fmt", "yuv420p")
+	case ".flv":
+		args = append(args, "-c:v", "flv", "-pix_fmt", "yuv420p")
+	case ".wmv":
+		args = append(args, "-c:v", "wmv2", "-pix_fmt", "yuv420p")
+	default:
+		args = append(args, "-c:v", "libx264", "-pix_fmt", "yuv420p")
+	}
+	args = append(args, outputPath)
+
+	cmd := exec.Command(args[0], args[1:]...)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg video convert %q error = %v\n%s", name, err, string(output))
+	}
+
+	return outputPath
+}
+
+func writeFFmpegAVSourceFile(
+	t *testing.T,
+	dir string,
+	name string,
+	width int,
+	height int,
+) string {
+	t.Helper()
+
+	outputPath := filepath.Join(dir, name)
+	args := []string{
+		"ffmpeg",
+		"-nostdin",
+		"-v", "error",
+		"-y",
+		"-f", "lavfi",
+		"-i", fmt.Sprintf("color=c=#336699:s=%dx%d:d=1", width, height),
+		"-f", "lavfi",
+		"-i", "sine=frequency=1000:sample_rate=44100:duration=1",
+		"-map", "1:a",
+		"-map", "0:v",
+		"-c:v", "libx264",
+		"-pix_fmt", "yuv420p",
+		"-c:a", "aac",
+		outputPath,
+	}
+	cmd := exec.Command(args[0], args[1:]...)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg av convert %q error = %v\n%s", name, err, string(output))
+	}
+
+	return outputPath
 }
 
 func writeSolidImage(width int, height int) *image.RGBA {

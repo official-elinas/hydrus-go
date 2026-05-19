@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -20,6 +21,7 @@ const (
 	uploadFormLocalServiceKeyField  = "local_file_service_key"
 	uploadFormFileModifiedAtMSField = "file_modified_at_ms"
 	uploadFormFieldLimitBytes       = 8 << 10
+	hydrusAddFileUploadFilename     = "hydrus-api-upload"
 )
 
 var uploadRequestBodyLimitBytes int64 = 4 << 30
@@ -137,6 +139,81 @@ func (s *Server) handleImportUpload(w http.ResponseWriter, r *http.Request) {
 	writeImportResponse(w, result)
 }
 
+type hydrusAddFileRequest struct {
+	Path                        string   `json:"path"`
+	DeleteAfterSuccessfulImport bool     `json:"delete_after_successful_import"`
+	FileServiceKeys             []string `json:"file_service_keys"`
+	DeletedFileServiceKeys      []string `json:"deleted_file_service_keys"`
+}
+
+func (s *Server) handleHydrusAddFile(w http.ResponseWriter, r *http.Request) {
+	_, statusCode, err := s.access.Authorize(
+		r,
+		PermissionImportAndDeleteFiles,
+	)
+	if err != nil {
+		writeError(w, statusCode, err.Error())
+		return
+	}
+
+	if s.importStore == nil {
+		writeHydrusAddFileFailure(w, errors.New("file import is unavailable until HYDRUS_GO_DB_DIR is configured"))
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, uploadRequestBodyLimitBytes)
+	mediaType := hydrusRequestMediaType(r.Header.Get("Content-Type"))
+	if mediaType == "application/json" {
+		request, err := parseHydrusAddFileRequest(r)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+
+		localFileServiceKey, err := normalizeHydrusAddFileServiceKey(
+			request.FileServiceKeys,
+			request.DeletedFileServiceKeys,
+		)
+		if err != nil {
+			writeHydrusAddFileFailure(w, err)
+			return
+		}
+
+		result, err := s.importStore.ImportLocalPath(r.Context(), fileimport.Request{
+			Path:                request.Path,
+			LocalFileServiceKey: localFileServiceKey,
+		})
+		if err != nil {
+			writeHydrusAddFileFailure(w, err)
+			return
+		}
+
+		writeHydrusAddFileResponse(w, result)
+		return
+	}
+
+	request, cleanup, err := parseHydrusAddFileUploadRequest(r)
+	if err != nil {
+		var maxBytesError *http.MaxBytesError
+		if errors.As(err, &maxBytesError) {
+			writeError(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("upload exceeds %d bytes", uploadRequestBodyLimitBytes))
+			return
+		}
+
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	defer cleanup()
+
+	result, err := s.importStore.ImportUpload(r.Context(), request)
+	if err != nil {
+		writeHydrusAddFileFailure(w, err)
+		return
+	}
+
+	writeHydrusAddFileResponse(w, result)
+}
+
 func parseLocalFileImportRequest(r *http.Request) (fileimport.Request, error) {
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
@@ -164,6 +241,22 @@ func parseURLImportRequest(r *http.Request) (fileimport.URLRequest, error) {
 
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return fileimport.URLRequest{}, errors.New("request body must contain a single JSON object")
+	}
+
+	return request, nil
+}
+
+func parseHydrusAddFileRequest(r *http.Request) (hydrusAddFileRequest, error) {
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+
+	var request hydrusAddFileRequest
+	if err := decoder.Decode(&request); err != nil {
+		return hydrusAddFileRequest{}, err
+	}
+
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return hydrusAddFileRequest{}, errors.New("request body must contain a single JSON object")
 	}
 
 	return request, nil
@@ -301,6 +394,18 @@ func parseUploadImportRequest(r *http.Request) (fileimport.UploadRequest, func()
 	return request, cleanup, nil
 }
 
+func parseHydrusAddFileUploadRequest(r *http.Request) (fileimport.UploadRequest, func(), error) {
+	stagedPath, cleanup, err := stageUploadBody(r.Context(), r.Body)
+	if err != nil {
+		return fileimport.UploadRequest{}, func() {}, err
+	}
+
+	return fileimport.UploadRequest{
+		StagedPath: stagedPath,
+		Filename:   hydrusAddFileUploadFilename,
+	}, cleanup, nil
+}
+
 func stageUploadPart(
 	ctx context.Context,
 	part *multipart.Part,
@@ -316,6 +421,40 @@ func stageUploadPart(
 	}
 
 	if err := copyMultipartPart(ctx, tempFile, part); err != nil {
+		_ = tempFile.Close()
+		cleanup()
+		return "", func() {}, fmt.Errorf("stage uploaded file: %w", err)
+	}
+
+	if err := tempFile.Sync(); err != nil {
+		_ = tempFile.Close()
+		cleanup()
+		return "", func() {}, fmt.Errorf("sync staged upload file: %w", err)
+	}
+
+	if err := tempFile.Close(); err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("close staged upload file: %w", err)
+	}
+
+	return tempPath, cleanup, nil
+}
+
+func stageUploadBody(
+	ctx context.Context,
+	body io.Reader,
+) (string, func(), error) {
+	tempFile, err := os.CreateTemp("", "hydrus-go-raw-upload-*")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("create staged upload file: %w", err)
+	}
+
+	tempPath := tempFile.Name()
+	cleanup := func() {
+		_ = os.Remove(tempPath)
+	}
+
+	if err := copyMultipartPart(ctx, tempFile, body); err != nil {
 		_ = tempFile.Close()
 		cleanup()
 		return "", func() {}, fmt.Errorf("stage uploaded file: %w", err)
@@ -383,6 +522,41 @@ func chainCleanup(first func(), second func()) func() {
 	}
 }
 
+func hydrusRequestMediaType(rawContentType string) string {
+	mediaType, _, err := mime.ParseMediaType(strings.TrimSpace(rawContentType))
+	if err != nil {
+		return strings.ToLower(strings.TrimSpace(rawContentType))
+	}
+
+	return strings.ToLower(strings.TrimSpace(mediaType))
+}
+
+func normalizeHydrusAddFileServiceKey(fileServiceKeys []string, deletedFileServiceKeys []string) (string, error) {
+	for _, rawValue := range deletedFileServiceKeys {
+		if strings.TrimSpace(rawValue) != "" {
+			return "", errors.New("deleted_file_service_keys is not supported yet")
+		}
+	}
+
+	normalized := make([]string, 0, len(fileServiceKeys))
+	for _, rawValue := range fileServiceKeys {
+		trimmed := strings.TrimSpace(rawValue)
+		if trimmed == "" {
+			continue
+		}
+		normalized = append(normalized, trimmed)
+	}
+
+	if len(normalized) > 1 {
+		return "", errors.New("exactly one file_service_key is supported")
+	}
+	if len(normalized) == 0 {
+		return "", nil
+	}
+
+	return normalized[0], nil
+}
+
 func writeImportStoreError(w http.ResponseWriter, err error) bool {
 	if err == nil {
 		return false
@@ -411,5 +585,32 @@ func writeImportResponse(w http.ResponseWriter, result fileimport.Result) {
 		"content_url":                  "/v1/files/content?file_id=" + strconv.FormatInt(result.FileID, 10),
 		"thumbnail_url":                "/v1/files/thumbnail?file_id=" + strconv.FormatInt(result.FileID, 10),
 		"metadata_url":                 "/get_files/file_metadata?file_id=" + strconv.FormatInt(result.FileID, 10),
+	})
+}
+
+func writeHydrusAddFileFailure(w http.ResponseWriter, err error) {
+	note := "could not import file"
+	if err != nil {
+		note = err.Error()
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": 4,
+		"note":   note,
+	})
+}
+
+func writeHydrusAddFileResponse(w http.ResponseWriter, result fileimport.Result) {
+	status := 1
+	note := "imported file"
+	if result.AlreadyImported {
+		status = 2
+		note = "file already imported"
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": status,
+		"hash":   result.Hash,
+		"note":   note,
 	})
 }

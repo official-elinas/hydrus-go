@@ -280,6 +280,14 @@ func convertRatingToStars(
 	return int(math.Round(rating*float64(maxStars-1))) + 1, true
 }
 
+func (b *Bundle) lookupFileRatingsConn(
+	ctx context.Context,
+	_ *sql.Conn,
+	fileIDs []int64,
+) (map[int64]map[string]any, error) {
+	return b.lookupFileRatings(ctx, fileIDs)
+}
+
 func (b *Bundle) collectLocalIncDecRatings(
 	ctx context.Context,
 	fileIDs []int64,

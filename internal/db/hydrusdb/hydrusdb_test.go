@@ -1792,6 +1792,65 @@ func TestBundleWriteTransactions(t *testing.T) {
 			t.Fatalf("labels = %v, want [first-start first-end third]", labels)
 		}
 	})
+
+	t.Run("writable bundles preserve context cancellation without rollback noise", func(t *testing.T) {
+		dir, _ := createTestBundle(t)
+
+		db := openSQLiteForTest(t, filepath.Join(dir, "client.db"))
+		mustExec(t, db, `CREATE TABLE tx_cancel_log (id INTEGER PRIMARY KEY AUTOINCREMENT, label TEXT);`)
+		if err := db.Close(); err != nil {
+			t.Fatalf("Close() error = %v", err)
+		}
+
+		bundle, err := OpenWritable(context.Background(), dir)
+		if err != nil {
+			t.Fatalf("OpenWritable() error = %v", err)
+		}
+		defer func() {
+			if err := bundle.Close(); err != nil {
+				t.Fatalf("Close() error = %v", err)
+			}
+		}()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		err = bundle.WithImmediateTx(ctx, func(tx *ImmediateTx) error {
+			if _, execErr := tx.ExecContext(
+				context.Background(),
+				`INSERT INTO tx_cancel_log (label) VALUES (?)`,
+				"started",
+			); execErr != nil {
+				return execErr
+			}
+
+			cancel()
+
+			_, execErr := tx.ExecContext(
+				ctx,
+				`CREATE TABLE IF NOT EXISTS ptrsync_cancel_test (id INTEGER)`,
+			)
+			return execErr
+		})
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("WithImmediateTx() error = %v, want context canceled", err)
+		}
+		if strings.Contains(err.Error(), "rollback immediate transaction") {
+			t.Fatalf("WithImmediateTx() error = %v, want original cancellation without rollback noise", err)
+		}
+
+		db = openSQLiteForTest(t, filepath.Join(dir, "client.db"))
+		defer db.Close()
+
+		var count int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM tx_cancel_log`,
+		).Scan(&count); err != nil {
+			t.Fatalf("Scan() error = %v", err)
+		}
+
+		if count != 0 {
+			t.Fatalf("tx_cancel_log count = %d, want 0 after canceled rollback", count)
+		}
+	})
 }
 
 type testFixture struct {

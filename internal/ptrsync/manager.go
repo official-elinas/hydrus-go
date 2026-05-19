@@ -165,6 +165,17 @@ func NewManager(
 			go func() {
 				_, _ = manager.Trigger(context.Background())
 			}()
+		} else {
+			hasMappings, mappingsErr := readBundle.HasPTRCurrentMappings(ctx)
+			if mappingsErr != nil {
+				if logger != nil {
+					logger.Warn("could not check PTR current mappings for auto-start", "error", mappingsErr)
+				}
+			} else if hasMappings {
+				go func() {
+					_, _ = manager.Trigger(context.Background())
+				}()
+			}
 		}
 	}
 
@@ -355,7 +366,7 @@ func (m *Manager) enablePTRSyncFromManualTrigger(ctx context.Context) (coreptrsy
 	enabledCfg, _ := m.snapshotState()
 	enabledCfg.Enabled = true
 
-	recoveredStatus, err := m.writeBundle.RecoverPTRSyncFoundation(ctx, enabledCfg)
+	recoveredStatus, err := m.writeBundle.RecoverPTRSyncFoundation(context.Background(), enabledCfg)
 	if err != nil {
 		if errors.Is(err, hydrusdb.ErrPTRServiceNameCollision) {
 			m.setUnavailableReason(err.Error())
@@ -464,7 +475,7 @@ func (m *Manager) PendingMappingCount(
 
 	cfg, unavailableReason := m.snapshotState()
 	if !cfg.Enabled {
-		return coreptrsync.PendingInfo{}, coreptrsync.ErrSyncDisabled
+		return coreptrsync.PendingInfo{PendingCount: 0}, nil
 	}
 
 	if unavailableReason != "" || m.readBundle == nil {

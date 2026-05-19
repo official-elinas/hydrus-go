@@ -17,6 +17,8 @@ import (
 	"testing"
 
 	"github.com/official-elinas/hydrus-go/internal/buildinfo"
+	"github.com/official-elinas/hydrus-go/internal/core/clientapi"
+	coredownloader "github.com/official-elinas/hydrus-go/internal/core/downloader"
 	"github.com/official-elinas/hydrus-go/internal/core/fileassets"
 	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
 	"github.com/official-elinas/hydrus-go/internal/core/filemetadata"
@@ -516,6 +518,8 @@ func TestProtectedEndpoints(t *testing.T) {
 			nil,
 			nil,
 			nil,
+			nil,
+			nil,
 			stubPTRStore{},
 			false,
 		)
@@ -781,6 +785,8 @@ func TestProtectedEndpoints(t *testing.T) {
 			slog.New(slog.NewTextHandler(io.Discard, nil)),
 			access,
 			services.DefaultProvider(),
+			nil,
+			nil,
 			nil,
 			nil,
 			nil,
@@ -1189,6 +1195,331 @@ func TestThinClientEndpoints(t *testing.T) {
 
 		if rr.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, want %d", rr.Code, http.StatusBadRequest)
+		}
+	})
+
+	t.Run("hydrus add_file imports local path JSON", func(t *testing.T) {
+		store := &fakeMetadataStore{
+			importLocalHandle: func(request fileimport.Request) (fileimport.Result, error) {
+				if request.Path != "/tmp/example.png" {
+					t.Fatalf("request.Path = %q, want /tmp/example.png", request.Path)
+				}
+				if request.LocalFileServiceKey != "service-key" {
+					t.Fatalf("request.LocalFileServiceKey = %q, want service-key", request.LocalFileServiceKey)
+				}
+
+				return fileimport.Result{Hash: strings.Repeat("a", 64)}, nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, provider, store, false)
+		req := httptest.NewRequest(
+			http.MethodPost,
+			"/add_files/add_file",
+			strings.NewReader(`{"path":"/tmp/example.png","file_service_keys":["service-key"]}`),
+		)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+		if int(payload["status"].(float64)) != 1 {
+			t.Fatalf("status payload = %v, want 1", payload["status"])
+		}
+		if payload["hash"] != strings.Repeat("a", 64) {
+			t.Fatalf("hash = %v, want %s", payload["hash"], strings.Repeat("a", 64))
+		}
+	})
+
+	t.Run("hydrus add_file imports raw bytes", func(t *testing.T) {
+		store := &fakeMetadataStore{
+			importUploadHandle: func(request fileimport.UploadRequest) (fileimport.Result, error) {
+				if request.Filename != hydrusAddFileUploadFilename {
+					t.Fatalf("request.Filename = %q, want %q", request.Filename, hydrusAddFileUploadFilename)
+				}
+
+				payload, err := os.ReadFile(request.StagedPath)
+				if err != nil {
+					t.Fatalf("ReadFile(staged raw upload) error = %v", err)
+				}
+				if !bytes.Equal(payload, []byte("raw-png-bytes")) {
+					t.Fatalf("staged payload = %q, want raw-png-bytes", string(payload))
+				}
+
+				return fileimport.Result{Hash: strings.Repeat("c", 64)}, nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, provider, store, false)
+		req := httptest.NewRequest(http.MethodPost, "/add_files/add_file", bytes.NewReader([]byte("raw-png-bytes")))
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		req.Header.Set("Content-Type", "application/octet-stream")
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+		if int(payload["status"].(float64)) != 1 {
+			t.Fatalf("status payload = %v, want 1", payload["status"])
+		}
+	})
+
+	t.Run("hydrus add_file maps already imported results", func(t *testing.T) {
+		store := &fakeMetadataStore{
+			importLocalHandle: func(fileimport.Request) (fileimport.Result, error) {
+				return fileimport.Result{
+					Hash:            strings.Repeat("d", 64),
+					AlreadyImported: true,
+				}, nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, provider, store, false)
+		req := httptest.NewRequest(http.MethodPost, "/add_files/add_file", strings.NewReader(`{"path":"/tmp/example.png"}`))
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+		if int(payload["status"].(float64)) != 2 {
+			t.Fatalf("status payload = %v, want 2", payload["status"])
+		}
+	})
+
+	t.Run("associate_url forwards hydrus client API request", func(t *testing.T) {
+		store := &fakeMetadataStore{
+			associateURLsHandle: func(request clientapi.URLAssociationRequest) error {
+				if len(request.Hashes) != 1 || request.Hashes[0] != strings.Repeat("a", 64) {
+					t.Fatalf("request.Hashes = %v, want [%s]", request.Hashes, strings.Repeat("a", 64))
+				}
+				if len(request.URLsToAdd) != 2 {
+					t.Fatalf("request.URLsToAdd = %v, want two URLs", request.URLsToAdd)
+				}
+				return nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, services.DefaultProvider(), store, false)
+		req := httptest.NewRequest(http.MethodPost, "/add_urls/associate_url", strings.NewReader(`{"hash":"`+strings.Repeat("a", 64)+`","urls_to_add":["https://example.com/post/1","https://example.com/file/1"]}`))
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+		if rr.Body.Len() != 0 {
+			t.Fatalf("body len = %d, want 0", rr.Body.Len())
+		}
+	})
+
+	t.Run("local add_tags forwards service_keys_to_tags writes", func(t *testing.T) {
+		provider := services.DefaultProvider()
+		service, ok, err := provider.ByName(context.Background(), "my tags")
+		if err != nil {
+			t.Fatalf("provider.ByName(my tags) error = %v", err)
+		}
+		if !ok {
+			t.Fatal("provider.ByName(my tags) = not found")
+		}
+
+		store := &fakeMetadataStore{
+			addTagsHandle: func(request clientapi.TagRequest) error {
+				if request.ServiceKey != service.ServiceKey {
+					t.Fatalf("request.ServiceKey = %q, want %q", request.ServiceKey, service.ServiceKey)
+				}
+				if strings.Join(request.Tags, "|") != "creator:alice|series:zeta" {
+					t.Fatalf("request.Tags = %v, want creator:alice|series:zeta", request.Tags)
+				}
+				return nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, provider, store, false)
+		req := httptest.NewRequest(http.MethodPost, "/add_tags/add_tags", strings.NewReader(`{"hash":"`+strings.Repeat("b", 64)+`","service_keys_to_tags":{"`+service.ServiceKey+`":["creator:alice","series:zeta"]}}`))
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+		if rr.Body.Len() != 0 {
+			t.Fatalf("body len = %d, want 0", rr.Body.Len())
+		}
+	})
+
+	t.Run("set_notes returns final notes payload", func(t *testing.T) {
+		store := &fakeMetadataStore{
+			setNotesHandle: func(request clientapi.NotesRequest) (map[string]string, error) {
+				if request.Hash != strings.Repeat("c", 64) {
+					t.Fatalf("request.Hash = %q, want %q", request.Hash, strings.Repeat("c", 64))
+				}
+				return map[string]string{"artist commentary": "hello"}, nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, services.DefaultProvider(), store, false)
+		req := httptest.NewRequest(http.MethodPost, "/add_notes/set_notes", strings.NewReader(`{"hash":"`+strings.Repeat("c", 64)+`","notes":{"artist commentary":"hello"}}`))
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+		notes, ok := payload["notes"].(map[string]any)
+		if !ok {
+			t.Fatalf("notes payload type = %T, want map[string]any", payload["notes"])
+		}
+		if notes["artist commentary"] != "hello" {
+			t.Fatalf("notes[artist commentary] = %v, want hello", notes["artist commentary"])
+		}
+	})
+
+	t.Run("set_time converts float seconds to milliseconds", func(t *testing.T) {
+		store := &fakeMetadataStore{
+			setTimeHandle: func(request clientapi.TimeRequest) error {
+				if request.TimestampType != clientapi.TimestampTypeModifiedDomain {
+					t.Fatalf("request.TimestampType = %d, want %d", request.TimestampType, clientapi.TimestampTypeModifiedDomain)
+				}
+				if request.TimestampMS != 12345 {
+					t.Fatalf("request.TimestampMS = %d, want 12345", request.TimestampMS)
+				}
+				if request.Domain != "example.com" {
+					t.Fatalf("request.Domain = %q, want example.com", request.Domain)
+				}
+				return nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, services.DefaultProvider(), store, false)
+		req := httptest.NewRequest(http.MethodPost, "/edit_times/set_time", strings.NewReader(`{"hash":"`+strings.Repeat("d", 64)+`","timestamp_type":0,"timestamp":12.345,"domain":"example.com"}`))
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+		if rr.Body.Len() != 0 {
+			t.Fatalf("body len = %d, want 0", rr.Body.Len())
+		}
+	})
+
+	t.Run("downloader status returns managed hydownloader state", func(t *testing.T) {
+		store := &fakeMetadataStore{
+			downloaderStatus: coredownloader.Status{
+				Enabled:                  true,
+				Configured:               true,
+				Running:                  true,
+				Root:                     "/tmp/hydownloader",
+				BaseURL:                  "http://127.0.0.1:53211",
+				Autoimport:               true,
+				URLsQueued:               4,
+				SubscriptionsDue:         2,
+				SubscriptionWorkerStatus: "checking subscription",
+				URLWorkerStatus:          "downloading URL",
+			},
+		}
+
+		handler := newHandlerWithDeps(t, services.DefaultProvider(), store, false)
+		req := httptest.NewRequest(http.MethodGet, "/v1/downloader/status", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+
+		var payload map[string]any
+		decodeJSON(t, rr.Body.Bytes(), &payload)
+		downloader := payload["downloader"].(map[string]any)
+		if downloader["urls_queued"] != float64(4) {
+			t.Fatalf("downloader[urls_queued] = %v, want 4", downloader["urls_queued"])
+		}
+	})
+
+	t.Run("downloader queue URL forwards request", func(t *testing.T) {
+		store := &fakeMetadataStore{
+			queueURLHandle: func(request coredownloader.URLRequest) error {
+				if request.URL != "https://example.com/post/1" {
+					t.Fatalf("request.URL = %q, want https://example.com/post/1", request.URL)
+				}
+				if request.MaxFiles == nil || *request.MaxFiles != 25 {
+					t.Fatalf("request.MaxFiles = %v, want 25", request.MaxFiles)
+				}
+				return nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, services.DefaultProvider(), store, false)
+		req := httptest.NewRequest(http.MethodPost, "/v1/downloader/url", strings.NewReader(`{"url":"https://example.com/post/1","max_files":25}`))
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+	})
+
+	t.Run("downloader queue subscription forwards request", func(t *testing.T) {
+		store := &fakeMetadataStore{
+			queueSubscriptionHandle: func(request coredownloader.SubscriptionRequest) error {
+				if request.Downloader != "gelbooru" {
+					t.Fatalf("request.Downloader = %q, want gelbooru", request.Downloader)
+				}
+				if request.Keywords != "blue_archive" {
+					t.Fatalf("request.Keywords = %q, want blue_archive", request.Keywords)
+				}
+				if request.CheckInterval != 3600 {
+					t.Fatalf("request.CheckInterval = %d, want 3600", request.CheckInterval)
+				}
+				return nil
+			},
+		}
+
+		handler := newHandlerWithDeps(t, services.DefaultProvider(), store, false)
+		req := httptest.NewRequest(http.MethodPost, "/v1/downloader/subscription", strings.NewReader(`{"downloader":"gelbooru","keywords":"blue_archive","check_interval":3600}`))
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
 		}
 	})
 
@@ -2383,6 +2714,8 @@ func newTestHandler(t *testing.T) http.Handler {
 		nil,
 		nil,
 		nil,
+		nil,
+		nil,
 		false,
 	)
 }
@@ -2403,6 +2736,8 @@ func newAccessControlledHandler(t *testing.T) (*AccessControl, http.Handler) {
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		access,
 		services.DefaultProvider(),
+		nil,
+		nil,
 		nil,
 		nil,
 		nil,
@@ -2437,6 +2772,8 @@ func newCORSEnabledHandler(t *testing.T) http.Handler {
 		nil,
 		nil,
 		nil,
+		nil,
+		nil,
 		true,
 	)
 }
@@ -2452,7 +2789,7 @@ func newHandlerWithDeps(
 	access, err := NewAccessControl(
 		strings.Repeat("b", 64),
 		"test-client",
-		[]Permission{PermissionSearchAndFetchFiles, PermissionImportAndDeleteFiles, PermissionManageDatabase},
+		[]Permission{PermissionSearchAndFetchFiles, PermissionImportAndDeleteFiles, PermissionImportAndEditURLs, PermissionEditFileTags, PermissionEditFileNotes, PermissionEditFileTimes, PermissionManageDatabase},
 	)
 	if err != nil {
 		t.Fatalf("NewAccessControl() error = %v", err)
@@ -2460,6 +2797,8 @@ func newHandlerWithDeps(
 
 	var browseStore librarybrowse.Store
 	var assetStore fileassets.Store
+	var clientAPIStore clientapi.Store
+	var downloaderStore coredownloader.Store
 	var importStore fileimport.Store
 	var trashStore filetrash.Store
 	if store != nil {
@@ -2469,6 +2808,14 @@ func newHandlerWithDeps(
 
 		if candidate, ok := store.(fileassets.Store); ok {
 			assetStore = candidate
+		}
+
+		if candidate, ok := store.(clientapi.Store); ok {
+			clientAPIStore = candidate
+		}
+
+		if candidate, ok := store.(coredownloader.Store); ok {
+			downloaderStore = candidate
 		}
 
 		if candidate, ok := store.(fileimport.Store); ok {
@@ -2487,6 +2834,8 @@ func newHandlerWithDeps(
 		store,
 		browseStore,
 		assetStore,
+		clientAPIStore,
+		downloaderStore,
 		importStore,
 		trashStore,
 		nil,
@@ -2515,6 +2864,8 @@ func newHandlerWithPTRStore(t *testing.T, ptrStore coreptrsync.Store) http.Handl
 		slog.New(slog.NewTextHandler(io.Discard, nil)),
 		access,
 		services.DefaultProvider(),
+		nil,
+		nil,
 		nil,
 		nil,
 		nil,
@@ -2554,6 +2905,8 @@ func TestDatabaseIntegrityEndpoint(t *testing.T) {
 			access,
 			services.DefaultProvider(),
 			&fakeMetadataStore{},
+			nil,
+			nil,
 			nil,
 			nil,
 			nil,
@@ -2611,6 +2964,22 @@ func TestDatabaseIntegrityEndpoint(t *testing.T) {
 			t.Fatalf("integrity[results] = %#v, want [ok]", integrity["results"])
 		}
 	})
+
+	t.Run("force commit returns empty success response", func(t *testing.T) {
+		handler := newHandlerWithDeps(t, services.DefaultProvider(), &fakeMetadataStore{}, false)
+		req := httptest.NewRequest(http.MethodPost, "/manage_database/force_commit", nil)
+		req.Header.Set("Hydrus-Client-API-Access-Key", strings.Repeat("b", 64))
+		rr := httptest.NewRecorder()
+
+		handler.ServeHTTP(rr, req)
+
+		if rr.Code != http.StatusOK {
+			t.Fatalf("status = %d, want %d", rr.Code, http.StatusOK)
+		}
+		if rr.Body.Len() != 0 {
+			t.Fatalf("body len = %d, want 0", rr.Body.Len())
+		}
+	})
 }
 
 type stubPTRStore struct {
@@ -2664,21 +3033,31 @@ func (s stubPTRStore) PendingMappingCount(
 }
 
 type fakeMetadataStore struct {
-	rows                   []filemetadata.Row
-	err                    error
-	integrityResult        filemetadata.IntegrityCheckResult
-	handle                 func(filemetadata.Request) ([]filemetadata.Row, error)
-	suggestTagsHandle      func(string, int) ([]string, error)
-	integrityHandle        func() (filemetadata.IntegrityCheckResult, error)
-	listRecentHandle       func(librarybrowse.Request) (librarybrowse.Page, error)
-	searchByTagsHandle     func(librarybrowse.SearchRequest) (librarybrowse.Page, error)
-	resolveContentHandle   func(int64) (fileassets.Descriptor, error)
-	resolveThumbnailHandle func(int64) (fileassets.Descriptor, error)
-	importLocalHandle      func(fileimport.Request) (fileimport.Result, error)
-	importURLHandle        func(fileimport.URLRequest) (fileimport.Result, error)
-	importUploadHandle     func(fileimport.UploadRequest) (fileimport.Result, error)
-	trashFileHandle        func(filetrash.Request) (filetrash.Result, error)
-	lastRequest            *filemetadata.Request
+	rows                    []filemetadata.Row
+	err                     error
+	integrityResult         filemetadata.IntegrityCheckResult
+	handle                  func(filemetadata.Request) ([]filemetadata.Row, error)
+	suggestTagsHandle       func(string, int) ([]string, error)
+	integrityHandle         func() (filemetadata.IntegrityCheckResult, error)
+	listRecentHandle        func(librarybrowse.Request) (librarybrowse.Page, error)
+	searchByTagsHandle      func(librarybrowse.SearchRequest) (librarybrowse.Page, error)
+	resolveContentHandle    func(int64) (fileassets.Descriptor, error)
+	resolveThumbnailHandle  func(int64) (fileassets.Descriptor, error)
+	downloaderStatus        coredownloader.Status
+	downloaderStatusErr     error
+	queueURLHandle          func(coredownloader.URLRequest) error
+	queueSubscriptionHandle func(coredownloader.SubscriptionRequest) error
+	downloaderMap           map[string]string
+	downloaderMapErr        error
+	associateURLsHandle     func(clientapi.URLAssociationRequest) error
+	addTagsHandle           func(clientapi.TagRequest) error
+	setNotesHandle          func(clientapi.NotesRequest) (map[string]string, error)
+	setTimeHandle           func(clientapi.TimeRequest) error
+	importLocalHandle       func(fileimport.Request) (fileimport.Result, error)
+	importURLHandle         func(fileimport.URLRequest) (fileimport.Result, error)
+	importUploadHandle      func(fileimport.UploadRequest) (fileimport.Result, error)
+	trashFileHandle         func(filetrash.Request) (filetrash.Result, error)
+	lastRequest             *filemetadata.Request
 }
 
 func (s *fakeMetadataStore) GetMetadata(
@@ -2757,6 +3136,94 @@ func (s *fakeMetadataStore) ResolveThumbnail(
 	}
 
 	return fileassets.Descriptor{}, nil
+}
+
+func (s *fakeMetadataStore) Status(
+	_ context.Context,
+) (coredownloader.Status, error) {
+	return s.downloaderStatus, s.downloaderStatusErr
+}
+
+func (s *fakeMetadataStore) QueueURL(
+	_ context.Context,
+	request coredownloader.URLRequest,
+) error {
+	if s.queueURLHandle != nil {
+		return s.queueURLHandle(request)
+	}
+
+	return s.downloaderStatusErr
+}
+
+func (s *fakeMetadataStore) QueueSubscription(
+	_ context.Context,
+	request coredownloader.SubscriptionRequest,
+) error {
+	if s.queueSubscriptionHandle != nil {
+		return s.queueSubscriptionHandle(request)
+	}
+
+	return s.downloaderStatusErr
+}
+
+func (s *fakeMetadataStore) Downloaders(
+	_ context.Context,
+) (map[string]string, error) {
+	if s.downloaderMap != nil || s.downloaderMapErr != nil {
+		return s.downloaderMap, s.downloaderMapErr
+	}
+
+	return map[string]string{}, nil
+}
+
+func (s *fakeMetadataStore) ActivateAutoimport(
+	_ context.Context,
+) error {
+	return nil
+}
+
+func (s *fakeMetadataStore) AssociateURLs(
+	_ context.Context,
+	request clientapi.URLAssociationRequest,
+) error {
+	if s.associateURLsHandle != nil {
+		return s.associateURLsHandle(request)
+	}
+
+	return s.err
+}
+
+func (s *fakeMetadataStore) AddTags(
+	_ context.Context,
+	request clientapi.TagRequest,
+) error {
+	if s.addTagsHandle != nil {
+		return s.addTagsHandle(request)
+	}
+
+	return s.err
+}
+
+func (s *fakeMetadataStore) SetNotes(
+	_ context.Context,
+	request clientapi.NotesRequest,
+) (map[string]string, error) {
+	if s.setNotesHandle != nil {
+		return s.setNotesHandle(request)
+	}
+
+	return nil, s.err
+}
+
+func (s *fakeMetadataStore) SetTime(
+	_ context.Context,
+	request clientapi.TimeRequest,
+) error {
+	if s.setTimeHandle != nil {
+		return s.setTimeHandle(request)
+	}
+
+	return s.err
 }
 
 func (s *fakeMetadataStore) ImportLocalPath(

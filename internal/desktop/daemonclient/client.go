@@ -20,9 +20,16 @@ import (
 	"strings"
 	"time"
 
-	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
+	coredownloader "github.com/official-elinas/hydrus-go/internal/core/downloader"
+	"github.com/official-elinas/hydrus-go/internal/core/clientsessions"
 	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
+	"github.com/official-elinas/hydrus-go/internal/core/mimes"
+	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
+	"github.com/official-elinas/hydrus-go/internal/media/ffmpegutil"
+	_ "golang.org/x/image/bmp"
 	xdraw "golang.org/x/image/draw"
+	_ "golang.org/x/image/tiff"
+	_ "golang.org/x/image/webp"
 )
 
 const hydrusContentUpdatePendAction = "2"
@@ -32,6 +39,7 @@ const userAgent = "hydrus-desktop-prototype/0.1"
 const (
 	defaultGridThumbnailMaxDimension = 256
 	gridThumbnailSourceByteLimit     = 4 << 20
+	selectedPreviewThumbnailByteLimit = 8 << 20
 )
 
 // Client talks to hydrusd over HTTP.
@@ -118,6 +126,14 @@ type metadataResponse struct {
 
 type tagSuggestionsResponse struct {
 	Suggestions []string `json:"suggestions"`
+}
+
+type downloaderStatusResponse struct {
+	Downloader coredownloader.Status `json:"downloader"`
+}
+
+type downloaderMapResponse struct {
+	Downloaders map[string]string `json:"downloaders"`
 }
 
 type addTagsRequest struct {
@@ -272,6 +288,21 @@ func (c *Client) GetFileMetadata(ctx context.Context, fileID int64) (FileMetadat
 	return response.Metadata[0], nil
 }
 
+// GetBasicFileMetadata loads the fast basic metadata subset for one selected file.
+func (c *Client) GetBasicFileMetadata(ctx context.Context, fileID int64) (FileMetadata, error) {
+	path := "/get_files/file_metadata?file_id=" + strconv.FormatInt(fileID, 10) + "&only_return_basic_information=true&include_services_object=false"
+	var response metadataResponse
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, true, &response); err != nil {
+		return FileMetadata{}, err
+	}
+
+	if len(response.Metadata) == 0 {
+		return FileMetadata{}, fmt.Errorf("daemon returned no metadata for file_id %d", fileID)
+	}
+
+	return response.Metadata[0], nil
+}
+
 // SuggestTags loads daemon-backed tag suggestions for one normalized prefix.
 func (c *Client) SuggestTags(
 	ctx context.Context,
@@ -325,6 +356,36 @@ func (c *Client) ImportURL(ctx context.Context, request fileimport.URLRequest) (
 	}
 
 	return response, nil
+}
+
+// GetDownloaderStatus returns the current daemon-owned hydownloader status.
+func (c *Client) GetDownloaderStatus(ctx context.Context) (coredownloader.Status, error) {
+	var response downloaderStatusResponse
+	if err := c.doJSON(ctx, http.MethodGet, "/v1/downloader/status", nil, true, &response); err != nil {
+		return coredownloader.Status{}, err
+	}
+
+	return response.Downloader, nil
+}
+
+// GetDownloaderDownloaders returns the supported hydownloader subscription downloaders.
+func (c *Client) GetDownloaderDownloaders(ctx context.Context) (map[string]string, error) {
+	var response downloaderMapResponse
+	if err := c.doJSON(ctx, http.MethodGet, "/v1/downloader/downloaders", nil, true, &response); err != nil {
+		return nil, err
+	}
+
+	return response.Downloaders, nil
+}
+
+// QueueDownloaderURL asks hydrusd to queue a hydownloader single URL job.
+func (c *Client) QueueDownloaderURL(ctx context.Context, request coredownloader.URLRequest) error {
+	return c.doJSON(ctx, http.MethodPost, "/v1/downloader/url", request, true, nil)
+}
+
+// QueueDownloaderSubscription asks hydrusd to queue a hydownloader subscription.
+func (c *Client) QueueDownloaderSubscription(ctx context.Context, request coredownloader.SubscriptionRequest) error {
+	return c.doJSON(ctx, http.MethodPost, "/v1/downloader/subscription", request, true, nil)
 }
 
 // UploadFile streams one local file to hydrusd for import.
@@ -523,8 +584,8 @@ func (c *Client) TriggerDBIntegrityCheck(ctx context.Context) (DBIntegrityRespon
 	return out, err
 }
 
-// GenerateGridThumbnail fetches a bounded original payload from hydrusd and
-// generates a client-local grid thumbnail.
+// GenerateGridThumbnail prefers the daemon thumbnail endpoint and falls back to
+// deriving a grid thumbnail from a bounded original payload.
 func (c *Client) GenerateGridThumbnail(ctx context.Context, item RecentItem, maxDimension int) ([]byte, error) {
 	if strings.TrimSpace(item.ContentURL) == "" {
 		return nil, fmt.Errorf("no content URL is available for file_id %d", item.FileID)
@@ -532,6 +593,13 @@ func (c *Client) GenerateGridThumbnail(ctx context.Context, item RecentItem, max
 
 	if maxDimension <= 0 {
 		maxDimension = defaultGridThumbnailMaxDimension
+	}
+
+	if strings.TrimSpace(item.ThumbnailURL) != "" {
+		thumbnailPayload, err := c.doBytesLimited(ctx, http.MethodGet, item.ThumbnailURL, true, gridThumbnailSourceByteLimit)
+		if err == nil && len(thumbnailPayload) > 0 {
+			return thumbnailPayload, nil
+		}
 	}
 
 	payload, err := c.doBytesLimited(ctx, http.MethodGet, item.ContentURL, true, gridThumbnailSourceByteLimit)
@@ -545,7 +613,18 @@ func (c *Client) GenerateGridThumbnail(ctx context.Context, item RecentItem, max
 
 	source, _, err := image.Decode(bytes.NewReader(payload))
 	if err != nil {
-		return nil, fmt.Errorf("decode original for grid thumbnail: %w", err)
+		fallback, fallbackErr := ffmpegutil.TranscodeBytesToPNG(
+			ctx,
+			payload,
+			previewInputExt(item.MIME),
+			maxDimension,
+			strings.HasPrefix(strings.ToLower(strings.TrimSpace(item.MIME)), "video/") || strings.TrimSpace(strings.ToLower(item.MIME)) == "video",
+		)
+		if fallbackErr != nil {
+			return nil, fmt.Errorf("decode original for grid thumbnail: %w", err)
+		}
+
+		return fallback, nil
 	}
 
 	thumbnail := resizeImageToFit(source, maxDimension)
@@ -555,6 +634,27 @@ func (c *Client) GenerateGridThumbnail(ctx context.Context, item RecentItem, max
 	}
 
 	return buf.Bytes(), nil
+}
+
+// FetchSelectedPreview prefers daemon thumbnail bytes for preview-pane display
+// and falls back to the bounded original only when no thumbnail is available.
+func (c *Client) FetchSelectedPreview(ctx context.Context, item RecentItem) ([]byte, error) {
+	if strings.TrimSpace(item.ThumbnailURL) != "" {
+		thumbnailPayload, err := c.doBytesLimited(ctx, http.MethodGet, item.ThumbnailURL, true, selectedPreviewThumbnailByteLimit)
+		if err == nil && len(thumbnailPayload) > 0 {
+			return thumbnailPayload, nil
+		}
+	}
+
+	return c.FetchFileContent(ctx, item, selectedPreviewThumbnailByteLimit)
+}
+
+func previewInputExt(mime string) string {
+	if mimeEnum, ok := mimes.FromMIMEType(mime); ok {
+		return mimes.Lookup(mimeEnum).Ext
+	}
+
+	return ""
 }
 
 // FetchFileContent returns the bytes for one daemon-served managed original.
@@ -570,6 +670,59 @@ func (c *Client) FetchFileContent(ctx context.Context, item RecentItem, maxBytes
 	}
 
 	return payload, nil
+}
+
+// FetchFileContentToTemp streams one daemon-served managed original into a temp
+// file so callers can hand large video payloads to native tools without keeping
+// the whole file in memory.
+func (c *Client) FetchFileContentToTemp(ctx context.Context, item RecentItem, maxBytes int64) (string, func(), error) {
+	if strings.TrimSpace(item.ContentURL) == "" {
+		return "", func() {}, fmt.Errorf("no content URL is available for file_id %d", item.FileID)
+	}
+
+	req, err := c.newRequest(ctx, http.MethodGet, item.ContentURL, nil, true)
+	if err != nil {
+		return "", func() {}, err
+	}
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		return "", func() {}, fmt.Errorf("perform daemon request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if err := checkAPIResponse(resp); err != nil {
+		return "", func() {}, err
+	}
+
+	tempFile, err := os.CreateTemp("", "hydrus-go-content-*"+previewInputExt(item.MIME))
+	if err != nil {
+		return "", func() {}, fmt.Errorf("create temp content file: %w", err)
+	}
+	tempPath := tempFile.Name()
+	cleanup := func() {
+		_ = os.Remove(tempPath)
+	}
+
+	bodyReader := io.Reader(resp.Body)
+	if maxBytes > 0 {
+		bodyReader = io.LimitReader(resp.Body, maxBytes+1)
+	}
+
+	written, err := io.Copy(tempFile, bodyReader)
+	if closeErr := tempFile.Close(); closeErr != nil && err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		cleanup()
+		return "", func() {}, fmt.Errorf("stream daemon response body: %w", err)
+	}
+	if maxBytes > 0 && written > maxBytes {
+		cleanup()
+		return "", func() {}, fmt.Errorf("daemon response exceeded %d bytes", maxBytes)
+	}
+
+	return tempPath, cleanup, nil
 }
 
 func (c *Client) doJSON(
@@ -817,4 +970,43 @@ func writeUploadRequestBody(
 	}
 
 	return pipeWriter.Close()
+}
+
+func (c *Client) ListSearchSessions(ctx context.Context) ([]clientsessions.Session, error) {
+	var response struct {
+		Sessions []clientsessions.Session `json:"sessions"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/v1/sessions", nil, true, &response); err != nil {
+		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+	return response.Sessions, nil
+}
+
+func (c *Client) CreateSearchSession(ctx context.Context, req clientsessions.CreateRequest) (clientsessions.Session, error) {
+	var response struct {
+		Session clientsessions.Session `json:"session"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/sessions", req, true, &response); err != nil {
+		return clientsessions.Session{}, fmt.Errorf("create session: %w", err)
+	}
+	return response.Session, nil
+}
+
+func (c *Client) UpdateSearchSession(ctx context.Context, id int64, req clientsessions.UpdateRequest) (clientsessions.Session, error) {
+	var response struct {
+		Session clientsessions.Session `json:"session"`
+	}
+	path := fmt.Sprintf("/v1/sessions/%d", id)
+	if err := c.doJSON(ctx, http.MethodPatch, path, req, true, &response); err != nil {
+		return clientsessions.Session{}, fmt.Errorf("update session %d: %w", id, err)
+	}
+	return response.Session, nil
+}
+
+func (c *Client) DeleteSearchSession(ctx context.Context, id int64) error {
+	path := fmt.Sprintf("/v1/sessions/%d", id)
+	if err := c.doJSON(ctx, http.MethodDelete, path, nil, true, nil); err != nil {
+		return fmt.Errorf("delete session %d: %w", id, err)
+	}
+	return nil
 }

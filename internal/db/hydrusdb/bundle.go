@@ -8,11 +8,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/official-elinas/hydrus-go/internal/core/services"
 	"github.com/official-elinas/hydrus-go/internal/storage/clientfiles"
@@ -29,14 +31,26 @@ type openMode string
 const (
 	modeReadOnly  openMode = "ro"
 	modeReadWrite openMode = "rw"
-	sqliteBusyTimeoutMS     = 5000
+
+	sqliteBusyTimeoutMS = 5000
+	sqliteMmapSize8GiB  = 8 * 1024 * 1024 * 1024
+	sqliteCacheSize256M = -262144
+
+	// readPoolSize controls how many pre-ATTACHed connections the read-only
+	// bundle pool holds. SQLite WAL mode allows N concurrent readers without
+	// write-blocking each other; each connection keeps its own page cache so
+	// keep this small to bound per-bundle memory pressure.
+	readPoolSize = 4
 )
 
-// Bundle is a Hydrus client DB bundle opened on a single dedicated SQLite
-// connection so ATTACH aliases remain stable.
+// Bundle is a Hydrus client DB bundle. Read-only bundles open readPoolSize
+// fully-ATTACHed connections in connPool so concurrent callers run in parallel
+// instead of serializing on a single conn. Write bundles use a single conn
+// guarded by writeGate.
 type Bundle struct {
-	db   *sql.DB
-	conn *sql.Conn
+	db       *sql.DB
+	conn     *sql.Conn
+	connPool chan *sql.Conn
 
 	mode      openMode
 	writeGate chan struct{}
@@ -45,6 +59,20 @@ type Bundle struct {
 	managedLayoutMu  sync.RWMutex
 	managedLayout    clientfiles.Layout
 	hasManagedLayout bool
+
+	recentBrowseTableMu  sync.RWMutex
+	recentBrowseTable    string
+	hasRecentBrowseTable bool
+
+	schemaTableNamesCache sync.Map
+
+	serviceDefsOnce sync.Once
+	serviceDefsVal  []serviceDefinition
+	serviceDefsErr  error
+
+	tagSchemaModeOnce sync.Once
+	tagSchemaModeVal  masterTagSchemaMode
+	tagSchemaModeErr  error
 }
 
 type bundlePaths struct {
@@ -65,7 +93,78 @@ func Open(ctx context.Context, dir string) (*Bundle, error) {
 // mutation workflows. Public HTTP surfaces should not use this until the write
 // path is fully designed and documented.
 func OpenWritable(ctx context.Context, dir string) (*Bundle, error) {
-	return openBundle(ctx, dir, modeReadWrite)
+	b, err := openBundle(ctx, dir, modeReadWrite)
+	if err != nil {
+		return nil, err
+	}
+	if err := b.ensureSessionsTable(ctx); err != nil {
+		slog.Error("ensureSessionsTable failed", "err", err)
+	}
+	go b.ensureMappingIndexes(ctx)
+	return b, nil
+}
+
+func (b *Bundle) ensureMappingIndexes(ctx context.Context) {
+	prefixes := []string{
+		"current_mappings_",
+		"deleted_mappings_",
+		"pending_mappings_",
+		"petitioned_mappings_",
+	}
+
+	rows, err := b.conn.QueryContext(ctx,
+		`SELECT name FROM external_mappings.sqlite_master WHERE type='table'`)
+	if err != nil {
+		slog.Error("ensureMappingIndexes: list tables", "err", err)
+		return
+	}
+	defer rows.Close()
+
+	var tables []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			slog.Error("ensureMappingIndexes: scan table name", "err", err)
+			return
+		}
+		for _, prefix := range prefixes {
+			if strings.HasPrefix(name, prefix) {
+				tables = append(tables, name)
+				break
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		slog.Error("ensureMappingIndexes: iterate tables", "err", err)
+		return
+	}
+
+	for _, table := range tables {
+		idxName := table + "_hash_id_idx"
+		existing, err := b.conn.QueryContext(ctx,
+			`SELECT 1 FROM external_mappings.sqlite_master WHERE type='index' AND name=?`, idxName)
+		if err != nil {
+			slog.Error("ensureMappingIndexes: check index", "index", idxName, "err", err)
+			return
+		}
+		exists := existing.Next()
+		_ = existing.Close()
+		if exists {
+			continue
+		}
+
+		slog.Info("ensureMappingIndexes: building hash_id index", "table", table)
+		t := time.Now()
+		query := fmt.Sprintf(
+			`CREATE INDEX IF NOT EXISTS external_mappings.%s ON %s (hash_id)`,
+			idxName, table,
+		)
+		if _, err := b.conn.ExecContext(ctx, query); err != nil {
+			slog.Error("ensureMappingIndexes: create index", "index", idxName, "err", err)
+			return
+		}
+		slog.Info("ensureMappingIndexes: index built", "table", table, "elapsed", time.Since(t))
+	}
 }
 
 // MainDBPath returns the canonical path to client.db for this bundle.
@@ -83,25 +182,18 @@ func openBundle(ctx context.Context, dir string, mode openMode) (*Bundle, error)
 		return nil, err
 	}
 
+	poolSize := 1
+	if mode == modeReadOnly {
+		poolSize = readPoolSize
+	}
+
 	db, err := sql.Open("sqlite", sqliteModeURI(paths.main, mode))
 	if err != nil {
 		return nil, fmt.Errorf("open main sqlite database: %w", err)
 	}
 
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-
-	conn, err := db.Conn(ctx)
-	if err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("open dedicated sqlite connection: %w", err)
-	}
-
-	if err := configureSQLiteConnection(ctx, conn); err != nil {
-		_ = conn.Close()
-		_ = db.Close()
-		return nil, err
-	}
+	db.SetMaxOpenConns(poolSize)
+	db.SetMaxIdleConns(poolSize)
 
 	attachments := []attachment{
 		{alias: "external_master", path: paths.master},
@@ -116,46 +208,118 @@ func openBundle(ctx context.Context, dir string, mode openMode) (*Bundle, error)
 		})
 	}
 
-	for _, attachment := range attachments {
-		if err := attachDatabase(ctx, conn, attachment, mode); err != nil {
+	conns := make([]*sql.Conn, 0, poolSize)
+	for i := range poolSize {
+		conn, err := db.Conn(ctx)
+		if err != nil {
+			for _, c := range conns {
+				_ = c.Close()
+			}
+			_ = db.Close()
+			return nil, fmt.Errorf("open sqlite connection %d: %w", i, err)
+		}
+
+		if err := configureSQLiteConnection(ctx, conn); err != nil {
 			_ = conn.Close()
+			for _, c := range conns {
+				_ = c.Close()
+			}
 			_ = db.Close()
 			return nil, err
 		}
-	}
 
-	if mode == modeReadWrite {
-		if err := configureSQLiteWriteConnection(ctx, conn, attachments); err != nil {
-			_ = conn.Close()
-			_ = db.Close()
-			return nil, err
+		for _, att := range attachments {
+			if err := attachDatabase(ctx, conn, att, mode); err != nil {
+				_ = conn.Close()
+				for _, c := range conns {
+					_ = c.Close()
+				}
+				_ = db.Close()
+				return nil, err
+			}
 		}
-	}
 
-	if mode == modeReadOnly {
-		if _, err := conn.ExecContext(ctx, "PRAGMA query_only = ON"); err != nil {
-			_ = conn.Close()
-			_ = db.Close()
-			return nil, fmt.Errorf("enable sqlite query_only mode: %w", err)
+		if mode == modeReadWrite {
+			if err := configureSQLiteWriteConnection(ctx, conn, attachments); err != nil {
+				_ = conn.Close()
+				for _, c := range conns {
+					_ = c.Close()
+				}
+				_ = db.Close()
+				return nil, err
+			}
 		}
+
+		if mode == modeReadOnly {
+			if _, err := conn.ExecContext(ctx, "PRAGMA query_only = ON"); err != nil {
+				_ = conn.Close()
+				for _, c := range conns {
+					_ = c.Close()
+				}
+				_ = db.Close()
+				return nil, fmt.Errorf("enable sqlite query_only mode: %w", err)
+			}
+		}
+
+		conns = append(conns, conn)
 	}
 
 	writeGate := make(chan struct{}, 1)
 	writeGate <- struct{}{}
 
+	var connPool chan *sql.Conn
+	if mode == modeReadOnly {
+		connPool = make(chan *sql.Conn, poolSize)
+		for _, c := range conns {
+			connPool <- c
+		}
+	}
+
 	return &Bundle{
 		db:        db,
-		conn:      conn,
+		conn:      conns[0],
+		connPool:  connPool,
 		mode:      mode,
 		writeGate: writeGate,
 		paths:     paths,
 	}, nil
 }
 
-// Close releases the dedicated SQLite connection.
+func (b *Bundle) acquireReadConn(ctx context.Context) (*sql.Conn, error) {
+	if b.connPool == nil {
+		return b.conn, nil
+	}
+
+	select {
+	case conn := <-b.connPool:
+		return conn, nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("wait for read connection: %w", ctx.Err())
+	}
+}
+
+func (b *Bundle) releaseReadConn(conn *sql.Conn) {
+	if b.connPool == nil {
+		return
+	}
+
+	b.connPool <- conn
+}
+
+// Close releases all SQLite connections in the bundle.
 func (b *Bundle) Close() error {
 	if b == nil {
 		return nil
+	}
+
+	if b.connPool != nil {
+		var errs []error
+		for range cap(b.connPool) {
+			conn := <-b.connPool
+			errs = append(errs, conn.Close())
+		}
+		errs = append(errs, b.db.Close())
+		return errors.Join(errs...)
 	}
 
 	return errors.Join(b.conn.Close(), b.db.Close())
@@ -419,11 +583,22 @@ func configureSQLiteConnection(ctx context.Context, conn *sql.Conn) error {
 		return errors.New("sqlite connection is nil")
 	}
 
-	if _, err := conn.ExecContext(
-		ctx,
-		fmt.Sprintf("PRAGMA busy_timeout = %d", sqliteBusyTimeoutMS),
-	); err != nil {
-		return fmt.Errorf("set sqlite busy_timeout pragma: %w", err)
+	pragmas := []struct {
+		name  string
+		value int64
+	}{
+		{"busy_timeout", sqliteBusyTimeoutMS},
+		{"mmap_size", sqliteMmapSize8GiB},
+		{"cache_size", sqliteCacheSize256M},
+	}
+
+	for _, p := range pragmas {
+		if _, err := conn.ExecContext(
+			ctx,
+			fmt.Sprintf("PRAGMA %s = %d", p.name, p.value),
+		); err != nil {
+			return fmt.Errorf("set sqlite %s pragma: %w", p.name, err)
+		}
 	}
 
 	return nil
@@ -462,4 +637,12 @@ func placeholders(count int) string {
 	}
 
 	return strings.TrimSuffix(strings.Repeat("?,", count), ",")
+}
+
+func rowPlaceholders(count int) string {
+	if count <= 0 {
+		return ""
+	}
+
+	return strings.TrimSuffix(strings.Repeat("(?),", count), ",")
 }
