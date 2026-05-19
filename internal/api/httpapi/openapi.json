@@ -910,6 +910,39 @@
         }
       }
     },
+    "/v1/downloader/gallery": {
+      "post": {
+        "tags": ["downloader"],
+        "summary": "Queue one-shot gallery download",
+        "description": "Resolves a downloader+keywords pair to a gallery URL via hydownloader and queues it as a one-shot single URL job.",
+        "security": [{ "HydrusAccessKey": [] }, { "HydrusSessionKey": [] }],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "downloader": { "type": "string" },
+                  "keywords": { "type": "string" },
+                  "additional_data": { "type": "string" },
+                  "priority": { "type": "integer", "format": "int64" },
+                  "filter": { "type": "string" },
+                  "max_files": { "type": "integer", "format": "int64" },
+                  "autoimport": { "type": "boolean" }
+                },
+                "required": ["downloader", "keywords"]
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "Gallery queued", "content": { "application/json": { "schema": { "allOf": [{ "$ref": "#/components/schemas/ResponseMeta" }, { "type": "object", "properties": { "queued": { "type": "boolean" } }, "required": ["queued"] }] } } } },
+          "400": { "description": "Invalid gallery request", "content": { "text/plain": { "schema": { "type": "string" } } } },
+          "501": { "description": "Hydownloader integration disabled", "content": { "text/plain": { "schema": { "type": "string" } } } }
+        }
+      }
+    },
     "/v1/downloader/subscription": {
       "post": {
         "tags": ["downloader"],

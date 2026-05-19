@@ -91,6 +91,7 @@ func NewHandler(
 	mux.Handle("/v1/downloader/status", server.get("/v1/downloader/status", server.handleGetDownloaderStatus))
 	mux.Handle("/v1/downloader/downloaders", server.get("/v1/downloader/downloaders", server.handleGetDownloaderDownloaders))
 	mux.Handle("/v1/downloader/url", server.post("/v1/downloader/url", server.handlePostDownloaderURL))
+	mux.Handle("/v1/downloader/gallery", server.post("/v1/downloader/gallery", server.handlePostDownloaderGallery))
 	mux.Handle("/v1/downloader/subscription", server.post("/v1/downloader/subscription", server.handlePostDownloaderSubscription))
 	mux.Handle(
 		"/get_files/file_metadata",

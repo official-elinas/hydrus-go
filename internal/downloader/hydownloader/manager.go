@@ -269,7 +269,65 @@ func (m *Manager) QueueURL(ctx context.Context, request coredownloader.URLReques
 	return nil
 }
 
-// QueueSubscription queues one hydownloader subscription.
+func (m *Manager) QueueGallery(ctx context.Context, request coredownloader.GalleryRequest) error {
+	if m == nil {
+		return &coredownloader.NotConfiguredError{Message: "hydownloader integration is disabled"}
+	}
+
+	downloaderName := strings.TrimSpace(request.Downloader)
+	keywords := strings.TrimSpace(request.Keywords)
+	if downloaderName == "" {
+		return &coredownloader.RequestError{Message: "downloader is required"}
+	}
+	if keywords == "" {
+		return &coredownloader.RequestError{Message: "keywords are required"}
+	}
+
+	var urlResponse struct {
+		URL string `json:"url"`
+	}
+	if err := m.postJSON(ctx, "/subscription_data_to_url", map[string]any{
+		"downloader": downloaderName,
+		"keywords":   keywords,
+	}, &urlResponse); err != nil {
+		return err
+	}
+	if urlResponse.URL == "" {
+		return fmt.Errorf("hydownloader could not resolve gallery URL for downloader %q keywords %q", downloaderName, keywords)
+	}
+
+	body := []map[string]any{{
+		"url":             urlResponse.URL,
+		"priority":        request.Priority,
+		"additional_data": strings.TrimSpace(request.AdditionalData),
+		"filter":          strings.TrimSpace(request.Filter),
+	}}
+	if request.MaxFiles != nil {
+		body[0]["max_files"] = *request.MaxFiles
+	}
+	if request.Autoimport != nil {
+		body[0]["autoimport"] = *request.Autoimport
+	} else {
+		body[0]["autoimport"] = m.cfg.Autoimport
+	}
+
+	var response struct {
+		Status bool   `json:"status"`
+		Reason string `json:"reason"`
+	}
+	if err := m.postJSON(ctx, "/add_or_update_urls", body, &response); err != nil {
+		return err
+	}
+	if !response.Status {
+		if response.Reason != "" {
+			return fmt.Errorf("hydownloader rejected gallery URL: %s", response.Reason)
+		}
+		return fmt.Errorf("hydownloader rejected gallery URL")
+	}
+
+	return nil
+}
+
 func (m *Manager) QueueSubscription(ctx context.Context, request coredownloader.SubscriptionRequest) error {
 	if m == nil {
 		return &coredownloader.NotConfiguredError{Message: "hydownloader integration is disabled"}
