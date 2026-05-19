@@ -30,6 +30,7 @@ import (
 	"fyne.io/fyne/v2/widget"
 
 	coredownloader "github.com/official-elinas/hydrus-go/internal/core/downloader"
+	"github.com/official-elinas/hydrus-go/internal/core/clientsessions"
 	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
 	"github.com/official-elinas/hydrus-go/internal/core/mimes"
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
@@ -183,6 +184,11 @@ type prototype struct {
 	importQueue        []importQueueEntry
 	importQueueRunning bool
 	selectedQueueIndex int
+
+	sessions        []clientsessions.Session
+	activeSessionID int64
+	sessionTabs     *container.DocTabs
+	tabSwitching    bool
 }
 
 type connectionSnapshot struct {
@@ -280,6 +286,27 @@ func newPrototype() *prototype {
 	p.searchSuggestionsList.HideSeparators = true
 	p.searchSuggestionsList.Hide()
 	p.gridHost = container.NewMax()
+	p.sessionTabs = container.NewDocTabs()
+	p.sessionTabs.OnClosed = func(tab *container.TabItem) {
+		for _, s := range p.sessions {
+			if s.Name == tab.Text {
+				p.closeSearchSession(s)
+				return
+			}
+		}
+	}
+	p.sessionTabs.OnSelected = func(tab *container.TabItem) {
+		if p.tabSwitching {
+			return
+		}
+		for _, s := range p.sessions {
+			if s.Name == tab.Text {
+				p.activateSession(s)
+				return
+			}
+		}
+	}
+	p.sessionTabs.SetTabLocation(container.TabLocationTop)
 
 	p.connectButton = widget.NewButton("Connect", p.showConnectDialog)
 	p.refreshButton = widget.NewButton("Refresh", func() {
@@ -294,6 +321,7 @@ func newPrototype() *prototype {
 	p.searchEntry.OnChanged = func(value string) {
 		p.galleryFilterQuery = strings.TrimSpace(value)
 		p.refreshSearchSuggestions()
+		p.persistActiveSession()
 		if p.galleryUsesDaemonSearch() {
 			p.reloadGallery(p.selectedFileID, "Updated library search results from hydrusd.")
 			return
@@ -308,6 +336,7 @@ func newPrototype() *prototype {
 
 		oldMode := p.gallerySortMode
 		p.gallerySortMode = value
+		p.persistActiveSession()
 
 		if p.galleryUsesDaemonSearch() || isDaemonCapableSort(oldMode) || isDaemonCapableSort(value) {
 			p.reloadGallery(p.selectedFileID, "Updated library sort from hydrusd.")
@@ -645,7 +674,7 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		widget.NewLabelWithStyle("Sort grid", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		p.gallerySortSelect,
 		p.searchHintLabel,
-		p.searchSuggestionsList,
+		newMinSizeBox(p.searchSuggestionsList, fyne.NewSize(0, 200)),
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Import queue", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		queueHelp,
@@ -684,7 +713,8 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		leftSplit,
 	)
 
-	galleryDetailSplit := container.NewHSplit(container.NewPadded(p.gridHost), detailPaneHost)
+	galleryWithTabs := container.NewBorder(p.sessionTabs, nil, nil, nil, container.NewPadded(p.gridHost))
+	galleryDetailSplit := container.NewHSplit(galleryWithTabs, detailPaneHost)
 	galleryDetailSplit.SetOffset(0.50)
 
 	mainSplit := container.NewHSplit(queuePane, galleryDetailSplit)
@@ -728,6 +758,7 @@ func (p *prototype) buildMainMenu() *fyne.MainMenu {
 	)
 
 	pagesMenu := fyne.NewMenu("Pages",
+		fyne.NewMenuItem("New Tab", p.newSearchSession),
 		fyne.NewMenuItem("Reload Current View", func() {
 			p.reloadGallery(p.selectedFileID, "Refreshed the current library view from hydrusd.")
 		}),
@@ -1324,6 +1355,7 @@ func (p *prototype) connectToDaemon(baseURL string, accessKey string) {
 			p.startImportQueueProcessor()
 			p.setStatus(fmt.Sprintf("Connected to hydrusd and loaded %d recent files.", len(page.Items)))
 			p.fetchPTRStatus()
+			go p.loadSearchSessions(candidate)
 		})
 	}(attemptID, wasConnected)
 }
@@ -4091,10 +4123,9 @@ func (p *prototype) renderPTRStatus(status coreptrsync.Status) {
 	running := status.IsRunning || status.Phase == coreptrsync.PhaseSyncing
 	p.setPTRVisualState(ptrHeadlineText(status), running)
 	if running {
-		done := status.ProcessedDefinitionCount + status.ProcessedContentCount
-		total := done + status.PendingProcessCount
+		total := status.DownloadedUpdateCount + status.PendingDownloadCount
 		if total > 0 {
-			p.ptrProgressBar.SetValue(float64(done) / float64(total))
+			p.ptrProgressBar.SetValue(float64(status.DownloadedUpdateCount) / float64(total))
 		} else {
 			p.ptrProgressBar.SetValue(0)
 		}

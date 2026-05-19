@@ -285,6 +285,7 @@ func New(startupCtx context.Context, cfg config.Config, logger *slog.Logger) (*A
 		importStore,
 		trashStore,
 		ptrStore,
+		writeBundle,
 		cfg.EnableCORS,
 	)
 

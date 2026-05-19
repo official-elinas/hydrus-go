@@ -97,6 +97,9 @@ func OpenWritable(ctx context.Context, dir string) (*Bundle, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := b.ensureSessionsTable(ctx); err != nil {
+		slog.Error("ensureSessionsTable failed", "err", err)
+	}
 	go b.ensureMappingIndexes(ctx)
 	return b, nil
 }

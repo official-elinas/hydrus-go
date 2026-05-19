@@ -13,6 +13,7 @@ import (
 
 	"github.com/official-elinas/hydrus-go/internal/buildinfo"
 	"github.com/official-elinas/hydrus-go/internal/core/clientapi"
+	"github.com/official-elinas/hydrus-go/internal/core/clientsessions"
 	coredownloader "github.com/official-elinas/hydrus-go/internal/core/downloader"
 	"github.com/official-elinas/hydrus-go/internal/core/fileassets"
 	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
@@ -24,18 +25,19 @@ import (
 )
 
 type Server struct {
-	logger         *slog.Logger
-	access         *AccessControl
-	services       services.Provider
-	metadataStore  filemetadata.Store
-	browseStore    librarybrowse.Store
-	assetStore     fileassets.Store
-	clientAPIStore clientapi.Store
+	logger          *slog.Logger
+	access          *AccessControl
+	services        services.Provider
+	metadataStore   filemetadata.Store
+	browseStore     librarybrowse.Store
+	assetStore      fileassets.Store
+	clientAPIStore  clientapi.Store
 	downloaderStore coredownloader.Store
-	importStore    fileimport.Store
-	trashStore     filetrash.Store
-	ptrStore       coreptrsync.Store
-	enableCORS     bool
+	importStore     fileimport.Store
+	trashStore      filetrash.Store
+	ptrStore        coreptrsync.Store
+	sessionStore    clientsessions.Store
+	enableCORS      bool
 }
 
 // NewHandler constructs the bootstrap hydrus-go HTTP API handler.
@@ -51,21 +53,23 @@ func NewHandler(
 	importStore fileimport.Store,
 	trashStore filetrash.Store,
 	ptrStore coreptrsync.Store,
+	sessionStore clientsessions.Store,
 	enableCORS bool,
 ) http.Handler {
 	server := &Server{
-		logger:         logger,
-		access:         access,
-		services:       serviceProvider,
-		metadataStore:  metadataStore,
-		browseStore:    browseStore,
-		assetStore:     assetStore,
-		clientAPIStore: clientAPIStore,
+		logger:          logger,
+		access:          access,
+		services:        serviceProvider,
+		metadataStore:   metadataStore,
+		browseStore:     browseStore,
+		assetStore:      assetStore,
+		clientAPIStore:  clientAPIStore,
 		downloaderStore: downloaderStore,
-		importStore:    importStore,
-		trashStore:     trashStore,
-		ptrStore:       ptrStore,
-		enableCORS:     enableCORS,
+		importStore:     importStore,
+		trashStore:      trashStore,
+		ptrStore:        ptrStore,
+		sessionStore:    sessionStore,
+		enableCORS:      enableCORS,
 	}
 
 	mux := http.NewServeMux()
@@ -104,6 +108,10 @@ func NewHandler(
 	mux.Handle("/manage_services/pending_counts", server.get("/manage_services/pending_counts", server.handleGetPendingCounts))
 	mux.Handle("/service/ptr/status", server.get("/service/ptr/status", server.handleGetPTRStatus))
 	mux.Handle("/service/ptr/sync", server.post("/service/ptr/sync", server.handlePostPTRSync))
+	mux.HandleFunc("GET /v1/sessions", server.handleListSessions)
+	mux.HandleFunc("POST /v1/sessions", server.handleCreateSession)
+	mux.HandleFunc("PATCH /v1/sessions/{id}", server.handleUpdateSession)
+	mux.HandleFunc("DELETE /v1/sessions/{id}", server.handleDeleteSession)
 
 	return server.withGlobalMiddleware(mux)
 }

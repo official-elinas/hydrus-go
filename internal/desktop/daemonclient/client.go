@@ -21,6 +21,7 @@ import (
 	"time"
 
 	coredownloader "github.com/official-elinas/hydrus-go/internal/core/downloader"
+	"github.com/official-elinas/hydrus-go/internal/core/clientsessions"
 	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
 	"github.com/official-elinas/hydrus-go/internal/core/mimes"
 	coreptrsync "github.com/official-elinas/hydrus-go/internal/core/ptrsync"
@@ -969,4 +970,43 @@ func writeUploadRequestBody(
 	}
 
 	return pipeWriter.Close()
+}
+
+func (c *Client) ListSearchSessions(ctx context.Context) ([]clientsessions.Session, error) {
+	var response struct {
+		Sessions []clientsessions.Session `json:"sessions"`
+	}
+	if err := c.doJSON(ctx, http.MethodGet, "/v1/sessions", nil, true, &response); err != nil {
+		return nil, fmt.Errorf("list sessions: %w", err)
+	}
+	return response.Sessions, nil
+}
+
+func (c *Client) CreateSearchSession(ctx context.Context, req clientsessions.CreateRequest) (clientsessions.Session, error) {
+	var response struct {
+		Session clientsessions.Session `json:"session"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, "/v1/sessions", req, true, &response); err != nil {
+		return clientsessions.Session{}, fmt.Errorf("create session: %w", err)
+	}
+	return response.Session, nil
+}
+
+func (c *Client) UpdateSearchSession(ctx context.Context, id int64, req clientsessions.UpdateRequest) (clientsessions.Session, error) {
+	var response struct {
+		Session clientsessions.Session `json:"session"`
+	}
+	path := fmt.Sprintf("/v1/sessions/%d", id)
+	if err := c.doJSON(ctx, http.MethodPatch, path, req, true, &response); err != nil {
+		return clientsessions.Session{}, fmt.Errorf("update session %d: %w", id, err)
+	}
+	return response.Session, nil
+}
+
+func (c *Client) DeleteSearchSession(ctx context.Context, id int64) error {
+	path := fmt.Sprintf("/v1/sessions/%d", id)
+	if err := c.doJSON(ctx, http.MethodDelete, path, nil, true, nil); err != nil {
+		return fmt.Errorf("delete session %d: %w", id, err)
+	}
+	return nil
 }
