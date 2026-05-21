@@ -112,5 +112,5 @@ func (t *mediaTile) CreateRenderer() fyne.WidgetRenderer {
 }
 
 func (t *mediaTile) MinSize() fyne.Size {
-	return fyne.NewSize(220, 248)
+	return fyne.NewSize(180, 200)
 }

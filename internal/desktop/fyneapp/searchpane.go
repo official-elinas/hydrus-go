@@ -47,8 +47,6 @@ func (p *prototype) activePane() *searchPane {
 		return pane
 	}
 	pane := newSearchPane()
-	if p.activeSessionID != 0 {
-		p.panes[p.activeSessionID] = pane
-	}
+	p.panes[p.activeSessionID] = pane
 	return pane
 }

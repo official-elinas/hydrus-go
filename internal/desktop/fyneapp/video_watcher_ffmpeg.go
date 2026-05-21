@@ -62,11 +62,11 @@ func newWatcherVideoContent(item daemonclient.RecentItem) *watcherVideoContent {
 	headline.Wrapping = fyne.TextTruncate
 
 	status := widget.NewLabel("Buffering video from hydrusd...")
-	status.Wrapping = fyne.TextWrapWord
+	status.Wrapping = fyne.TextTruncate
 	status.Alignment = fyne.TextAlignCenter
 
 	footer := widget.NewLabel("In-app video playback via ffmpeg/ffplay. Close the watcher to stop playback and use arrow keys to navigate.")
-	footer.Wrapping = fyne.TextWrapWord
+	footer.Wrapping = fyne.TextTruncate
 
 	background := canvas.NewRectangle(color.NRGBA{R: 18, G: 18, B: 20, A: 255})
 	content := container.NewBorder(
@@ -74,7 +74,7 @@ func newWatcherVideoContent(item daemonclient.RecentItem) *watcherVideoContent {
 		container.NewPadded(footer),
 		nil,
 		nil,
-		container.NewStack(container.NewPadded(viewer), container.NewCenter(container.NewPadded(status))),
+		container.NewStack(viewer, container.NewCenter(container.NewPadded(status))),
 	)
 
 	return &watcherVideoContent{

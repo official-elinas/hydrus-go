@@ -155,7 +155,7 @@ func (p *prototype) buildDownloaderGalleryTab(win fyne.Window, connection connec
 					statusLabel.SetText(fmt.Sprintf("Failed: %v", err))
 					return
 				}
-				statusLabel.SetText("Gallery queued. Files will appear after hydownloader autoimports them.")
+				statusLabel.SetText("Gallery subscription queued. hydownloader will crawl and autoimport files shortly.")
 				keywordsEntry.SetText("")
 			})
 		}(connection, name, keywords)

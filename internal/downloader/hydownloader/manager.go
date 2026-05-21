@@ -269,6 +269,11 @@ func (m *Manager) QueueURL(ctx context.Context, request coredownloader.URLReques
 	return nil
 }
 
+// QueueGallery queues a one-shot gallery fetch through hydownloader.
+// hydownloader has no dedicated gallery endpoint; the correct mechanism is a
+// subscription with a short check_interval. hydownloader enforces a minimum of
+// 60 seconds, so we use that. The subscription will run once immediately and
+// then sit idle — functionally a one-shot gallery crawl.
 func (m *Manager) QueueGallery(ctx context.Context, request coredownloader.GalleryRequest) error {
 	if m == nil {
 		return &coredownloader.NotConfiguredError{Message: "hydownloader integration is disabled"}
@@ -283,27 +288,20 @@ func (m *Manager) QueueGallery(ctx context.Context, request coredownloader.Galle
 		return &coredownloader.RequestError{Message: "keywords are required"}
 	}
 
-	var urlResponse struct {
-		URL string `json:"url"`
-	}
-	if err := m.postJSON(ctx, "/subscription_data_to_url", map[string]any{
-		"downloader": downloaderName,
-		"keywords":   keywords,
-	}, &urlResponse); err != nil {
-		return err
-	}
-	if urlResponse.URL == "" {
-		return fmt.Errorf("hydownloader could not resolve gallery URL for downloader %q keywords %q", downloaderName, keywords)
-	}
+	// Use the minimum check_interval hydownloader accepts (60s). The subscription
+	// runs once immediately; it is effectively a one-shot gallery fetch.
+	const oneShotInterval = 60
 
 	body := []map[string]any{{
-		"url":             urlResponse.URL,
-		"priority":        request.Priority,
+		"downloader":      downloaderName,
+		"keywords":        keywords,
 		"additional_data": strings.TrimSpace(request.AdditionalData),
+		"check_interval":  oneShotInterval,
+		"priority":        request.Priority,
 		"filter":          strings.TrimSpace(request.Filter),
 	}}
 	if request.MaxFiles != nil {
-		body[0]["max_files"] = *request.MaxFiles
+		body[0]["max_files_initial"] = *request.MaxFiles
 	}
 	if request.Autoimport != nil {
 		body[0]["autoimport"] = *request.Autoimport
@@ -315,14 +313,14 @@ func (m *Manager) QueueGallery(ctx context.Context, request coredownloader.Galle
 		Status bool   `json:"status"`
 		Reason string `json:"reason"`
 	}
-	if err := m.postJSON(ctx, "/add_or_update_urls", body, &response); err != nil {
+	if err := m.postJSON(ctx, "/add_or_update_subscriptions", body, &response); err != nil {
 		return err
 	}
 	if !response.Status {
 		if response.Reason != "" {
-			return fmt.Errorf("hydownloader rejected gallery URL: %s", response.Reason)
+			return fmt.Errorf("hydownloader rejected gallery subscription: %s", response.Reason)
 		}
-		return fmt.Errorf("hydownloader rejected gallery URL")
+		return fmt.Errorf("hydownloader rejected gallery subscription")
 	}
 
 	return nil

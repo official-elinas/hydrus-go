@@ -16,6 +16,10 @@ build:
 	mkdir -p bin
 	go build -o bin/hydrusd ./cmd/hydrusd
 
+build-cgo:
+	mkdir -p bin
+	CGO_ENABLED=1 CC=/usr/bin/gcc GOOS=linux go build -o bin/hydrusd ./cmd/hydrusd
+
 build-desktop:
 	mkdir -p bin
 	go build -tags fyne -o bin/hydrus-desktop ./cmd/hydrus-desktop

@@ -107,6 +107,9 @@ func (p *prototype) activateSession(s clientsessions.Session) {
 	}
 	p.tabSwitching = false
 
+	p.galleryHost.Objects = []fyne.CanvasObject{pane.gridHost}
+	p.galleryHost.Refresh()
+
 	p.reloadGallery(0, "Session loaded.")
 }
 

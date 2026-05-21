@@ -59,8 +59,7 @@ const (
 	tagSuggestionLimit          = 20
 	defaultDaemonURL            = "http://127.0.0.1:45869"
 	desktopWindowTitle          = "hydrus-go curation cockpit"
-	desktopHeaderTitle          = "Hydrus Go"
-	desktopHeaderSubtitle       = "Daemon-backed browse, import, search, and PTR"
+	desktopHeaderTitle = "Hydrus Go"
 	desktopIntroText            = "Daemon-first cockpit for validating Hydrus workflows through hydrusd."
 	defaultStatusText           = "Ready. Connect to hydrusd to start validation."
 	defaultMetadataText         = "Select a file from the grid to inspect daemon-backed metadata."
@@ -102,6 +101,7 @@ type prototype struct {
 	ptrWindow       fyne.Window
 	tagEditorWindow fyne.Window
 	watcherWindow   fyne.Window
+	watcherSurface  *watcherSurface
 	downloaderWindow fyne.Window
 	stateMu         sync.RWMutex
 	client          *daemonclient.Client
@@ -176,7 +176,8 @@ type prototype struct {
 	sessions        []clientsessions.Session
 	activeSessionID int64
 	sessionTabs     *container.DocTabs
-	tabSwitching bool
+	galleryHost     *fyne.Container
+	tabSwitching    bool
 }
 
 type connectionSnapshot struct {
@@ -215,16 +216,16 @@ func newPrototype() *prototype {
 	p.queueDetailLabel = widget.NewLabel(defaultSelectedQueueText())
 	p.queueDetailLabel.Wrapping = fyne.TextTruncate
 	p.leftTagsRichText = widget.NewRichText()
-	p.leftTagsRichText.Wrapping = fyne.TextWrapWord
+	p.leftTagsRichText.Wrapping = fyne.TextWrapOff
 	p.setLeftTagsText(defaultTagsText)
 	p.searchHintLabel = widget.NewLabel("Autocomplete suggestions appear here when connected to hydrusd.")
-	p.searchHintLabel.Wrapping = fyne.TextWrapWord
+	p.searchHintLabel.Wrapping = fyne.TextTruncate
 	p.previewImage = canvas.NewImageFromImage(nil)
 	p.previewImage.FillMode = canvas.ImageFillContain
 	p.previewImage.Hide()
 	p.previewLabel = newSelectedPreviewLabel(defaultPreviewText)
 	p.tagsRichText = widget.NewRichText()
-	p.tagsRichText.Wrapping = fyne.TextWrapWord
+	p.tagsRichText.Wrapping = fyne.TextWrapOff
 	p.setRightTagsText(defaultTagsText)
 	p.metadataLabel = widget.NewLabel(defaultMetadataText)
 	p.metadataLabel.Wrapping = fyne.TextWrapWord
@@ -273,6 +274,7 @@ func newPrototype() *prototype {
 	p.searchSuggestionsList.HideSeparators = true
 	p.searchSuggestionsList.Hide()
 	p.sessionTabs = container.NewDocTabs()
+	p.galleryHost = container.NewMax(p.activePane().gridHost)
 	p.sessionTabs.OnClosed = func(tab *container.TabItem) {
 		for _, s := range p.sessions {
 			if s.Name == tab.Text {
@@ -582,8 +584,6 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		widget.NewToolbarAction(theme.DeleteIcon(), p.confirmTrashSelected),
 	)
 	headerTitle := widget.NewLabelWithStyle(desktopHeaderTitle, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	headerSubtitle := widget.NewLabel(desktopHeaderSubtitle)
-	headerSubtitle.Wrapping = fyne.TextTruncate
 	header := container.NewStack(
 		canvas.NewRectangle(color.NRGBA{R: 7, G: 10, B: 18, A: 255}),
 		container.NewPadded(container.NewBorder(
@@ -591,7 +591,7 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 			nil,
 			nil,
 			toolbar,
-			container.NewVBox(headerTitle, headerSubtitle),
+			headerTitle,
 		)),
 	)
 
@@ -609,7 +609,7 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		nil,
 		nil,
 		nil,
-		newMinSizeBox(container.NewPadded(previewPanel), fyne.NewSize(360, 240)),
+		newMinSizeBox(container.NewPadded(previewPanel), fyne.NewSize(360, 0)),
 	)
 
 	tagsScroll := container.NewVScroll(p.tagsRichText)
@@ -635,11 +635,12 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 
 	detailPane := container.NewVSplit(previewSection, tagAndMetadataPane)
 	detailPane.SetOffset(0.42)
-	detailPaneHost := newMinSizeBox(detailPane, fyne.NewSize(360, 480))
+	detailPaneHost := newMinSizeBox(detailPane, fyne.NewSize(360, 0))
 
 	queueHelp := widget.NewLabel(
 		"Add files or folders, or drag them anywhere into the window.",
 	)
+	queueHelp.Wrapping = fyne.TextTruncate
 
 	queueActionButtons := container.NewVBox(
 		compactControlRow(p.retrySelectedButton, p.removeSelectedButton),
@@ -648,7 +649,7 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 	)
 
 	introLabel := widget.NewLabel(desktopIntroText)
-	introLabel.Wrapping = fyne.TextWrapWord
+	introLabel.Wrapping = fyne.TextTruncate
 
 	queueHeader := container.NewPadded(container.NewVBox(
 		widget.NewLabelWithStyle("Curation queue", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
@@ -662,7 +663,7 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		widget.NewLabelWithStyle("Sort grid", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		p.gallerySortSelect,
 		p.searchHintLabel,
-		newMinSizeBox(p.searchSuggestionsList, fyne.NewSize(0, 200)),
+		newMinSizeBox(p.searchSuggestionsList, fyne.NewSize(0, 0)),
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Import queue", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		queueHelp,
@@ -701,7 +702,7 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		leftSplit,
 	)
 
-	galleryWithTabs := container.NewBorder(p.sessionTabs, nil, nil, nil, container.NewPadded(p.activePane().gridHost))
+	galleryWithTabs := container.NewBorder(p.sessionTabs, nil, nil, nil, container.NewPadded(p.galleryHost))
 	galleryDetailSplit := container.NewHSplit(galleryWithTabs, detailPaneHost)
 	galleryDetailSplit.SetOffset(0.50)
 
@@ -2356,9 +2357,7 @@ func (p *prototype) ensureGridWrap() {
 				p.ensurePreviewResource(recentItem)
 			}
 
-			if !hasMetadata && gallerySortRequiresMetadata(p.activePane().gallerySortMode) {
-				p.ensureTileMetadata(recentItem)
-			}
+			p.ensureTileMetadata(recentItem)
 		},
 	)
 	p.activePane().gridWrap.OnSelected = func(id widget.GridWrapItemID) {
@@ -2377,7 +2376,56 @@ func (p *prototype) monitorRecentGridScroll() {
 	for range ticker.C {
 		fyne.Do(func() {
 			p.maybeLoadMoreRecent()
+			p.maybeEnsureVisibleMetadata()
 		})
+	}
+}
+
+func (p *prototype) maybeEnsureVisibleMetadata() {
+	if p.activePane().gridWrap == nil {
+		return
+	}
+	connection := p.currentConnection()
+	if !connection.connected || connection.client == nil {
+		return
+	}
+
+	columns := p.activePane().gridWrap.ColumnCount()
+	if columns <= 0 {
+		return
+	}
+	if p.activePane().gridWrap.Size().Height <= 0 {
+		return
+	}
+
+	items := p.activeGalleryItems()
+	if len(items) == 0 {
+		return
+	}
+
+	padding := theme.Padding()
+	rowHeight := float32(newMediaTile().MinSize().Height) + padding
+	scrollOffset := p.activePane().gridWrap.GetScrollOffset()
+	viewHeight := p.activePane().gridWrap.Size().Height
+
+	firstVisibleRow := int(scrollOffset / rowHeight)
+	if firstVisibleRow < 0 {
+		firstVisibleRow = 0
+	}
+	lastVisibleRow := int((scrollOffset+viewHeight)/rowHeight) + 1
+
+	firstIdx := firstVisibleRow * columns
+	lastIdx := (lastVisibleRow+1)*columns - 1
+	if firstIdx < 0 {
+		firstIdx = 0
+	}
+	if lastIdx >= len(items) {
+		lastIdx = len(items) - 1
+	}
+
+	for i := firstIdx; i <= lastIdx; i++ {
+		p.ensureTileMetadata(items[i])
+		p.ensureTileTagMetadata(items[i])
 	}
 }
 
@@ -2786,6 +2834,7 @@ func (p *prototype) presentWatcherWindow(title string, content fyne.CanvasObject
 			p.cancelWatcherRequest()
 			if p.watcherWindow == watcherWindow {
 				p.watcherWindow = nil
+				p.watcherSurface = nil
 			}
 		})
 
@@ -2798,12 +2847,15 @@ func (p *prototype) presentWatcherWindow(title string, content fyne.CanvasObject
 			}
 		})
 
+		surface := newWatcherSurface(content, p.navigateWatcher)
+		watcherWindow.SetContent(surface)
+		p.watcherSurface = surface
 		p.watcherWindow = watcherWindow
+	} else {
+		p.watcherSurface.SwapContent(content)
 	}
 
 	p.watcherWindow.SetTitle(title)
-	surface := newWatcherSurface(content, p.navigateWatcher)
-	p.watcherWindow.SetContent(surface)
 	p.watcherWindow.Show()
 	p.watcherWindow.RequestFocus()
 }
@@ -3194,6 +3246,88 @@ func (p *prototype) ensureTileMetadata(item daemonclient.RecentItem) {
 	}(connection, item, generation)
 }
 
+func (p *prototype) ensureTileTagMetadata(item daemonclient.RecentItem) {
+	connection := p.currentConnection()
+	if !connection.connected || connection.client == nil {
+		return
+	}
+	if !p.shouldPrefetchTileMetadata(item.FileID) {
+		return
+	}
+
+	p.tileMetadataMu.Lock()
+	generation := p.tileMetadataGen
+
+	cached, hasCached := p.tileMetadataCache[item.FileID]
+	if !hasCached || cached.FileID == 0 {
+		p.tileMetadataMu.Unlock()
+		return
+	}
+	if len(cached.Tags) > 0 {
+		p.tileMetadataMu.Unlock()
+		return
+	}
+
+	if _, loading := p.tileMetadataTagLoads[item.FileID]; loading {
+		p.tileMetadataMu.Unlock()
+		return
+	}
+	if len(p.tileMetadataTagLoads) >= tileMetadataConcurrentLimit {
+		p.tileMetadataMu.Unlock()
+		return
+	}
+
+	p.tileMetadataTagLoads[item.FileID] = struct{}{}
+	p.tileMetadataMu.Unlock()
+
+	go func(connection connectionSnapshot, fileID int64, generation uint64) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+
+		defer func() {
+			p.tileMetadataMu.Lock()
+			if generation == p.tileMetadataGen {
+				delete(p.tileMetadataTagLoads, fileID)
+			}
+			p.tileMetadataMu.Unlock()
+		}()
+
+		metadata, err := connection.client.GetFileMetadata(ctx, fileID)
+		if err != nil {
+			return
+		}
+
+		if !p.isCurrentOperation(connection) {
+			return
+		}
+
+		p.tileMetadataMu.Lock()
+		if generation != p.tileMetadataGen {
+			p.tileMetadataMu.Unlock()
+			return
+		}
+		c := p.tileMetadataCache[fileID]
+		c.Tags = metadata.Tags
+		p.tileMetadataCache[fileID] = c
+		p.tileMetadataMu.Unlock()
+
+		fyne.Do(func() {
+			if !p.isCurrentOperation(connection) {
+				return
+			}
+			p.renderGrid()
+			if p.activePane().selectedFileID == fileID {
+				p.tileMetadataMu.Lock()
+				updated := p.tileMetadataCache[fileID]
+				p.tileMetadataMu.Unlock()
+				p.setRightTagsMetadata(updated)
+				p.setLeftTagsMetadata(updated)
+				p.refreshSearchSuggestions()
+			}
+		})
+	}(connection, item.FileID, generation)
+}
+
 func (p *prototype) updateActionState() {
 	connection := p.currentConnection()
 	connected := connection.connected
@@ -3402,7 +3536,7 @@ func newWatcherImageContent(item daemonclient.RecentItem, resource fyne.Resource
 		footerText = fmt.Sprintf("Resizable image viewer • %dx%d • use mouse wheel / arrow keys to navigate.", *item.Width, *item.Height)
 	}
 	footer := widget.NewLabel(footerText)
-	footer.Wrapping = fyne.TextWrapWord
+	footer.Wrapping = fyne.TextTruncate
 
 	background := canvas.NewRectangle(color.NRGBA{R: 18, G: 18, B: 20, A: 255})
 	imageContainer := container.NewPadded(imageViewer)
@@ -3432,7 +3566,7 @@ func newWatcherMessageContent(mime string, message string) fyne.CanvasObject {
 	headline.Wrapping = fyne.TextTruncate
 
 	body := widget.NewLabel(message)
-	body.Wrapping = fyne.TextWrapWord
+	body.Wrapping = fyne.TextTruncate
 	body.Alignment = fyne.TextAlignCenter
 
 	background := canvas.NewRectangle(color.NRGBA{R: 18, G: 18, B: 20, A: 255})
