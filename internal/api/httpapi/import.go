@@ -24,7 +24,7 @@ const (
 	hydrusAddFileUploadFilename     = "hydrus-api-upload"
 )
 
-var uploadRequestBodyLimitBytes int64 = 4 << 30
+var uploadRequestBodyLimitBytes int64 = 5 << 30
 
 func (s *Server) handleImportLocalFile(w http.ResponseWriter, r *http.Request) {
 	_, statusCode, err := s.access.Authorize(

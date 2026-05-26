@@ -59,8 +59,7 @@ const (
 	tagSuggestionLimit          = 20
 	defaultDaemonURL            = "http://127.0.0.1:45869"
 	desktopWindowTitle          = "hydrus-go curation cockpit"
-	desktopHeaderTitle          = "Hydrus Go"
-	desktopHeaderSubtitle       = "Daemon-backed browse, import, search, and PTR"
+	desktopHeaderTitle = "Hydrus Go"
 	desktopIntroText            = "Daemon-first cockpit for validating Hydrus workflows through hydrusd."
 	defaultStatusText           = "Ready. Connect to hydrusd to start validation."
 	defaultMetadataText         = "Select a file from the grid to inspect daemon-backed metadata."
@@ -102,6 +101,8 @@ type prototype struct {
 	ptrWindow       fyne.Window
 	tagEditorWindow fyne.Window
 	watcherWindow   fyne.Window
+	watcherSurface  *watcherSurface
+	downloaderWindow fyne.Window
 	stateMu         sync.RWMutex
 	client          *daemonclient.Client
 
@@ -138,24 +139,11 @@ type prototype struct {
 	ptrPendingLabel   *widget.Label
 	ptrProgressBar    *widget.ProgressBar
 	queueList         *widget.List
-	gridHost          *fyne.Container
-	gridWrap          *widget.GridWrap
 
-	recent                []daemonclient.RecentItem
-	searchResults         []daemonclient.RecentItem
-	recentLimit           int
-	recentNextOffset      int
-	recentHasMore         bool
-	searchNextOffset      int
-	searchHasMore         bool
-	recentLoadBusy        bool
-	galleryFilterQuery    string
-	gallerySortMode       string
-	searchSuggestions     []string
-	searchRequestID       uint64
-	galleryRequestID      uint64
-	selectedFileID        int64
-	connected             bool
+	searchRequestID uint64
+	panes           map[int64]*searchPane
+
+	connected      bool
 	connectionGen         uint64
 	connectAttemptID      uint64
 	selectedPreviewCache  map[string]fyne.Resource
@@ -188,6 +176,7 @@ type prototype struct {
 	sessions        []clientsessions.Session
 	activeSessionID int64
 	sessionTabs     *container.DocTabs
+	galleryHost     *fyne.Container
 	tabSwitching    bool
 }
 
@@ -210,8 +199,6 @@ func newPrototype() *prototype {
 		app:                  application,
 		window:               window,
 		client:               daemonclient.New(),
-		recentLimit:          recentPageLimit,
-		gallerySortMode:      gallerySortNewest,
 		selectedQueueIndex:   -1,
 		selectedPreviewCache: map[string]fyne.Resource{},
 		thumbnailCache:       map[int64]fyne.Resource{},
@@ -219,6 +206,7 @@ func newPrototype() *prototype {
 		tileMetadataCache:    map[int64]daemonclient.FileMetadata{},
 		tileMetadataLoads:    map[int64]struct{}{},
 		tileMetadataTagLoads: map[int64]struct{}{},
+		panes:                map[int64]*searchPane{},
 	}
 
 	p.connectionLabel = widget.NewLabel("")
@@ -228,16 +216,16 @@ func newPrototype() *prototype {
 	p.queueDetailLabel = widget.NewLabel(defaultSelectedQueueText())
 	p.queueDetailLabel.Wrapping = fyne.TextTruncate
 	p.leftTagsRichText = widget.NewRichText()
-	p.leftTagsRichText.Wrapping = fyne.TextWrapWord
+	p.leftTagsRichText.Wrapping = fyne.TextWrapOff
 	p.setLeftTagsText(defaultTagsText)
 	p.searchHintLabel = widget.NewLabel("Autocomplete suggestions appear here when connected to hydrusd.")
-	p.searchHintLabel.Wrapping = fyne.TextWrapWord
+	p.searchHintLabel.Wrapping = fyne.TextTruncate
 	p.previewImage = canvas.NewImageFromImage(nil)
 	p.previewImage.FillMode = canvas.ImageFillContain
 	p.previewImage.Hide()
 	p.previewLabel = newSelectedPreviewLabel(defaultPreviewText)
 	p.tagsRichText = widget.NewRichText()
-	p.tagsRichText.Wrapping = fyne.TextWrapWord
+	p.tagsRichText.Wrapping = fyne.TextWrapOff
 	p.setRightTagsText(defaultTagsText)
 	p.metadataLabel = widget.NewLabel(defaultMetadataText)
 	p.metadataLabel.Wrapping = fyne.TextWrapWord
@@ -260,7 +248,7 @@ func newPrototype() *prototype {
 	p.queueList.OnSelected = p.selectImportQueueEntry
 	p.queueList.OnUnselected = p.unselectImportQueueEntry
 	p.searchSuggestionsList = widget.NewList(
-		func() int { return len(p.searchSuggestions) },
+		func() int { return len(p.activePane().searchSuggestions) },
 		func() fyne.CanvasObject {
 			button := widget.NewButton("", nil)
 			button.Alignment = widget.ButtonAlignLeading
@@ -268,14 +256,14 @@ func newPrototype() *prototype {
 		},
 		func(id widget.ListItemID, item fyne.CanvasObject) {
 			button := item.(*widget.Button)
-			if id < 0 || id >= len(p.searchSuggestions) {
+			if id < 0 || id >= len(p.activePane().searchSuggestions) {
 				button.SetText("")
 				button.OnTapped = nil
 				button.Disable()
 				return
 			}
 
-			suggestion := p.searchSuggestions[id]
+			suggestion := p.activePane().searchSuggestions[id]
 			button.SetText(suggestion)
 			button.OnTapped = func() {
 				p.searchEntry.SetText(suggestion)
@@ -285,8 +273,8 @@ func newPrototype() *prototype {
 	)
 	p.searchSuggestionsList.HideSeparators = true
 	p.searchSuggestionsList.Hide()
-	p.gridHost = container.NewMax()
 	p.sessionTabs = container.NewDocTabs()
+	p.galleryHost = container.NewMax(p.activePane().gridHost)
 	p.sessionTabs.OnClosed = func(tab *container.TabItem) {
 		for _, s := range p.sessions {
 			if s.Name == tab.Text {
@@ -311,7 +299,7 @@ func newPrototype() *prototype {
 	p.connectButton = widget.NewButton("Connect", p.showConnectDialog)
 	p.refreshButton = widget.NewButton("Refresh", func() {
 		p.fetchPTRStatus()
-		p.reloadGallery(p.selectedFileID, "Refreshed the current library view from hydrusd.")
+		p.reloadGallery(p.activePane().selectedFileID, "Refreshed the current library view from hydrusd.")
 	})
 	p.ptrRefreshButton = widget.NewButton("Refresh PTR Status", p.fetchPTRStatus)
 	p.addButton = widget.NewButton("Add File", p.showImportDialog)
@@ -319,11 +307,12 @@ func newPrototype() *prototype {
 	p.searchEntry = widget.NewEntry()
 	p.searchEntry.SetPlaceHolder("Search hydrusd by tag or supported system predicate; unsupported free text is ignored")
 	p.searchEntry.OnChanged = func(value string) {
-		p.galleryFilterQuery = strings.TrimSpace(value)
+		pane := p.activePane()
+		pane.galleryFilterQuery = strings.TrimSpace(value)
 		p.refreshSearchSuggestions()
 		p.persistActiveSession()
 		if p.galleryUsesDaemonSearch() {
-			p.reloadGallery(p.selectedFileID, "Updated library search results from hydrusd.")
+			p.reloadGallery(pane.selectedFileID, "Updated library search results from hydrusd.")
 			return
 		}
 
@@ -334,18 +323,19 @@ func newPrototype() *prototype {
 			return
 		}
 
-		oldMode := p.gallerySortMode
-		p.gallerySortMode = value
+		pane := p.activePane()
+		oldMode := pane.gallerySortMode
+		pane.gallerySortMode = value
 		p.persistActiveSession()
 
 		if p.galleryUsesDaemonSearch() || isDaemonCapableSort(oldMode) || isDaemonCapableSort(value) {
-			p.reloadGallery(p.selectedFileID, "Updated library sort from hydrusd.")
+			p.reloadGallery(pane.selectedFileID, "Updated library sort from hydrusd.")
 			return
 		}
 
 		p.renderGrid()
 	})
-	p.gallerySortSelect.SetSelected(p.gallerySortMode)
+	p.gallerySortSelect.SetSelected(gallerySortNewest)
 	p.retrySelectedButton = widget.NewButton("Retry Selected", p.retrySelectedQueueEntry)
 	p.removeSelectedButton = widget.NewButton("Remove Selected", p.removeSelectedQueueEntry)
 	p.retryFailedButton = widget.NewButton("Retry Failed", p.retryFailedQueueEntries)
@@ -586,7 +576,7 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		widget.NewToolbarAction(theme.LoginIcon(), p.showConnectDialog),
 		widget.NewToolbarAction(theme.ViewRefreshIcon(), func() {
 			p.fetchPTRStatus()
-			p.reloadGallery(p.selectedFileID, "Refreshed the current library view from hydrusd.")
+			p.reloadGallery(p.activePane().selectedFileID, "Refreshed the current library view from hydrusd.")
 		}),
 		widget.NewToolbarSeparator(),
 		widget.NewToolbarAction(theme.ContentAddIcon(), p.showImportDialog),
@@ -594,8 +584,6 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		widget.NewToolbarAction(theme.DeleteIcon(), p.confirmTrashSelected),
 	)
 	headerTitle := widget.NewLabelWithStyle(desktopHeaderTitle, fyne.TextAlignLeading, fyne.TextStyle{Bold: true})
-	headerSubtitle := widget.NewLabel(desktopHeaderSubtitle)
-	headerSubtitle.Wrapping = fyne.TextTruncate
 	header := container.NewStack(
 		canvas.NewRectangle(color.NRGBA{R: 7, G: 10, B: 18, A: 255}),
 		container.NewPadded(container.NewBorder(
@@ -603,7 +591,7 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 			nil,
 			nil,
 			toolbar,
-			container.NewVBox(headerTitle, headerSubtitle),
+			headerTitle,
 		)),
 	)
 
@@ -621,7 +609,7 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		nil,
 		nil,
 		nil,
-		newMinSizeBox(container.NewPadded(previewPanel), fyne.NewSize(360, 240)),
+		newMinSizeBox(container.NewPadded(previewPanel), fyne.NewSize(360, 0)),
 	)
 
 	tagsScroll := container.NewVScroll(p.tagsRichText)
@@ -647,11 +635,12 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 
 	detailPane := container.NewVSplit(previewSection, tagAndMetadataPane)
 	detailPane.SetOffset(0.42)
-	detailPaneHost := newMinSizeBox(detailPane, fyne.NewSize(360, 480))
+	detailPaneHost := newMinSizeBox(detailPane, fyne.NewSize(360, 0))
 
 	queueHelp := widget.NewLabel(
 		"Add files or folders, or drag them anywhere into the window.",
 	)
+	queueHelp.Wrapping = fyne.TextTruncate
 
 	queueActionButtons := container.NewVBox(
 		compactControlRow(p.retrySelectedButton, p.removeSelectedButton),
@@ -660,7 +649,7 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 	)
 
 	introLabel := widget.NewLabel(desktopIntroText)
-	introLabel.Wrapping = fyne.TextWrapWord
+	introLabel.Wrapping = fyne.TextTruncate
 
 	queueHeader := container.NewPadded(container.NewVBox(
 		widget.NewLabelWithStyle("Curation queue", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
@@ -674,7 +663,7 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		widget.NewLabelWithStyle("Sort grid", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		p.gallerySortSelect,
 		p.searchHintLabel,
-		newMinSizeBox(p.searchSuggestionsList, fyne.NewSize(0, 200)),
+		newMinSizeBox(p.searchSuggestionsList, fyne.NewSize(0, 0)),
 		widget.NewSeparator(),
 		widget.NewLabelWithStyle("Import queue", fyne.TextAlignLeading, fyne.TextStyle{Bold: true}),
 		queueHelp,
@@ -713,7 +702,7 @@ func (p *prototype) buildContent() fyne.CanvasObject {
 		leftSplit,
 	)
 
-	galleryWithTabs := container.NewBorder(p.sessionTabs, nil, nil, nil, container.NewPadded(p.gridHost))
+	galleryWithTabs := container.NewBorder(p.sessionTabs, nil, nil, nil, container.NewPadded(p.galleryHost))
 	galleryDetailSplit := container.NewHSplit(galleryWithTabs, detailPaneHost)
 	galleryDetailSplit.SetOffset(0.50)
 
@@ -745,7 +734,7 @@ func (p *prototype) buildMainMenu() *fyne.MainMenu {
 		fyne.NewMenuItem("Connect", p.showConnectDialog),
 		fyne.NewMenuItem("Refresh", func() {
 			p.fetchPTRStatus()
-			p.reloadGallery(p.selectedFileID, "Refreshed the current library view from hydrusd.")
+			p.reloadGallery(p.activePane().selectedFileID, "Refreshed the current library view from hydrusd.")
 		}),
 		fyne.NewMenuItemSeparator(),
 		fyne.NewMenuItem("Add File", p.showImportDialog),
@@ -760,7 +749,7 @@ func (p *prototype) buildMainMenu() *fyne.MainMenu {
 	pagesMenu := fyne.NewMenu("Pages",
 		fyne.NewMenuItem("New Tab", p.newSearchSession),
 		fyne.NewMenuItem("Reload Current View", func() {
-			p.reloadGallery(p.selectedFileID, "Refreshed the current library view from hydrusd.")
+			p.reloadGallery(p.activePane().selectedFileID, "Refreshed the current library view from hydrusd.")
 		}),
 		fyne.NewMenuItem("Focus Grid", showPlanned("Pages", "Recent files are loaded into the center grid. More page controls can grow here as the desktop gets closer to Hydrus.")),
 	)
@@ -774,6 +763,7 @@ func (p *prototype) buildMainMenu() *fyne.MainMenu {
 
 	networkMenu := fyne.NewMenu("Network",
 		fyne.NewMenuItem("PTR Sync", p.showPTRWindow),
+		fyne.NewMenuItem("Downloader", p.showDownloaderWindow),
 		fyne.NewMenuItem("Reconnect", p.showConnectDialog),
 	)
 
@@ -908,11 +898,11 @@ func (p *prototype) showPTRWindow() {
 
 func (p *prototype) showEditTagsDialog() {
 	connection := p.currentConnection()
-	if !connection.connected || connection.client == nil || p.selectedFileID <= 0 {
+	if !connection.connected || connection.client == nil || p.activePane().selectedFileID <= 0 {
 		return
 	}
 
-	fileID := p.selectedFileID
+	fileID := p.activePane().selectedFileID
 	if p.tagEditorWindow != nil {
 		p.tagEditorWindow.Close()
 	}
@@ -1268,8 +1258,8 @@ func (p *prototype) connectToDaemon(baseURL string, accessKey string) {
 				p.updateActionState()
 				if wasConnected {
 					p.renderGrid()
-					if p.selectedFileID > 0 {
-						p.loadSelectedPreview(p.selectedFileID)
+					if p.activePane().selectedFileID > 0 {
+						p.loadSelectedPreview(p.activePane().selectedFileID)
 					}
 					p.startImportQueueProcessor()
 				}
@@ -1294,8 +1284,8 @@ func (p *prototype) connectToDaemon(baseURL string, accessKey string) {
 				p.updateActionState()
 				if wasConnected {
 					p.renderGrid()
-					if p.selectedFileID > 0 {
-						p.loadSelectedPreview(p.selectedFileID)
+					if p.activePane().selectedFileID > 0 {
+						p.loadSelectedPreview(p.activePane().selectedFileID)
 					}
 					p.startImportQueueProcessor()
 				}
@@ -1320,8 +1310,8 @@ func (p *prototype) connectToDaemon(baseURL string, accessKey string) {
 				p.updateActionState()
 				if wasConnected {
 					p.renderGrid()
-					if p.selectedFileID > 0 {
-						p.loadSelectedPreview(p.selectedFileID)
+					if p.activePane().selectedFileID > 0 {
+						p.loadSelectedPreview(p.activePane().selectedFileID)
 					}
 					p.startImportQueueProcessor()
 				}
@@ -1858,11 +1848,11 @@ func (p *prototype) clearImportQueue() {
 }
 
 func (p *prototype) confirmTrashSelected() {
-	if p.selectedFileID <= 0 {
+	if p.activePane().selectedFileID <= 0 {
 		return
 	}
 
-	fileID := p.selectedFileID
+	fileID := p.activePane().selectedFileID
 	dialog.ShowConfirm(
 		"Trash selected file",
 		fmt.Sprintf("Send file_id %d to hydrusd trash?", fileID),
@@ -1930,8 +1920,8 @@ func (p *prototype) galleryUsesDaemonSearch() bool {
 		return false
 	}
 
-	remoteTags, daemonSystem, _ := p.splitGallerySearchQuery(p.galleryFilterQuery)
-	return len(remoteTags) > 0 || len(daemonSystem) > 0 || (isDaemonCapableSort(p.gallerySortMode) && p.gallerySortMode != gallerySortNewest)
+	remoteTags, daemonSystem, _ := p.splitGallerySearchQuery(p.activePane().galleryFilterQuery)
+	return len(remoteTags) > 0 || len(daemonSystem) > 0 || (isDaemonCapableSort(p.activePane().gallerySortMode) && p.activePane().gallerySortMode != gallerySortNewest)
 }
 
 func (p *prototype) splitGallerySearchQuery(query string) ([]string, []string, []string) {
@@ -1967,7 +1957,7 @@ func (p *prototype) splitGallerySearchQuery(query string) ([]string, []string, [
 			continue
 		}
 
-		overlayTerms = append(overlayTerms, normalized)
+		remoteTags = append(remoteTags, normalized)
 	}
 
 	return remoteTags, daemonSystem, overlayTerms
@@ -1979,7 +1969,7 @@ func (p *prototype) searchSuggestionMatches(term string) bool {
 		return false
 	}
 
-	for _, suggestion := range p.searchSuggestions {
+	for _, suggestion := range p.activePane().searchSuggestions {
 		if strings.ToLower(strings.TrimSpace(suggestion)) == normalizedTerm {
 			return true
 		}
@@ -1992,15 +1982,15 @@ func (p *prototype) nextGalleryRequestID() uint64 {
 	p.stateMu.Lock()
 	defer p.stateMu.Unlock()
 
-	p.galleryRequestID++
-	return p.galleryRequestID
+	p.activePane().galleryRequestID++
+	return p.activePane().galleryRequestID
 }
 
 func (p *prototype) isCurrentGalleryRequest(requestID uint64) bool {
 	p.stateMu.RLock()
 	defer p.stateMu.RUnlock()
 
-	return p.galleryRequestID == requestID
+	return p.activePane().galleryRequestID == requestID
 }
 
 func (p *prototype) loadRecentPage(offset int, selectFileID int64, successStatus string, appendResults bool) {
@@ -2009,7 +1999,7 @@ func (p *prototype) loadRecentPage(offset int, selectFileID int64, successStatus
 		return
 	}
 
-	if appendResults && p.recentLoadBusy {
+	if appendResults && p.activePane().recentLoadBusy {
 		return
 	}
 
@@ -2017,9 +2007,10 @@ func (p *prototype) loadRecentPage(offset int, selectFileID int64, successStatus
 		offset = 0
 	}
 	requestID := p.nextGalleryRequestID()
-	p.recentLoadBusy = true
+	p.activePane().recentLoadBusy = true
+	recentLimit := p.activePane().recentLimit
 
-	currentSelection := p.selectedFileID
+	currentSelection := p.activePane().selectedFileID
 	if appendResults {
 		p.setStatus("Loading more recent files from hydrusd...")
 	} else {
@@ -2030,10 +2021,10 @@ func (p *prototype) loadRecentPage(offset int, selectFileID int64, successStatus
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 
-		page, err := connection.client.ListRecent(ctx, offset, p.recentLimit)
+		page, err := connection.client.ListRecent(ctx, offset, recentLimit)
 		if err != nil {
 			fyne.Do(func() {
-				p.recentLoadBusy = false
+				p.activePane().recentLoadBusy = false
 				if !p.isCurrentOperation(connection) || !p.isCurrentGalleryRequest(requestID) {
 					return
 				}
@@ -2045,7 +2036,7 @@ func (p *prototype) loadRecentPage(offset int, selectFileID int64, successStatus
 		}
 
 		fyne.Do(func() {
-			p.recentLoadBusy = false
+			p.activePane().recentLoadBusy = false
 			if !p.isCurrentOperation(connection) || !p.isCurrentGalleryRequest(requestID) {
 				return
 			}
@@ -2070,7 +2061,7 @@ func (p *prototype) loadSearchPage(offset int, selectFileID int64, successStatus
 		return
 	}
 
-	if appendResults && p.recentLoadBusy {
+	if appendResults && p.activePane().recentLoadBusy {
 		return
 	}
 
@@ -2078,19 +2069,20 @@ func (p *prototype) loadSearchPage(offset int, selectFileID int64, successStatus
 		offset = 0
 	}
 
-	remoteTags, daemonSystem, _ := p.splitGallerySearchQuery(p.galleryFilterQuery)
-	if len(remoteTags) == 0 && len(daemonSystem) == 0 && !isDaemonCapableSort(p.gallerySortMode) {
-		p.searchResults = nil
-		p.searchHasMore = false
-		p.searchNextOffset = 0
+	remoteTags, daemonSystem, _ := p.splitGallerySearchQuery(p.activePane().galleryFilterQuery)
+	if len(remoteTags) == 0 && len(daemonSystem) == 0 && !isDaemonCapableSort(p.activePane().gallerySortMode) {
+		p.activePane().searchResults = nil
+		p.activePane().searchHasMore = false
+		p.activePane().searchNextOffset = 0
 		p.renderGrid()
 		return
 	}
 
 	requestID := p.nextGalleryRequestID()
-	p.recentLoadBusy = true
+	p.activePane().recentLoadBusy = true
+	recentLimit := p.activePane().recentLimit
 
-	currentSelection := p.selectedFileID
+	currentSelection := p.activePane().selectedFileID
 	if appendResults {
 		p.setStatus("Loading more matching local files from hydrusd...")
 	} else {
@@ -2105,10 +2097,10 @@ func (p *prototype) loadSearchPage(offset int, selectFileID int64, successStatus
 			SortBy:           mapDaemonSort(sortMode),
 			SystemPredicates: daemonSystem,
 		}
-		page, err := connection.client.SearchByTags(ctx, remoteTags, offset, p.recentLimit, opts)
+		page, err := connection.client.SearchByTags(ctx, remoteTags, offset, recentLimit, opts)
 		if err != nil {
 			fyne.Do(func() {
-				p.recentLoadBusy = false
+				p.activePane().recentLoadBusy = false
 				if !p.isCurrentOperation(connection) || !p.isCurrentGalleryRequest(requestID) {
 					return
 				}
@@ -2120,7 +2112,7 @@ func (p *prototype) loadSearchPage(offset int, selectFileID int64, successStatus
 		}
 
 		fyne.Do(func() {
-			p.recentLoadBusy = false
+			p.activePane().recentLoadBusy = false
 			if !p.isCurrentOperation(connection) || !p.isCurrentGalleryRequest(requestID) {
 				return
 			}
@@ -2136,47 +2128,47 @@ func (p *prototype) loadSearchPage(offset int, selectFileID int64, successStatus
 			}
 			p.setStatus(successStatus)
 		})
-	}(connection, currentSelection, offset, appendResults, requestID, append([]string(nil), remoteTags...), append([]string(nil), daemonSystem...), p.gallerySortMode)
+	}(connection, currentSelection, offset, appendResults, requestID, append([]string(nil), remoteTags...), append([]string(nil), daemonSystem...), p.activePane().gallerySortMode)
 }
 
 func (p *prototype) applyRecentPage(page daemonclient.RecentPage, preferredFileID int64) {
-	p.recentLimit = page.Limit
-	if p.recentLimit <= 0 {
-		p.recentLimit = recentPageLimit
+	p.activePane().recentLimit = page.Limit
+	if p.activePane().recentLimit <= 0 {
+		p.activePane().recentLimit = recentPageLimit
 	}
-	p.recentHasMore = page.HasMore
-	p.recentNextOffset = page.Offset + len(page.Items)
+	p.activePane().recentHasMore = page.HasMore
+	p.activePane().recentNextOffset = page.Offset + len(page.Items)
 	p.applyRecentItems(page.Items, preferredFileID, true)
 }
 
 func (p *prototype) applySearchPage(page daemonclient.RecentPage, preferredFileID int64) {
 	if page.Limit > 0 {
-		p.recentLimit = page.Limit
+		p.activePane().recentLimit = page.Limit
 	}
-	if p.recentLimit <= 0 {
-		p.recentLimit = recentPageLimit
+	if p.activePane().recentLimit <= 0 {
+		p.activePane().recentLimit = recentPageLimit
 	}
-	p.searchHasMore = page.HasMore
-	p.searchNextOffset = page.Offset + len(page.Items)
+	p.activePane().searchHasMore = page.HasMore
+	p.activePane().searchNextOffset = page.Offset + len(page.Items)
 	p.applySearchItems(page.Items, preferredFileID)
 }
 
 func (p *prototype) appendRecentPage(page daemonclient.RecentPage, preferredFileID int64) {
 	if page.Limit > 0 {
-		p.recentLimit = page.Limit
+		p.activePane().recentLimit = page.Limit
 	}
-	p.recentHasMore = page.HasMore
-	p.recentNextOffset = page.Offset + len(page.Items)
+	p.activePane().recentHasMore = page.HasMore
+	p.activePane().recentNextOffset = page.Offset + len(page.Items)
 
 	if len(page.Items) == 0 {
 		p.updateActionState()
 		return
 	}
 
-	combined := make([]daemonclient.RecentItem, 0, len(p.recent)+len(page.Items))
-	combined = append(combined, p.recent...)
-	seen := make(map[int64]struct{}, len(p.recent))
-	for _, item := range p.recent {
+	combined := make([]daemonclient.RecentItem, 0, len(p.activePane().recent)+len(page.Items))
+	combined = append(combined, p.activePane().recent...)
+	seen := make(map[int64]struct{}, len(p.activePane().recent))
+	for _, item := range p.activePane().recent {
 		seen[item.FileID] = struct{}{}
 	}
 	for _, item := range page.Items {
@@ -2187,11 +2179,11 @@ func (p *prototype) appendRecentPage(page daemonclient.RecentPage, preferredFile
 		combined = append(combined, item)
 	}
 
-	p.recent = combined
+	p.activePane().recent = combined
 	if preferredFileID > 0 && !p.hasRecentFile(preferredFileID) {
 		preferredFileID = 0
 	}
-	p.selectedFileID = preferredFileID
+	p.activePane().selectedFileID = preferredFileID
 	p.renderGrid()
 	p.refreshSearchSuggestions()
 	p.updateActionState()
@@ -2199,20 +2191,20 @@ func (p *prototype) appendRecentPage(page daemonclient.RecentPage, preferredFile
 
 func (p *prototype) appendSearchPage(page daemonclient.RecentPage, preferredFileID int64) {
 	if page.Limit > 0 {
-		p.recentLimit = page.Limit
+		p.activePane().recentLimit = page.Limit
 	}
-	p.searchHasMore = page.HasMore
-	p.searchNextOffset = page.Offset + len(page.Items)
+	p.activePane().searchHasMore = page.HasMore
+	p.activePane().searchNextOffset = page.Offset + len(page.Items)
 
 	if len(page.Items) == 0 {
 		p.updateActionState()
 		return
 	}
 
-	combined := make([]daemonclient.RecentItem, 0, len(p.searchResults)+len(page.Items))
-	combined = append(combined, p.searchResults...)
-	seen := make(map[int64]struct{}, len(p.searchResults))
-	for _, item := range p.searchResults {
+	combined := make([]daemonclient.RecentItem, 0, len(p.activePane().searchResults)+len(page.Items))
+	combined = append(combined, p.activePane().searchResults...)
+	seen := make(map[int64]struct{}, len(p.activePane().searchResults))
+	for _, item := range p.activePane().searchResults {
 		seen[item.FileID] = struct{}{}
 	}
 	for _, item := range page.Items {
@@ -2223,11 +2215,11 @@ func (p *prototype) appendSearchPage(page daemonclient.RecentPage, preferredFile
 		combined = append(combined, item)
 	}
 
-	p.searchResults = combined
+	p.activePane().searchResults = combined
 	if preferredFileID > 0 && !p.hasSearchFile(preferredFileID) {
 		preferredFileID = 0
 	}
-	p.selectedFileID = preferredFileID
+	p.activePane().selectedFileID = preferredFileID
 	p.renderGrid()
 	p.refreshSearchSuggestions()
 	p.updateActionState()
@@ -2249,22 +2241,22 @@ func (p *prototype) applyRecentItems(items []daemonclient.RecentItem, preferredF
 		p.tileMetadataMu.Unlock()
 	}
 
-	p.recent = items
+	p.activePane().recent = items
 	if preferredFileID > 0 && !p.hasRecentFile(preferredFileID) {
 		preferredFileID = 0
 	}
 
-	p.selectedFileID = preferredFileID
+	p.activePane().selectedFileID = preferredFileID
 	p.renderGrid()
 	p.refreshSearchSuggestions()
 	p.updateActionState()
 
-	if p.selectedFileID > 0 {
+	if p.activePane().selectedFileID > 0 {
 		p.metadataLabel.SetText("Loading selected-file metadata from hydrusd...")
 		p.setRightTagsText("Loading tag metadata from hydrusd...")
 		p.setLeftTagsText("Loading selected-file tags from hydrusd...")
-		p.loadSelectedPreview(p.selectedFileID)
-		p.loadSelectedMetadata(p.selectedFileID)
+		p.loadSelectedPreview(p.activePane().selectedFileID)
+		p.loadSelectedMetadata(p.activePane().selectedFileID)
 		return
 	}
 
@@ -2276,22 +2268,22 @@ func (p *prototype) applyRecentItems(items []daemonclient.RecentItem, preferredF
 }
 
 func (p *prototype) applySearchItems(items []daemonclient.RecentItem, preferredFileID int64) {
-	p.searchResults = items
+	p.activePane().searchResults = items
 	if preferredFileID > 0 && !p.hasSearchFile(preferredFileID) {
 		preferredFileID = 0
 	}
 
-	p.selectedFileID = preferredFileID
+	p.activePane().selectedFileID = preferredFileID
 	p.renderGrid()
 	p.refreshSearchSuggestions()
 	p.updateActionState()
 
-	if p.selectedFileID > 0 {
+	if p.activePane().selectedFileID > 0 {
 		p.metadataLabel.SetText("Loading selected-file metadata from hydrusd...")
 		p.setRightTagsText("Loading tag metadata from hydrusd...")
 		p.setLeftTagsText("Loading selected-file tags from hydrusd...")
-		p.loadSelectedPreview(p.selectedFileID)
-		p.loadSelectedMetadata(p.selectedFileID)
+		p.loadSelectedPreview(p.activePane().selectedFileID)
+		p.loadSelectedMetadata(p.activePane().selectedFileID)
 		return
 	}
 
@@ -2306,24 +2298,24 @@ func (p *prototype) renderGrid() {
 	p.ensureGridWrap()
 
 	if len(p.activeGalleryItems()) == 0 {
-		p.gridHost.Objects = nil
-		p.gridHost.Refresh()
+		p.activePane().gridHost.Objects = nil
+		p.activePane().gridHost.Refresh()
 		return
 	}
 
-	p.gridHost.Objects = []fyne.CanvasObject{
-		p.gridWrap,
+	p.activePane().gridHost.Objects = []fyne.CanvasObject{
+		p.activePane().gridWrap,
 	}
-	p.gridWrap.Refresh()
-	p.gridHost.Refresh()
+	p.activePane().gridWrap.Refresh()
+	p.activePane().gridHost.Refresh()
 }
 
 func (p *prototype) ensureGridWrap() {
-	if p.gridWrap != nil {
+	if p.activePane().gridWrap != nil {
 		return
 	}
 
-	p.gridWrap = widget.NewGridWrap(
+	p.activePane().gridWrap = widget.NewGridWrap(
 		func() int {
 			return len(p.activeGalleryItems())
 		},
@@ -2351,7 +2343,7 @@ func (p *prototype) ensureGridWrap() {
 				subtitle,
 				resource,
 				overlay,
-				recentItem.FileID == p.selectedFileID,
+				recentItem.FileID == p.activePane().selectedFileID,
 				func() {
 					p.selectFile(recentItem.FileID)
 				},
@@ -2365,12 +2357,10 @@ func (p *prototype) ensureGridWrap() {
 				p.ensurePreviewResource(recentItem)
 			}
 
-			if !hasMetadata && gallerySortRequiresMetadata(p.gallerySortMode) {
-				p.ensureTileMetadata(recentItem)
-			}
+			p.ensureTileMetadata(recentItem)
 		},
 	)
-	p.gridWrap.OnSelected = func(id widget.GridWrapItemID) {
+	p.activePane().gridWrap.OnSelected = func(id widget.GridWrapItemID) {
 		items := p.activeGalleryItems()
 		if id < 0 || id >= len(items) {
 			return
@@ -2386,12 +2376,61 @@ func (p *prototype) monitorRecentGridScroll() {
 	for range ticker.C {
 		fyne.Do(func() {
 			p.maybeLoadMoreRecent()
+			p.maybeEnsureVisibleMetadata()
 		})
 	}
 }
 
+func (p *prototype) maybeEnsureVisibleMetadata() {
+	if p.activePane().gridWrap == nil {
+		return
+	}
+	connection := p.currentConnection()
+	if !connection.connected || connection.client == nil {
+		return
+	}
+
+	columns := p.activePane().gridWrap.ColumnCount()
+	if columns <= 0 {
+		return
+	}
+	if p.activePane().gridWrap.Size().Height <= 0 {
+		return
+	}
+
+	items := p.activeGalleryItems()
+	if len(items) == 0 {
+		return
+	}
+
+	padding := theme.Padding()
+	rowHeight := float32(newMediaTile().MinSize().Height) + padding
+	scrollOffset := p.activePane().gridWrap.GetScrollOffset()
+	viewHeight := p.activePane().gridWrap.Size().Height
+
+	firstVisibleRow := int(scrollOffset / rowHeight)
+	if firstVisibleRow < 0 {
+		firstVisibleRow = 0
+	}
+	lastVisibleRow := int((scrollOffset+viewHeight)/rowHeight) + 1
+
+	firstIdx := firstVisibleRow * columns
+	lastIdx := (lastVisibleRow+1)*columns - 1
+	if firstIdx < 0 {
+		firstIdx = 0
+	}
+	if lastIdx >= len(items) {
+		lastIdx = len(items) - 1
+	}
+
+	for i := firstIdx; i <= lastIdx; i++ {
+		p.ensureTileMetadata(items[i])
+		p.ensureTileTagMetadata(items[i])
+	}
+}
+
 func (p *prototype) maybeLoadMoreRecent() {
-	if p.gridWrap == nil || p.recentLoadBusy {
+	if p.activePane().gridWrap == nil || p.activePane().recentLoadBusy {
 		return
 	}
 
@@ -2400,23 +2439,23 @@ func (p *prototype) maybeLoadMoreRecent() {
 		return
 	}
 
-	items := p.recent
-	hasMore := p.recentHasMore
-	nextOffset := p.recentNextOffset
+	items := p.activePane().recent
+	hasMore := p.activePane().recentHasMore
+	nextOffset := p.activePane().recentNextOffset
 	loadMore := func() {
-		p.loadRecentPage(nextOffset, p.selectedFileID, "Loaded more recent files from hydrusd.", true)
+		p.loadRecentPage(nextOffset, p.activePane().selectedFileID, "Loaded more recent files from hydrusd.", true)
 	}
 
 	if p.galleryUsesDaemonSearch() {
-		if len(p.searchResults) == 0 {
+		if len(p.activePane().searchResults) == 0 {
 			return
 		}
 
-		items = p.searchResults
-		hasMore = p.searchHasMore
-		nextOffset = p.searchNextOffset
+		items = p.activePane().searchResults
+		hasMore = p.activePane().searchHasMore
+		nextOffset = p.activePane().searchNextOffset
 		loadMore = func() {
-			p.loadSearchPage(nextOffset, p.selectedFileID, "Loaded more matching local files from hydrusd.", true)
+			p.loadSearchPage(nextOffset, p.activePane().selectedFileID, "Loaded more matching local files from hydrusd.", true)
 		}
 	}
 
@@ -2424,17 +2463,17 @@ func (p *prototype) maybeLoadMoreRecent() {
 		return
 	}
 
-	columns := p.gridWrap.ColumnCount()
+	columns := p.activePane().gridWrap.ColumnCount()
 	if columns <= 0 {
 		return
 	}
-	if p.gridWrap.Size().Height <= 0 || p.gridWrap.Size().Width <= 0 {
+	if p.activePane().gridWrap.Size().Height <= 0 || p.activePane().gridWrap.Size().Width <= 0 {
 		return
 	}
 
 	padding := theme.Padding()
 	rowHeight := float32(newMediaTile().MinSize().Height) + padding
-	visibleBottom := p.gridWrap.GetScrollOffset() + p.gridWrap.Size().Height
+	visibleBottom := p.activePane().gridWrap.GetScrollOffset() + p.activePane().gridWrap.Size().Height
 	if visibleBottom <= 0 {
 		return
 	}
@@ -2454,11 +2493,11 @@ func (p *prototype) selectFile(fileID int64) {
 	if !p.currentConnection().connected {
 		return
 	}
-	if p.selectedFileID == fileID {
+	if p.activePane().selectedFileID == fileID {
 		return
 	}
 
-	p.selectedFileID = fileID
+	p.activePane().selectedFileID = fileID
 	p.renderGrid()
 	p.updateActionState()
 	p.metadataLabel.SetText("Loading selected-file metadata from hydrusd...")
@@ -2507,7 +2546,7 @@ func (p *prototype) loadSelectedPreview(fileID int64) {
 			}
 
 			fyne.Do(func() {
-				if !p.isCurrentOperation(connection) || !p.isCurrentPreviewRequest(requestID) || p.selectedFileID != item.FileID {
+				if !p.isCurrentOperation(connection) || !p.isCurrentPreviewRequest(requestID) || p.activePane().selectedFileID != item.FileID {
 					return
 				}
 
@@ -2518,7 +2557,7 @@ func (p *prototype) loadSelectedPreview(fileID int64) {
 
 		if len(payload) == 0 {
 			fyne.Do(func() {
-				if !p.isCurrentOperation(connection) || !p.isCurrentPreviewRequest(requestID) || p.selectedFileID != item.FileID {
+				if !p.isCurrentOperation(connection) || !p.isCurrentPreviewRequest(requestID) || p.activePane().selectedFileID != item.FileID {
 					return
 				}
 
@@ -2530,7 +2569,7 @@ func (p *prototype) loadSelectedPreview(fileID int64) {
 		resource, err := buildSelectedPreviewResource(ctx, payload, item.MIME, item.FileID)
 		if err != nil {
 			fyne.Do(func() {
-				if !p.isCurrentOperation(connection) || !p.isCurrentPreviewRequest(requestID) || p.selectedFileID != item.FileID {
+				if !p.isCurrentOperation(connection) || !p.isCurrentPreviewRequest(requestID) || p.activePane().selectedFileID != item.FileID {
 					return
 				}
 
@@ -2541,7 +2580,7 @@ func (p *prototype) loadSelectedPreview(fileID int64) {
 		p.storeSelectedPreview(item, resource)
 
 		fyne.Do(func() {
-			if !p.isCurrentOperation(connection) || !p.isCurrentPreviewRequest(requestID) || p.selectedFileID != item.FileID {
+			if !p.isCurrentOperation(connection) || !p.isCurrentPreviewRequest(requestID) || p.activePane().selectedFileID != item.FileID {
 				return
 			}
 
@@ -2595,7 +2634,7 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 					return
 				}
 
-				if p.selectedFileID != selectedFileID {
+				if p.activePane().selectedFileID != selectedFileID {
 					return
 				}
 
@@ -2613,7 +2652,7 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 				return
 			}
 
-			if p.selectedFileID != selectedFileID {
+			if p.activePane().selectedFileID != selectedFileID {
 				return
 			}
 
@@ -2640,7 +2679,7 @@ func (p *prototype) loadSelectedMetadata(fileID int64) {
 			p.refreshSearchSuggestions()
 		})
 
-		if p.selectedFileID != selectedFileID {
+		if p.activePane().selectedFileID != selectedFileID {
 			slog.Debug("loadSelectedMetadata: file deselected before tag load, skipping", "file_id", selectedFileID)
 			return
 		}
@@ -2680,7 +2719,7 @@ func (p *prototype) loadSelectedTags(connection connectionSnapshot, fileID int64
 		}
 		slog.Warn("loadSelectedTags: fetch failed", "file_id", fileID, "err", err)
 		fyne.Do(func() {
-			if !p.isCurrentOperation(connection) || p.selectedFileID != fileID {
+			if !p.isCurrentOperation(connection) || p.activePane().selectedFileID != fileID {
 				return
 			}
 			p.setRightTagsText("Could not load selected-file tag metadata from hydrusd.")
@@ -2698,8 +2737,8 @@ func (p *prototype) loadSelectedTags(connection connectionSnapshot, fileID int64
 	p.tileMetadataMu.Unlock()
 
 	fyne.Do(func() {
-		if !p.isCurrentOperation(connection) || p.selectedFileID != fileID {
-			slog.Debug("loadSelectedTags: skipping UI update, file no longer selected", "file_id", fileID, "selected", p.selectedFileID)
+		if !p.isCurrentOperation(connection) || p.activePane().selectedFileID != fileID {
+			slog.Debug("loadSelectedTags: skipping UI update, file no longer selected", "file_id", fileID, "selected", p.activePane().selectedFileID)
 			return
 		}
 		p.setRightTagsMetadata(cached)
@@ -2795,6 +2834,7 @@ func (p *prototype) presentWatcherWindow(title string, content fyne.CanvasObject
 			p.cancelWatcherRequest()
 			if p.watcherWindow == watcherWindow {
 				p.watcherWindow = nil
+				p.watcherSurface = nil
 			}
 		})
 
@@ -2807,22 +2847,25 @@ func (p *prototype) presentWatcherWindow(title string, content fyne.CanvasObject
 			}
 		})
 
+		surface := newWatcherSurface(content, p.navigateWatcher)
+		watcherWindow.SetContent(surface)
+		p.watcherSurface = surface
 		p.watcherWindow = watcherWindow
+	} else {
+		p.watcherSurface.SwapContent(content)
 	}
 
 	p.watcherWindow.SetTitle(title)
-	surface := newWatcherSurface(content, p.navigateWatcher)
-	p.watcherWindow.SetContent(surface)
 	p.watcherWindow.Show()
 	p.watcherWindow.RequestFocus()
 }
 
 func (p *prototype) navigateWatcher(delta int) {
 	items := p.activeGalleryItems()
-	nextFileID, nextIndex := nextWatcherFileID(items, p.selectedFileID, delta)
-	if nextFileID > 0 && nextFileID != p.selectedFileID {
-		if p.gridWrap != nil {
-			p.gridWrap.ScrollTo(widget.GridWrapItemID(nextIndex))
+	nextFileID, nextIndex := nextWatcherFileID(items, p.activePane().selectedFileID, delta)
+	if nextFileID > 0 && nextFileID != p.activePane().selectedFileID {
+		if p.activePane().gridWrap != nil {
+			p.activePane().gridWrap.ScrollTo(widget.GridWrapItemID(nextIndex))
 		}
 		p.selectFile(nextFileID)
 		p.openNativeWatcherForFile(nextFileID)
@@ -2937,8 +2980,8 @@ func (p *prototype) isCurrentSearchSuggestionRequest(requestID uint64) bool {
 }
 
 func (p *prototype) renderSearchSuggestions(next []string, hint string) {
-	p.searchSuggestions = append([]string(nil), next...)
-	if len(p.searchSuggestions) == 0 {
+	p.activePane().searchSuggestions = append([]string(nil), next...)
+	if len(p.activePane().searchSuggestions) == 0 {
 		p.searchSuggestionsList.Hide()
 	} else {
 		p.searchSuggestionsList.Show()
@@ -3113,7 +3156,7 @@ func (p *prototype) clearTileMetadataLoad(fileID int64, generation uint64) {
 }
 
 func (p *prototype) shouldPrefetchTileMetadata(fileID int64) bool {
-	if fileID <= 0 || fileID == p.selectedFileID {
+	if fileID <= 0 || fileID == p.activePane().selectedFileID {
 		return false
 	}
 
@@ -3203,6 +3246,88 @@ func (p *prototype) ensureTileMetadata(item daemonclient.RecentItem) {
 	}(connection, item, generation)
 }
 
+func (p *prototype) ensureTileTagMetadata(item daemonclient.RecentItem) {
+	connection := p.currentConnection()
+	if !connection.connected || connection.client == nil {
+		return
+	}
+	if !p.shouldPrefetchTileMetadata(item.FileID) {
+		return
+	}
+
+	p.tileMetadataMu.Lock()
+	generation := p.tileMetadataGen
+
+	cached, hasCached := p.tileMetadataCache[item.FileID]
+	if !hasCached || cached.FileID == 0 {
+		p.tileMetadataMu.Unlock()
+		return
+	}
+	if len(cached.Tags) > 0 {
+		p.tileMetadataMu.Unlock()
+		return
+	}
+
+	if _, loading := p.tileMetadataTagLoads[item.FileID]; loading {
+		p.tileMetadataMu.Unlock()
+		return
+	}
+	if len(p.tileMetadataTagLoads) >= tileMetadataConcurrentLimit {
+		p.tileMetadataMu.Unlock()
+		return
+	}
+
+	p.tileMetadataTagLoads[item.FileID] = struct{}{}
+	p.tileMetadataMu.Unlock()
+
+	go func(connection connectionSnapshot, fileID int64, generation uint64) {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		defer cancel()
+
+		defer func() {
+			p.tileMetadataMu.Lock()
+			if generation == p.tileMetadataGen {
+				delete(p.tileMetadataTagLoads, fileID)
+			}
+			p.tileMetadataMu.Unlock()
+		}()
+
+		metadata, err := connection.client.GetFileMetadata(ctx, fileID)
+		if err != nil {
+			return
+		}
+
+		if !p.isCurrentOperation(connection) {
+			return
+		}
+
+		p.tileMetadataMu.Lock()
+		if generation != p.tileMetadataGen {
+			p.tileMetadataMu.Unlock()
+			return
+		}
+		c := p.tileMetadataCache[fileID]
+		c.Tags = metadata.Tags
+		p.tileMetadataCache[fileID] = c
+		p.tileMetadataMu.Unlock()
+
+		fyne.Do(func() {
+			if !p.isCurrentOperation(connection) {
+				return
+			}
+			p.renderGrid()
+			if p.activePane().selectedFileID == fileID {
+				p.tileMetadataMu.Lock()
+				updated := p.tileMetadataCache[fileID]
+				p.tileMetadataMu.Unlock()
+				p.setRightTagsMetadata(updated)
+				p.setLeftTagsMetadata(updated)
+				p.refreshSearchSuggestions()
+			}
+		})
+	}(connection, item.FileID, generation)
+}
+
 func (p *prototype) updateActionState() {
 	connection := p.currentConnection()
 	connected := connection.connected
@@ -3278,7 +3403,7 @@ func (p *prototype) updateActionState() {
 		p.removeSelectedButton.Disable()
 	}
 
-	if connected && p.selectedFileID > 0 {
+	if connected && p.activePane().selectedFileID > 0 {
 		p.trashButton.Enable()
 		p.editTagsButton.Enable()
 	} else {
@@ -3296,7 +3421,7 @@ func (p *prototype) updateActionState() {
 }
 
 func (p *prototype) hasRecentFile(fileID int64) bool {
-	for _, item := range p.recent {
+	for _, item := range p.activePane().recent {
 		if item.FileID == fileID {
 			return true
 		}
@@ -3306,7 +3431,7 @@ func (p *prototype) hasRecentFile(fileID int64) bool {
 }
 
 func (p *prototype) hasSearchFile(fileID int64) bool {
-	for _, item := range p.searchResults {
+	for _, item := range p.activePane().searchResults {
 		if item.FileID == fileID {
 			return true
 		}
@@ -3316,13 +3441,13 @@ func (p *prototype) hasSearchFile(fileID int64) bool {
 }
 
 func (p *prototype) lookupGalleryItem(fileID int64) (daemonclient.RecentItem, bool) {
-	for _, item := range p.searchResults {
+	for _, item := range p.activePane().searchResults {
 		if item.FileID == fileID {
 			return item, true
 		}
 	}
 
-	for _, item := range p.recent {
+	for _, item := range p.activePane().recent {
 		if item.FileID == fileID {
 			return item, true
 		}
@@ -3411,7 +3536,7 @@ func newWatcherImageContent(item daemonclient.RecentItem, resource fyne.Resource
 		footerText = fmt.Sprintf("Resizable image viewer • %dx%d • use mouse wheel / arrow keys to navigate.", *item.Width, *item.Height)
 	}
 	footer := widget.NewLabel(footerText)
-	footer.Wrapping = fyne.TextWrapWord
+	footer.Wrapping = fyne.TextTruncate
 
 	background := canvas.NewRectangle(color.NRGBA{R: 18, G: 18, B: 20, A: 255})
 	imageContainer := container.NewPadded(imageViewer)
@@ -3441,7 +3566,7 @@ func newWatcherMessageContent(mime string, message string) fyne.CanvasObject {
 	headline.Wrapping = fyne.TextTruncate
 
 	body := widget.NewLabel(message)
-	body.Wrapping = fyne.TextWrapWord
+	body.Wrapping = fyne.TextTruncate
 	body.Alignment = fyne.TextAlignCenter
 
 	background := canvas.NewRectangle(color.NRGBA{R: 18, G: 18, B: 20, A: 255})
@@ -4143,9 +4268,9 @@ func (p *prototype) activeGalleryItems() []daemonclient.RecentItem {
 }
 
 func (p *prototype) filteredSearchItems() []daemonclient.RecentItem {
-	filtered := make([]daemonclient.RecentItem, 0, len(p.searchResults))
-	needsMetadata := !isDaemonCapableSort(p.gallerySortMode) && gallerySortRequiresMetadata(p.gallerySortMode)
-	for _, item := range p.searchResults {
+	filtered := make([]daemonclient.RecentItem, 0, len(p.activePane().searchResults))
+	needsMetadata := !isDaemonCapableSort(p.activePane().gallerySortMode) && gallerySortRequiresMetadata(p.activePane().gallerySortMode)
+	for _, item := range p.activePane().searchResults {
 		_, hasMetadata := p.lookupTileMetadata(item.FileID)
 		filtered = append(filtered, item)
 
@@ -4154,16 +4279,16 @@ func (p *prototype) filteredSearchItems() []daemonclient.RecentItem {
 		}
 	}
 
-	if !isDaemonCapableSort(p.gallerySortMode) {
-		sortRecentItemsForDisplay(filtered, p.gallerySortMode, p.lookupTileMetadata)
+	if !isDaemonCapableSort(p.activePane().gallerySortMode) {
+		sortRecentItemsForDisplay(filtered, p.activePane().gallerySortMode, p.lookupTileMetadata)
 	}
 	return filtered
 }
 
 func (p *prototype) filteredRecentItems() []daemonclient.RecentItem {
-	filtered := make([]daemonclient.RecentItem, 0, len(p.recent))
-	needsMetadata := gallerySortRequiresMetadata(p.gallerySortMode)
-	for _, item := range p.recent {
+	filtered := make([]daemonclient.RecentItem, 0, len(p.activePane().recent))
+	needsMetadata := gallerySortRequiresMetadata(p.activePane().gallerySortMode)
+	for _, item := range p.activePane().recent {
 		_, hasMetadata := p.lookupTileMetadata(item.FileID)
 		filtered = append(filtered, item)
 
@@ -4172,7 +4297,7 @@ func (p *prototype) filteredRecentItems() []daemonclient.RecentItem {
 		}
 	}
 
-	sortRecentItemsForDisplay(filtered, p.gallerySortMode, p.lookupTileMetadata)
+	sortRecentItemsForDisplay(filtered, p.activePane().gallerySortMode, p.lookupTileMetadata)
 
 	return filtered
 }

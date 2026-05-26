@@ -378,12 +378,14 @@ func (c *Client) GetDownloaderDownloaders(ctx context.Context) (map[string]strin
 	return response.Downloaders, nil
 }
 
-// QueueDownloaderURL asks hydrusd to queue a hydownloader single URL job.
 func (c *Client) QueueDownloaderURL(ctx context.Context, request coredownloader.URLRequest) error {
 	return c.doJSON(ctx, http.MethodPost, "/v1/downloader/url", request, true, nil)
 }
 
-// QueueDownloaderSubscription asks hydrusd to queue a hydownloader subscription.
+func (c *Client) QueueDownloaderGallery(ctx context.Context, request coredownloader.GalleryRequest) error {
+	return c.doJSON(ctx, http.MethodPost, "/v1/downloader/gallery", request, true, nil)
+}
+
 func (c *Client) QueueDownloaderSubscription(ctx context.Context, request coredownloader.SubscriptionRequest) error {
 	return c.doJSON(ctx, http.MethodPost, "/v1/downloader/subscription", request, true, nil)
 }

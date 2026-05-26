@@ -81,10 +81,21 @@ type Status struct {
 	LastError                   string            `json:"last_error,omitempty"`
 }
 
+type GalleryRequest struct {
+	Downloader     string `json:"downloader"`
+	Keywords       string `json:"keywords"`
+	AdditionalData string `json:"additional_data,omitempty"`
+	Priority       int64  `json:"priority,omitempty"`
+	Filter         string `json:"filter,omitempty"`
+	MaxFiles       *int64 `json:"max_files,omitempty"`
+	Autoimport     *bool  `json:"autoimport,omitempty"`
+}
+
 // Store manages downloader lifecycle, queueing, and status.
 type Store interface {
 	Status(context.Context) (Status, error)
 	QueueURL(context.Context, URLRequest) error
+	QueueGallery(context.Context, GalleryRequest) error
 	QueueSubscription(context.Context, SubscriptionRequest) error
 	Downloaders(context.Context) (map[string]string, error)
 	ActivateAutoimport(context.Context) error

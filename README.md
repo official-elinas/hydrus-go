@@ -406,6 +406,56 @@ Notes:
   desktop code in environments that do not have those headers installed; it now
   writes `bin/hydrus-desktop.wasm` instead of a misleading repo-root binary
 
+## Downloaders
+
+The desktop prototype exposes two distinct download paths that behave differently.
+
+### Single URL import
+
+Submitting a direct file URL (e.g. a `.jpg` or `.png` link) goes through
+`/v1/import/url`. The daemon fetches the file with a plain HTTP GET, streams it
+to a temp file, and runs it through the normal staged import pipeline.
+This path does **not** use hydownloader or gallery-dl and requires no
+third-party credentials. It works for any publicly accessible direct file link.
+
+### Gallery and subscription downloads
+
+Submitting a gallery page URL or a subscription goes through hydownloader, which
+uses gallery-dl under the hood to enumerate and download posts. gallery-dl
+contacts the site's API rather than scraping HTML, and some sites require
+credentials for API access even when the same content is freely visible in a
+browser.
+
+**Gelbooru** is one such site. As of current policy, Gelbooru's JSON API
+(`page=dapi`) returns `401 Unauthorized` for any request that does not include a
+registered account's `api-key` and `user-id`, even for entirely public/SFW
+content. A free account is sufficient.
+
+To enable Gelbooru gallery and subscription downloads:
+
+1. Register a free account at gelbooru.com (or log into an existing one).
+2. Go to **My Account → Options** and locate the **API** section.
+3. Copy your `API Key` and `User ID`.
+4. Add them to the hydownloader gallery-dl user config:
+
+```
+<hydownloader-data-dir>/gallery-dl-user-config.json
+```
+
+```json
+{
+  "extractor": {
+    "gelbooru": {
+      "api-key": "YOUR_API_KEY",
+      "user-id": "YOUR_USER_ID"
+    }
+  }
+}
+```
+
+This is a Gelbooru API policy requirement, not a limitation of hydrus-go or
+hydownloader.
+
 ## Developer loop
 
 ```bash

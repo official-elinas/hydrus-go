@@ -269,7 +269,63 @@ func (m *Manager) QueueURL(ctx context.Context, request coredownloader.URLReques
 	return nil
 }
 
-// QueueSubscription queues one hydownloader subscription.
+// QueueGallery queues a one-shot gallery fetch through hydownloader.
+// hydownloader has no dedicated gallery endpoint; the correct mechanism is a
+// subscription with a short check_interval. hydownloader enforces a minimum of
+// 60 seconds, so we use that. The subscription will run once immediately and
+// then sit idle — functionally a one-shot gallery crawl.
+func (m *Manager) QueueGallery(ctx context.Context, request coredownloader.GalleryRequest) error {
+	if m == nil {
+		return &coredownloader.NotConfiguredError{Message: "hydownloader integration is disabled"}
+	}
+
+	downloaderName := strings.TrimSpace(request.Downloader)
+	keywords := strings.TrimSpace(request.Keywords)
+	if downloaderName == "" {
+		return &coredownloader.RequestError{Message: "downloader is required"}
+	}
+	if keywords == "" {
+		return &coredownloader.RequestError{Message: "keywords are required"}
+	}
+
+	// Use the minimum check_interval hydownloader accepts (60s). The subscription
+	// runs once immediately; it is effectively a one-shot gallery fetch.
+	const oneShotInterval = 60
+
+	body := []map[string]any{{
+		"downloader":      downloaderName,
+		"keywords":        keywords,
+		"additional_data": strings.TrimSpace(request.AdditionalData),
+		"check_interval":  oneShotInterval,
+		"priority":        request.Priority,
+		"filter":          strings.TrimSpace(request.Filter),
+	}}
+	if request.MaxFiles != nil {
+		body[0]["max_files_initial"] = *request.MaxFiles
+	}
+	if request.Autoimport != nil {
+		body[0]["autoimport"] = *request.Autoimport
+	} else {
+		body[0]["autoimport"] = m.cfg.Autoimport
+	}
+
+	var response struct {
+		Status bool   `json:"status"`
+		Reason string `json:"reason"`
+	}
+	if err := m.postJSON(ctx, "/add_or_update_subscriptions", body, &response); err != nil {
+		return err
+	}
+	if !response.Status {
+		if response.Reason != "" {
+			return fmt.Errorf("hydownloader rejected gallery subscription: %s", response.Reason)
+		}
+		return fmt.Errorf("hydownloader rejected gallery subscription")
+	}
+
+	return nil
+}
+
 func (m *Manager) QueueSubscription(ctx context.Context, request coredownloader.SubscriptionRequest) error {
 	if m == nil {
 		return &coredownloader.NotConfiguredError{Message: "hydownloader integration is disabled"}

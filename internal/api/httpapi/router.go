@@ -73,6 +73,9 @@ func NewHandler(
 	}
 
 	mux := http.NewServeMux()
+	mux.Handle("/openapi.json", server.get("/openapi.json", server.handleGetOpenAPISpec))
+	mux.Handle("/docs", server.get("/docs", server.handleGetDocs))
+	mux.Handle("/redoc", server.get("/redoc", server.handleGetRedoc))
 	mux.Handle("/", server.get("/", server.handleWelcome))
 	mux.Handle("/healthz", server.get("/healthz", server.handleHealthz))
 	mux.Handle("/api_version", server.get("/api_version", server.handleAPIVersion))
@@ -88,6 +91,7 @@ func NewHandler(
 	mux.Handle("/v1/downloader/status", server.get("/v1/downloader/status", server.handleGetDownloaderStatus))
 	mux.Handle("/v1/downloader/downloaders", server.get("/v1/downloader/downloaders", server.handleGetDownloaderDownloaders))
 	mux.Handle("/v1/downloader/url", server.post("/v1/downloader/url", server.handlePostDownloaderURL))
+	mux.Handle("/v1/downloader/gallery", server.post("/v1/downloader/gallery", server.handlePostDownloaderGallery))
 	mux.Handle("/v1/downloader/subscription", server.post("/v1/downloader/subscription", server.handlePostDownloaderSubscription))
 	mux.Handle(
 		"/get_files/file_metadata",

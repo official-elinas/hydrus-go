@@ -13,7 +13,7 @@ import (
 	"github.com/official-elinas/hydrus-go/internal/core/fileimport"
 )
 
-const urlImportResponseLimitBytes int64 = 4 << 30
+const urlImportResponseLimitBytes int64 = 5 << 30
 
 // ImportURL downloads one direct file URL through the daemon and imports the
 // result through the existing staged upload pipeline.

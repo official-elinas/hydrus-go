@@ -50,6 +50,15 @@ func (p *prototype) ensureDefaultSession(client daemonSessionClient) {
 	})
 }
 
+func (p *prototype) paneFor(id int64) *searchPane {
+	if pane, ok := p.panes[id]; ok {
+		return pane
+	}
+	pane := newSearchPane()
+	p.panes[id] = pane
+	return pane
+}
+
 func (p *prototype) rebuildSessionTabs() {
 	if p.sessionTabs == nil {
 		return
@@ -70,7 +79,8 @@ func (p *prototype) rebuildSessionTabs() {
 
 	items := make([]*container.TabItem, len(p.sessions))
 	for i, s := range p.sessions {
-		items[i] = container.NewTabItem(s.Name, nil)
+		pane := p.paneFor(s.ID)
+		items[i] = container.NewTabItem(s.Name, container.NewPadded(pane.gridHost))
 	}
 	p.sessionTabs.SetItems(items)
 
@@ -87,15 +97,20 @@ func (p *prototype) rebuildSessionTabs() {
 
 func (p *prototype) activateSession(s clientsessions.Session) {
 	p.activeSessionID = s.ID
+	pane := p.paneFor(s.ID)
 
 	p.tabSwitching = true
 	p.searchEntry.SetText(s.Query)
 	if s.SortMode != "" {
+		pane.gallerySortMode = s.SortMode
 		p.gallerySortSelect.SetSelected(s.SortMode)
 	}
 	p.tabSwitching = false
 
-	p.reloadGallery(0, "")
+	p.galleryHost.Objects = []fyne.CanvasObject{pane.gridHost}
+	p.galleryHost.Refresh()
+
+	p.reloadGallery(0, "Session loaded.")
 }
 
 func (p *prototype) persistActiveSession() {
@@ -107,7 +122,7 @@ func (p *prototype) persistActiveSession() {
 		return
 	}
 	query := p.searchEntry.Text
-	sortMode := p.gallerySortMode
+	sortMode := p.activePane().gallerySortMode
 	id := p.activeSessionID
 	go func() {
 		ctx := context.Background()
@@ -163,6 +178,7 @@ func (p *prototype) closeSearchSession(s clientsessions.Session) {
 			}
 		}
 		p.sessions = remaining
+		delete(p.panes, s.ID)
 		if len(p.sessions) == 0 {
 			p.newSearchSession()
 			return
